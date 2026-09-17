@@ -1,36 +1,34 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Super Admin Panel
 
-## Getting Started
+This application is the platform-operator UI for the n8n Automation SaaS.
 
-First, run the development server:
+## Planning status
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+The codebase is currently a Next.js application shell. Do not implement platform features until the repository planning documents are approved.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Canonical specification: [`../docs/05_SUPER_ADMIN_PANEL.md`](../docs/05_SUPER_ADMIN_PANEL.md).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Planned responsibilities
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Separate platform-admin authentication and RBAC.
+- Platform dashboard and health overview.
+- Tenant/customer/user support and lifecycle management.
+- Cross-tenant businesses and connected channel health.
+- Plan, feature, and limit administration.
+- AI provider/model registry and platform-managed credentials.
+- Usage/cost/AI/media/messaging analytics.
+- Queue, job, retry, and dead-letter diagnostics.
+- n8n workflow/version/health monitoring.
+- Redis/PostgreSQL/media/worker health summaries.
+- Feature flags and system settings.
+- Audit/security console.
+- Controlled support/impersonation features if approved.
 
-## Learn More
+## Security rules
 
-To learn more about Next.js, take a look at the following resources:
+- Super-admin privileges are separate from tenant roles.
+- Sensitive actions require explicit authorization and audit records.
+- Full tenant AI/Meta secrets are never displayed in normal admin views.
+- The UI calls the backend/API; it does not directly expose database, Redis, or n8n credentials to the browser.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Read the complete documentation starting at [`../docs/README.md`](../docs/README.md).
