@@ -44,17 +44,23 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
   const result = await query<{
     session_id: string;
     csrf_token: string;
+    mfa_verified_at: Date | null;
     user_id: string;
     email: string;
     name: string | null;
     email_verified_at: Date | null;
     platform_admin: boolean;
+    platform_admin_mfa_required: boolean;
+    platform_admin_mfa_enabled: boolean;
   }>(`
-    SELECT s.id AS session_id, s.csrf_token, u.id AS user_id, u.email, u.name,
+    SELECT s.id AS session_id, s.csrf_token, s.mfa_verified_at, u.id AS user_id, u.email, u.name,
            u.email_verified_at,
-           EXISTS(SELECT 1 FROM platform_admins pa WHERE pa.user_id=u.id AND pa.active=true) AS platform_admin
+           (pa.user_id IS NOT NULL AND pa.active=true) AS platform_admin,
+           COALESCE(pa.mfa_required,false) AS platform_admin_mfa_required,
+           COALESCE(pa.mfa_enabled,false) AS platform_admin_mfa_enabled
       FROM sessions s
       JOIN users u ON u.id=s.user_id
+      LEFT JOIN platform_admins pa ON pa.user_id=u.id
      WHERE s.token_hash=$1
        AND s.revoked_at IS NULL
        AND s.expires_at > now()
@@ -71,6 +77,9 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
     sessionId: row.session_id,
     csrfToken: row.csrf_token,
     platformAdmin: row.platform_admin,
+    platformAdminMfaRequired: row.platform_admin_mfa_required,
+    platformAdminMfaEnabled: row.platform_admin_mfa_enabled,
+    mfaVerifiedAt: row.mfa_verified_at?.toISOString() ?? null,
   };
 }
 
@@ -81,9 +90,13 @@ export async function requireAuth(request: FastifyRequest): Promise<SessionPrinc
   return principal;
 }
 
-export async function requirePlatformAdmin(request: FastifyRequest): Promise<SessionPrincipal> {
+export async function requirePlatformAdmin(request: FastifyRequest, options: { allowMfaSetup?: boolean } = {}): Promise<SessionPrincipal> {
   const principal = await requireAuth(request);
   if (!principal.platformAdmin) throw new ApiError(403, "ADMIN_REQUIRED", "Platform administrator access is required.");
+  if (principal.platformAdminMfaRequired && !options.allowMfaSetup) {
+    if (!principal.platformAdminMfaEnabled) throw new ApiError(403, "ADMIN_MFA_SETUP_REQUIRED", "Super-admin MFA must be configured before using platform administration.");
+    if (!principal.mfaVerifiedAt) throw new ApiError(401, "ADMIN_MFA_REQUIRED", "Super-admin MFA verification is required for this session.");
+  }
   return principal;
 }
 
@@ -94,6 +107,9 @@ export async function requireTenant(
 ): Promise<RequestContext> {
   const principal = request.auth?.principal ?? await requireAuth(request);
   if (principal.platformAdmin && request.headers["x-admin-tenant-access"] === "support") {
+    if (principal.platformAdminMfaRequired && (!principal.platformAdminMfaEnabled || !principal.mfaVerifiedAt)) {
+      throw new ApiError(401, "ADMIN_MFA_REQUIRED", "MFA-verified platform-admin session is required for support tenant access.");
+    }
     request.auth = { principal, tenantId, membershipRole: "OWNER" };
     return request.auth;
   }
@@ -124,15 +140,16 @@ export async function createSession(
   userId: string,
   request: FastifyRequest,
   reply: FastifyReply,
+  options: { mfaVerified?: boolean } = {},
 ): Promise<{ csrfToken: string }> {
   const token = randomToken(32);
   const csrfRaw = randomToken(24);
   const csrfHash = sha256(csrfRaw);
   const days = env().SESSION_TTL_DAYS;
   await query(`
-    INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at)
-    VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval)
-  `, [userId, sha256(token), csrfHash, request.ip || null, request.headers["user-agent"] || null, String(days)]);
+    INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
+    VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval,CASE WHEN $7 THEN now() ELSE NULL END)
+  `, [userId, sha256(token), csrfHash, request.ip || null, request.headers["user-agent"] || null, String(days), Boolean(options.mfaVerified)]);
   reply.setCookie(env().SESSION_COOKIE_NAME, token, {
     httpOnly: true,
     secure: env().NODE_ENV === "production",
