@@ -16,6 +16,7 @@ import { knowledgeRoutes } from "./routes/knowledge.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import { internalRoutes } from "./routes/internal.js";
+import { internalAiJobRoutes } from "./routes/internal-ai-jobs.js";
 import { adminRoutes } from "./routes/admin.js";
 
 const config = env();
@@ -88,6 +89,7 @@ await knowledgeRoutes(app);
 await analyticsRoutes(app);
 await webhookRoutes(app);
 await internalRoutes(app);
+await internalAiJobRoutes(app);
 await adminRoutes(app);
 
 const port = Number(process.env.PORT || 4000);
