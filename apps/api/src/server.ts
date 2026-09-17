@@ -5,6 +5,7 @@ import multipart from "@fastify/multipart";
 import { assertDatabaseReady, env, redis } from "@n8n-automation/core";
 import { ApiError, jsonError, requestId } from "./lib.js";
 import { authRoutes } from "./routes/auth.js";
+import { adminAuthRoutes } from "./routes/admin-auth.js";
 import { tenantRoutes } from "./routes/tenant.js";
 import { channelRoutes } from "./routes/channels.js";
 import { collectionRoutes } from "./routes/collections.js";
@@ -55,6 +56,7 @@ app.addHook("onRequest", async (request, reply) => {
   reply.header("x-content-type-options", "nosniff");
   reply.header("referrer-policy", "strict-origin-when-cross-origin");
   reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
+  reply.header("cross-origin-opener-policy", "same-origin");
   if (config.NODE_ENV === "production") reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
 });
 
@@ -78,6 +80,7 @@ app.get("/readyz", async (_request, reply) => {
 });
 
 await authRoutes(app);
+await adminAuthRoutes(app);
 await tenantRoutes(app);
 await channelRoutes(app);
 await collectionRoutes(app);
