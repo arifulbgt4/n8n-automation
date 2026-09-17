@@ -1,6 +1,8 @@
 # Implementation roadmap and complete task plan
 
-This file is the delivery checklist. Runtime coding starts only after the documentation is accepted. Tasks are ordered to reduce rework and to establish security/data foundations before automation complexity.
+This file is the delivery checklist. Runtime coding starts only after the documentation is accepted. Tasks are ordered to reduce rework and establish security/data foundations before automation complexity.
+
+**Infrastructure premise:** PostgreSQL host/runtime, Redis, n8n, Media Storage, reverse proxy/TLS, and host-level service management already exist outside this application repository. Tasks below integrate with those services; they do not reinstall or duplicate them.
 
 ## Phase 0 — Planning freeze and decisions
 
@@ -9,17 +11,20 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [x] Separate `app_db` from n8n internal DB.
 - [x] Remove Google Sheets from target architecture.
 - [x] Define Customer Panel and Super Admin Panel roles.
-- [x] Define Redis, queues/workers, media storage, pgvector, n8n.
+- [x] Define Redis, queues/workers, Media Storage, pgvector, n8n boundaries.
 - [x] Define dynamic collections instead of product-only schema.
 - [x] Define multi-business/multi-channel/shared-catalog model.
 - [x] Define AI providers, agents, prompt training/versioning.
 - [x] Define messaging/media reuse/rate-limit architecture.
+- [x] Confirm PostgreSQL/Redis/n8n/Media Storage infrastructure is pre-provisioned and external to this repository.
+- [x] Document Media Storage user API capabilities and integration model.
+- [x] Define n8n JSON workflow bundle/import/update/rollback model.
 - [ ] Review and approve all files in `docs/`.
 - [ ] Select backend framework/service layout.
 - [ ] Select ORM/query layer while preserving PostgreSQL contracts.
 - [ ] Select Redis queue library/runtime.
-- [ ] Document actual API contract of `admin.openmusk.store/media` and close capability gaps.
 - [ ] Decide production auth implementation/library while preserving auth contracts.
+- [ ] Confirm exact deployed n8n version before implementing automated workflow deployment.
 
 ## Phase 1 — Repository/application foundation
 
@@ -31,14 +36,16 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Add lint/typecheck/test commands across services.
 - [ ] Add CI for docs/typecheck/tests/build.
 
-### Local infrastructure
-- [ ] Add PostgreSQL development service.
-- [ ] Create separate `app_db` and `n8n_db`.
-- [ ] Enable pgvector in `app_db`.
-- [ ] Add Redis development service.
-- [ ] Configure n8n against `n8n_db` only.
-- [ ] Add development media-storage adapter/config.
-- [ ] Add health checks.
+### Existing infrastructure client integration
+- [ ] Add application PostgreSQL client configuration.
+- [ ] Create/migrate `app_db` using application migrations; do not install PostgreSQL.
+- [ ] Verify separate n8n internal DB remains n8n-owned.
+- [ ] Enable/verify pgvector in `app_db` before vector features are used.
+- [ ] Add Redis client configuration using an application/environment namespace; do not install Redis.
+- [ ] Add Media Storage adapter configuration; do not install Media Storage.
+- [ ] Add internal service-auth configuration for n8n/workers.
+- [ ] Add health/readiness checks for required external services.
+- [ ] Define environment-specific configuration without hard-coded infrastructure URLs.
 
 ### Database base
 - [ ] Create migration system.
@@ -47,6 +54,7 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Add tenant-scoped query conventions.
 - [ ] Add outbox/event tables.
 - [ ] Add audit infrastructure.
+- [ ] Add automation deployment metadata table/model.
 
 ## Phase 2 — Authentication, tenancy, and RBAC
 
@@ -97,30 +105,48 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Implement channel-specific item overrides.
 - [ ] Implement relationship/reference fields safely.
 - [ ] Implement schema version/concurrency protection.
-- [ ] Implement import/export jobs later in phase or subsequent release.
-- [ ] Add indexes based on initial query patterns.
+- [ ] Implement import/export jobs when scheduled.
+- [ ] Add indexes based on actual query patterns.
 - [ ] Ensure no tenant-created physical DB tables/columns.
 
-## Phase 5 — Media/object storage
+## Phase 5 — Existing Media Storage integration
 
-- [ ] Document OpenMusk media service upload/read/delete/health APIs.
-- [ ] Build storage adapter.
-- [ ] Tenant/business namespacing.
-- [ ] Authenticated uploads/deletes.
-- [ ] MIME/content validation.
-- [ ] File size/type limits.
-- [ ] Content hash/dedup within allowed scope.
-- [ ] Extract image/media metadata.
-- [ ] Implement `media_assets`.
+### Tenant storage identity
+- [ ] Implement `tenant_media_accounts`.
+- [ ] Define automated/internal provisioning flow for one Media Storage user per SaaS tenant.
+- [ ] Encrypt/reference tenant Media Storage bearer credentials.
+- [ ] Map plan/storage quota policy to Media Storage user quota where applicable.
+- [ ] Implement credential rotation/revocation handling.
+
+### Storage adapter
+- [ ] Implement usage call.
+- [ ] Implement multipart upload (`file`, `visibility`).
+- [ ] Implement list/pagination.
+- [ ] Implement metadata read.
+- [ ] Implement authenticated binary content read/stream.
+- [ ] Implement private/public visibility update.
+- [ ] Implement hard delete.
+- [ ] Implement structured quota/file/not-found/service errors.
+- [ ] Ensure adapter resolves configured base URL; domain code does not construct infrastructure URLs.
+
+### SaaS media domain
+- [ ] Implement `media_assets` external file/user ID mapping.
+- [ ] Persist MIME/kind/size/visibility/SHA-256 metadata.
 - [ ] Collection item media/gallery links.
+- [ ] Message/training media links.
 - [ ] Media library UI.
+- [ ] Tenant-scoped checksum deduplication policy.
+- [ ] Additional dimensions/duration/thumbnail processing as needed.
 - [ ] Reference-aware deletion/grace period.
-- [ ] Backup/restore policy.
-- [ ] Private vs provider-accessible media access strategy.
+- [ ] Private-by-default policy for conversation/training files.
+- [ ] Approved public-media policy for catalog/provider fetching.
+- [ ] Reconcile application quota with Media Storage quota errors.
+- [ ] Document/verify media backup dependency: service metadata DB + physical bytes.
 
-## Phase 6 — Redis, queue, workers
+## Phase 6 — Redis, queues, workers
 
-- [ ] Secure Redis configuration.
+- [ ] Configure Redis client against existing service.
+- [ ] Define application/environment key prefix.
 - [ ] Select queue library.
 - [ ] Define job envelope/types.
 - [ ] Inbound processing queue.
@@ -135,8 +161,9 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Worker graceful shutdown.
 - [ ] Worker heartbeats/metrics.
 - [ ] Tenant fairness/concurrency controls.
-- [ ] Distributed locks.
+- [ ] Distributed locks with TTL/ownership tokens.
 - [ ] Queue administration in Super Admin.
+- [ ] Redis-loss/outbox recovery behavior.
 
 ## Phase 7 — Conversation and webhook platform
 
@@ -173,7 +200,7 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Media limits/images per response.
 - [ ] Retry classification.
 - [ ] Dead-letter delivery state.
-- [ ] Persist final outbound message/delivery IDs.
+- [ ] Persist final outbound message/provider IDs.
 - [ ] Channel reconnect behavior.
 - [ ] Super Admin delivery diagnostics.
 
@@ -184,7 +211,9 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Reuse WhatsApp/other remote media IDs according to provider rules.
 - [ ] Detect stale/expired remote ID.
 - [ ] Lock concurrent refresh/upload.
-- [ ] Re-upload and update mapping.
+- [ ] Fetch authenticated binary from Media Storage when private.
+- [ ] Use approved public URL only where allowed/useful.
+- [ ] Re-upload and update remote mapping.
 - [ ] Multi-image response batching.
 - [ ] Continuation behavior when requested image count exceeds limit.
 - [ ] Track cache hit/miss/reupload metrics.
@@ -228,7 +257,7 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 
 ## Phase 12 — Vision/audio and multimodal runtime
 
-- [ ] Inbound screenshot/image media ingestion.
+- [ ] Inbound screenshot/image media ingestion into Media Storage.
 - [ ] Vision model bounded batching.
 - [ ] Structured observation output.
 - [ ] Match/search attached business collections.
@@ -236,7 +265,7 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Multiple screenshot logical turn.
 - [ ] Audio ingestion/transcription.
 - [ ] Transcript provenance/status.
-- [ ] Model limits/file limits/cost controls.
+- [ ] Model/file/cost controls.
 
 ## Phase 13 — RAG / pgvector knowledge
 
@@ -260,6 +289,7 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Instagram trainer support where reliable.
 - [ ] Panel simulator training examples.
 - [ ] Training sessions/examples.
+- [ ] Training media stored privately by default.
 - [ ] Approval/rejection of examples.
 - [ ] Prompt synthesis job.
 - [ ] Input source/version capture.
@@ -317,7 +347,7 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Hourly/daily rollups.
 - [ ] Customer channel analytics.
 - [ ] AI token/cost analytics.
-- [ ] Media cache/storage analytics.
+- [ ] Media Storage bytes/quota/cache analytics.
 - [ ] Business outcome analytics.
 - [ ] Plan definitions/features.
 - [ ] Hard/soft/budget/rate-limit engine.
@@ -328,7 +358,7 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 
 ## Phase 18 — Billing readiness / optional payment integration
 
-- [ ] Plans/prices/subscriptions data model.
+- [ ] Plans/prices/subscriptions model.
 - [ ] Plan assignment/change lifecycle.
 - [ ] Trial/credit model if required.
 - [ ] Usage billing record model.
@@ -336,8 +366,45 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Invoice/payment history UI.
 - [ ] Overage policy.
 - [ ] Platform-paid AI budget enforcement.
+- [ ] Storage quota/billing mapping if storage becomes plan-metered.
 
-## Phase 19 — Super Admin completion
+## Phase 19 — n8n workflow bundle implementation and delivery
+
+### Workflow files
+- [ ] Create `automation/n8n/manifest.json`.
+- [ ] Create modular JSON workflows rather than one giant workflow.
+- [ ] Meta webhook gateway workflow.
+- [ ] Inbound conversation workflow.
+- [ ] Agent runtime workflow.
+- [ ] Multimodal workflow.
+- [ ] Training workflow.
+- [ ] Follow-up workflow.
+- [ ] Health/maintenance workflow where needed.
+
+### Portability/security
+- [ ] Remove secrets/customer data from exports.
+- [ ] Remove hard-coded infrastructure URLs where configuration can be used.
+- [ ] Minimize environment-specific credential-ID coupling.
+- [ ] Define required platform/internal credential aliases.
+- [ ] Validate JSON exports in CI.
+- [ ] Record bundle/API contract/n8n compatibility version.
+
+### Existing n8n import/cutover
+- [ ] Import JSON bundle into existing n8n runtime while inactive.
+- [ ] Bind environment-specific credentials/settings.
+- [ ] Verify webhook path/schedule conflicts.
+- [ ] Execute manual/staging tests.
+- [ ] Record target workflow IDs + bundle version in deployment metadata.
+- [ ] Perform blue/green cutover for major changes.
+- [ ] Preserve previous compatible bundle for rollback window.
+- [ ] Add Super Admin expected/deployed workflow version health view.
+
+### Later automation
+- [ ] After n8n version is pinned/verified, implement supported API/CLI deployment tool.
+- [ ] Add manifest validation/dry-run/diff where feasible.
+- [ ] Prevent partial conflicting trigger activation.
+
+## Phase 20 — Super Admin completion
 
 - [ ] Platform dashboard.
 - [ ] Tenant/user support screens.
@@ -346,19 +413,19 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Channel health/reconnect diagnostics.
 - [ ] Queue/job/dead-letter operations.
 - [ ] n8n workflow health/version view.
-- [ ] Redis/Postgres/media/worker health summaries.
+- [ ] Redis/Postgres/Media/worker application-health summaries.
 - [ ] Feature flags.
 - [ ] Audit/security console.
 - [ ] Scoped impersonation/support view if approved.
 - [ ] Dangerous-action re-authentication.
 
-## Phase 20 — Security hardening
+## Phase 21 — Security hardening
 
 - [ ] Secret encryption/key rotation.
 - [ ] Super Admin MFA.
 - [ ] CSRF/security headers.
 - [ ] SSRF protection for custom provider URLs.
-- [ ] File upload hardening.
+- [ ] Media upload hardening/policy validation in addition to service validation.
 - [ ] Tenant RLS defense-in-depth where selected.
 - [ ] API authorization penetration tests.
 - [ ] Webhook signature tests.
@@ -366,59 +433,66 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [ ] Audit coverage review.
 - [ ] Privacy/retention implementation.
 - [ ] Customer export/delete workflows.
+- [ ] Verify Media Storage credentials never reach browsers/logs.
+- [ ] Verify n8n workflow JSON contains no secrets.
 
-## Phase 21 — Reliability/observability
+## Phase 22 — Reliability/observability
 
 - [ ] Structured logging.
 - [ ] Correlation IDs end to end.
 - [ ] API metrics.
-- [ ] DB/Redis metrics.
+- [ ] app DB/Redis client metrics.
 - [ ] queue depth/age/throughput.
 - [ ] worker heartbeat.
-- [ ] n8n execution health.
+- [ ] n8n workflow execution/bundle health.
 - [ ] provider error dashboards.
+- [ ] Media Storage integration errors/quota health.
 - [ ] cost anomaly alerts.
 - [ ] health/readiness endpoints.
 - [ ] circuit/degraded behavior where appropriate.
 - [ ] runbooks.
 
-## Phase 22 — Backups and disaster recovery
+## Phase 23 — Backups and disaster recovery
 
-- [ ] Automated app DB backups.
-- [ ] n8n DB backups.
-- [ ] Media backup/replication.
-- [ ] Backup encryption/off-host copy.
+- [ ] Automated/verified `app_db` backups through approved infrastructure process.
+- [ ] Confirm n8n internal backup ownership/procedure.
+- [ ] Keep workflow JSON bundle/version in Git independent of n8n DB backup.
+- [ ] Confirm Media Storage backup includes both service metadata DB and physical bytes.
+- [ ] Backup encryption/off-host copy as infrastructure policy requires.
 - [ ] Restore test.
 - [ ] Define RPO/RTO.
 - [ ] Queue/Redis loss recovery procedure.
 - [ ] Provider webhook reconciliation procedure.
 - [ ] Disaster runbook exercise.
 
-## Phase 23 — Legacy migration
+## Phase 24 — Behavioral migration from earlier prototype
 
-- [ ] Inventory reusable n8n V4.2 behaviors.
+- [ ] Inventory reusable behavior, not infrastructure/repository dependencies.
 - [ ] Rebuild spreadsheet-based config reads to SaaS API/DB reads.
 - [ ] Remove Control Spreadsheet workflows.
 - [ ] Remove Operations Spreadsheet workflows.
-- [ ] Migrate Meta routing concepts.
+- [ ] Migrate Meta routing behavior.
 - [ ] Migrate human handoff/echo protection.
 - [ ] Migrate follow-up guards.
-- [ ] Migrate image/screenshot logic.
-- [ ] Migrate remote Facebook attachment cache logic into generic media layer.
+- [ ] Migrate image/screenshot behavior.
+- [ ] Migrate reusable Facebook attachment behavior into generic media layer.
 - [ ] Migrate dynamic AI task routing.
-- [ ] Validate legacy behavior with new regression suite.
+- [ ] Validate expected behavior with new regression suite.
 
-## Phase 24 — Production launch
+## Phase 25 — Production launch
 
 - [ ] Staging full end-to-end test.
 - [ ] Load/burst tests.
 - [ ] Tenant isolation/security signoff.
-- [ ] Production secrets/configured domains.
+- [ ] Production application secrets/config injected.
 - [ ] Meta production permissions/app review as required.
-- [ ] Backups/alerts verified.
+- [ ] Infrastructure dependencies pass health/readiness checks.
+- [ ] Backups/alerts verified with infrastructure owners.
 - [ ] Super Admin MFA enforced.
 - [ ] Queue/dead-letter recovery verified.
-- [ ] Customer onboarding tested from zero configuration.
+- [ ] n8n production workflow bundle version verified.
+- [ ] Media Storage tenant mappings/quota behavior verified.
+- [ ] Customer onboarding tested from zero application configuration.
 - [ ] Operational runbook ready.
 - [ ] Controlled pilot tenants.
 - [ ] Monitor errors/costs/latency.
@@ -428,13 +502,15 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 
 A feature is not done until it has:
 
-- tenant authorization
-- validation
-- idempotency where retryable
-- audit coverage where sensitive
-- usage/metrics where operationally relevant
-- error/empty/loading states in UI
-- tests at appropriate levels
-- documentation updated
-- migration/rollback considerations
-- observability for production diagnosis
+- tenant authorization.
+- validation.
+- idempotency where retryable.
+- audit coverage where sensitive.
+- usage/metrics where operationally relevant.
+- error/empty/loading states in UI.
+- tests at appropriate levels.
+- documentation updated.
+- migration/rollback considerations.
+- observability for production diagnosis.
+- no hard-coded infrastructure-admin dependencies.
+- no secret-bearing n8n workflow artifact changes.
