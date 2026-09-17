@@ -4,7 +4,7 @@
 
 PostgreSQL is the primary database. The application uses relational tables for identities, ownership, transactions, and relationships; JSONB for tenant-defined flexible fields/configuration; and pgvector for embeddings.
 
-The SaaS database is referred to as `app_db`. The n8n internal database remains separate.
+The SaaS database is referred to as `app_db`. The n8n internal database remains separate. The PostgreSQL service itself is pre-provisioned infrastructure; this repository owns only the application schema/migrations and application credentials.
 
 ## 2. Top-level ownership model
 
@@ -21,17 +21,14 @@ Business
   +-- Agent Profiles
   +-- Conversations
   +-- Business Actions
+  +-- Media Assets
 ```
 
-Every tenant-owned table must have a clear path to `tenant_id`. Where practical, high-volume tables should carry `tenant_id` directly even if it can be derived through joins, because it improves authorization filtering, indexing, partitioning options, and incident analysis.
+Every tenant-owned table must have a clear path to `tenant_id`. Where practical, high-volume tables should carry `tenant_id` directly even if it can be derived through joins.
 
 ## 3. Core identity and tenancy tables
 
 ### `users`
-
-Represents a human account.
-
-Suggested fields:
 
 - `id` UUID
 - `email` normalized unique
@@ -44,8 +41,6 @@ Suggested fields:
 
 ### `tenants`
 
-Represents a customer organization/account boundary.
-
 - `id`
 - `name`
 - `slug`
@@ -56,8 +51,6 @@ Represents a customer organization/account boundary.
 
 ### `tenant_memberships`
 
-Many-to-many user membership.
-
 - `tenant_id`
 - `user_id`
 - `role`
@@ -65,9 +58,9 @@ Many-to-many user membership.
 - invitation metadata
 - timestamps
 
-Initial roles: `OWNER`, `ADMIN`, `STAFF`, `VIEWER`. Fine-grained permissions may later augment roles.
+Initial roles: `OWNER`, `ADMIN`, `STAFF`, `VIEWER`.
 
-### `platform_admins` or equivalent elevated assignment
+### `platform_admins`
 
 Super-admin access is separated from tenant membership. Do not represent super-admin capability by placing a special tenant role on a normal tenant membership.
 
@@ -78,7 +71,7 @@ Super-admin access is separated from tenant membership. Do not represent super-a
 - `id`
 - `tenant_id`
 - `name`
-- `business_type_hint` nullable; informational only, not a rigid behavior switch
+- `business_type_hint` nullable; informational only
 - locale/timezone/currency defaults
 - status
 - settings JSONB
@@ -86,12 +79,12 @@ Super-admin access is separated from tenant membership. Do not represent super-a
 
 ### `channel_accounts`
 
-One connected endpoint: Facebook Page, Instagram professional account, WhatsApp business number, future Telegram/web chat/etc.
+One connected endpoint: Facebook Page, Instagram professional account, WhatsApp business number, or a future channel.
 
 - `id`
 - `tenant_id`
 - `business_id`
-- `platform` enum/string
+- `platform`
 - `name`
 - `external_account_id`
 - platform-specific public identifiers
@@ -107,9 +100,7 @@ Unique keys must prevent accidental duplicate attachment of the same external ac
 
 ### `channel_credentials`
 
-Credentials may be modeled separately from `channel_accounts` to isolate encryption/rotation metadata.
-
-Never store secrets in logs. Store encrypted values or references to a secret service.
+Credentials may be modeled separately from `channel_accounts` to isolate encryption/rotation metadata. Never store secrets in logs or expose them to browsers.
 
 ## 5. Dynamic collections and catalogs
 
@@ -126,8 +117,6 @@ The platform supports arbitrary business datasets without tenant-created physica
 - `is_transactional_source`
 - status
 - timestamps
-
-A collection may represent products, services, properties, packages, courses, menu items, or custom entities.
 
 ### `collection_fields`
 
@@ -150,7 +139,7 @@ Defines the schema displayed in the Customer Panel.
 - display order
 - timestamps
 
-Initial field types should include:
+Initial field types:
 
 - short text
 - long text/rich text
@@ -179,25 +168,19 @@ Initial field types should include:
 
 `data_jsonb` stores tenant-defined field values. Validation occurs against `collection_fields` before commit.
 
-Frequently queried standard attributes may have optional generated/indexed columns later, but the customer-facing model remains dynamic.
-
 ### `collection_item_media`
 
 Links collection items to durable media assets with ordering and role (`primary`, `gallery`, `document`, etc.).
 
 ### `collection_channel_links`
 
-Many-to-many mapping from a collection to channel accounts.
-
-This enables one catalog/service list to serve Facebook + WhatsApp + Instagram simultaneously, or different datasets per channel.
+Many-to-many mapping from a collection to channel accounts. This enables one catalog/service list to serve Facebook + WhatsApp + Instagram simultaneously, or different datasets per channel.
 
 ### `collection_item_channel_overrides`
 
 Optional channel-specific overrides such as active/hidden, channel price, channel alias, or channel-specific copy. Base data remains shared.
 
 ## 6. Transactional action model
-
-The platform should support first-class standard entities for common actions, plus extensibility for future actions.
 
 ### Orders
 
@@ -213,13 +196,13 @@ The platform should support first-class standard entities for common actions, pl
 
 `order_items`
 - order ID
-- source collection/item ID nullable to preserve history if item is removed
+- source collection/item ID nullable
 - title/SKU/variant snapshot
 - quantity
 - unit price/totals
 - item attributes snapshot
 
-Historical orders must preserve what was purchased even if current catalog data changes.
+Historical orders preserve what was purchased even if current catalog data changes.
 
 ### Bookings / appointments
 
@@ -243,25 +226,19 @@ Historical orders must preserve what was purchased even if current catalog data 
 
 ### Quote requests / support cases
 
-Use dedicated tables when the feature becomes first-class. Avoid forcing every business action into an opaque JSON event if the UI/reporting needs strong semantics.
+Use dedicated tables when the feature becomes first-class. Avoid forcing every business action into opaque JSON if the UI/reporting needs strong semantics.
 
 ## 7. Conversation domain
 
 ### `contacts`
 
-A platform/customer identity resolved within a tenant/business/channel context.
-
-- platform sender ID/phone/etc.
-- normalized contact details where available
-- optional cross-channel identity links only when legally and reliably established
-
-Do not assume the same human can always be merged across Facebook, Instagram, and WhatsApp.
+A platform/customer identity resolved within a tenant/business/channel context. Do not assume the same human can always be merged across Facebook, Instagram, and WhatsApp.
 
 ### `conversations`
 
 - tenant/business/channel account/contact
 - mode (`AI`, `HUMAN`, optionally `PAUSED`)
-- status (`open`, `closed`, etc.)
+- status
 - assigned staff
 - active agent profile/version
 - last message/turn timestamps
@@ -285,7 +262,7 @@ Use a unique constraint on platform/account/message identifiers for inbound idem
 
 ### `conversation_turns`
 
-Groups one or more transport messages into a logical AI/human turn. Critical for burst aggregation and accurate AI-turn metering.
+Groups one or more transport messages into a logical AI/human turn.
 
 ### `message_media`
 
@@ -293,21 +270,48 @@ Links messages to `media_assets`.
 
 ## 8. Media domain
 
+The existing Media Storage service owns the physical bytes and storage-level user/quota metadata. `app_db` owns SaaS tenant/business authorization, semantic relationships, and provider-delivery mappings.
+
+### `tenant_media_accounts`
+
+Preferred model: one Media Storage user/account per SaaS tenant.
+
+Suggested fields:
+
+- `id`
+- `tenant_id` unique active mapping
+- `storage_provider`
+- `external_user_id`
+- encrypted media API credential or secure credential reference
+- `status`
+- optional quota/usage snapshot
+- `last_health_checked_at`
+- timestamps
+
+Customer/browser code must never receive the Media Storage bearer key.
+
 ### `media_assets`
 
 - `id`
 - `tenant_id`
 - `business_id` nullable when tenant-global
-- storage provider/key/path
-- canonical URL or access descriptor
-- MIME type
-- byte size
-- width/height/duration where relevant
-- content hash
-- original filename
+- `tenant_media_account_id`
+- `storage_provider`
+- `storage_file_id` external Media Storage file UUID
+- `storage_user_id` external user UUID where useful
+- `original_name`
+- `mime_type`
+- `kind`
+- `visibility` (`private`, `public`)
+- `size_bytes`
+- `content_hash` / SHA-256 checksum
+- `public_url` nullable; treated as a delivery descriptor, not authorization source
+- width/height/duration where derived
 - source/type
 - processing status
 - timestamps
+
+The Media Storage service returns a service-relative authenticated content path. Do not store a hard-coded infrastructure base URL in every asset; the storage adapter resolves it from deployment configuration.
 
 Use content hash for deduplication where privacy/ownership rules permit. Deduplication must never expose one tenant's asset to another tenant.
 
@@ -396,7 +400,7 @@ Stores paired customer-like input, ideal owner response, attachments, context la
 
 Tracks synthesis execution, input versions, model used, output candidate, cost, status, and errors.
 
-Training data should never mutate the live prompt without a versioned publication decision.
+Training data never mutates the live prompt without a versioned publication decision.
 
 ## 11. Knowledge and vector tables
 
@@ -420,7 +424,7 @@ Vectors must be invalidated/regenerated when source content changes materially.
 
 ### `usage_events`
 
-Append-oriented event table for billable/operational units:
+Append-oriented units:
 
 - event type
 - quantity
@@ -436,13 +440,11 @@ Daily/hourly aggregates for dashboards and plan enforcement.
 
 ### `audit_logs`
 
-Sensitive action history:
-
 - actor user/admin/service
 - tenant/business target
 - action
 - resource type/id
-- before/after summary or safe diff
+- safe before/after summary
 - IP/user agent/correlation IDs
 - timestamp
 
@@ -458,7 +460,7 @@ Suggested entities:
 - `tenant_limit_overrides`
 - `channel_limit_overrides`
 
-Even before payment integration, plan-aware feature/limit enforcement should be architecturally possible.
+Plan limits include message, AI, media, queue/concurrency, and storage quotas where applicable.
 
 ## 14. Event/outbox and job records
 
@@ -466,9 +468,25 @@ Even before payment integration, plan-aware feature/limit enforcement should be 
 
 Persist events in the same DB transaction as state changes. A dispatcher publishes them to queues/n8n and marks delivery state.
 
-### `job_records` / external queue references
+### `job_records`
 
-Durable application-visible status for important long-running jobs such as imports, training, embeddings, media processing, and bulk actions.
+Application-visible status for important long-running jobs such as imports, training, embeddings, media processing, and bulk actions.
+
+### `automation_deployments`
+
+Recommended deployment metadata for n8n workflow bundles:
+
+- environment
+- bundle version
+- workflow key
+- n8n workflow ID
+- logical workflow version
+- active status
+- deployed_at/deployed_by
+- previous deployment reference
+- health/last-seen metadata
+
+This lets Super Admin diagnose expected vs deployed workflow versions without storing workflow definitions in `app_db`.
 
 ## 15. Indexing strategy
 
@@ -480,6 +498,7 @@ Minimum indexing families:
 - conversation recency
 - status + due timestamps for follow-ups/jobs
 - collection + JSONB indexes for commonly searchable dynamic fields
+- media asset storage IDs/checksums
 - channel media cache lookups
 - usage event time/routing fields
 - vector indexes with tenant/business filtering strategy
@@ -488,18 +507,18 @@ Do not create every possible JSONB index. Promote/index fields based on actual q
 
 ## 16. Deletion and retention
 
-Prefer explicit lifecycle states and controlled deletion. Define per-domain rules:
-
-- Tenant deletion must be asynchronous, audited, and retention-aware.
+- Tenant deletion is asynchronous, audited, and retention-aware.
 - Historical order/booking records preserve snapshots.
-- Deleted catalog items may be soft-deleted or hard-deleted according to retention rules, but transactional history remains valid.
+- Deleted catalog items may be soft/hard-deleted according to policy while transactional history remains valid.
 - Conversation/media retention can be configurable by plan/legal policy.
 - Secret records are revoked/rotated on disconnect.
+- Media deletion must be reference-aware; deleting a local media asset does not automatically remove copies already uploaded to external providers.
+- Tenant deletion must also revoke/delete the corresponding Media Storage user/files according to approved retention policy.
 
 ## 17. Row-level security
 
-PostgreSQL Row Level Security is recommended as defense-in-depth for tenant-scoped tables where compatible with the selected data-access architecture. Application authorization remains mandatory; RLS is not a substitute for correct API permissions.
+PostgreSQL Row Level Security is recommended as defense-in-depth for tenant-scoped tables where compatible with the selected data-access architecture. Application authorization remains mandatory.
 
 ## 18. Migration discipline
 
-All schema changes use versioned database migrations. Production changes must avoid ad-hoc manual SQL. Migrations must include forward compatibility planning for workers/n8n during rolling deployment where applicable.
+All schema changes use versioned database migrations. Production changes must avoid ad-hoc manual SQL. Migrations must include forward compatibility planning for workers/n8n workflow bundles during rolling deployment where applicable.
