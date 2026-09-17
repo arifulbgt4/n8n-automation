@@ -90,18 +90,44 @@ export async function authRoutes(app: FastifyInstance) {
       name: string | null;
       status: string;
       email_verified_at: Date | null;
-    }>("SELECT id,email,password_hash,name,status,email_verified_at FROM users WHERE email=$1", [input.email]);
+      admin_active: boolean;
+      mfa_required: boolean;
+      mfa_enabled: boolean;
+    }>(`
+      SELECT u.id,u.email,u.password_hash,u.name,u.status,u.email_verified_at,
+             COALESCE(pa.active,false) AS admin_active,
+             COALESCE(pa.mfa_required,false) AS mfa_required,
+             COALESCE(pa.mfa_enabled,false) AS mfa_enabled
+      FROM users u LEFT JOIN platform_admins pa ON pa.user_id=u.id
+      WHERE u.email=$1
+    `, [input.email]);
     const user = result.rows[0];
     const valid = user ? await verifyPassword(input.password, user.password_hash) : false;
     if (!user || !valid || user.status !== "active") {
       throw new ApiError(401, "INVALID_CREDENTIALS", "Email or password is incorrect.");
     }
     await query("UPDATE users SET last_login_at=now(), updated_at=now() WHERE id=$1", [user.id]);
+
+    if (user.admin_active && user.mfa_required && user.mfa_enabled) {
+      const challengeToken = randomToken(32);
+      await query(`
+        INSERT INTO admin_mfa_challenges(user_id,token_hash,expires_at,ip,user_agent)
+        VALUES ($1,$2,now()+interval '5 minutes',$3,$4)
+      `, [user.id, sha256(challengeToken), request.ip ?? null, request.headers["user-agent"] ?? null]);
+      await audit({ actorUserId: user.id, actorType: "platform_admin", action: "ADMIN_PASSWORD_VERIFIED_MFA_PENDING", resourceType: "user", resourceId: user.id, request });
+      return reply.send({
+        mfaRequired: true,
+        challengeToken,
+        user: { id: user.id, email: user.email, name: user.name, emailVerified: Boolean(user.email_verified_at), platformAdmin: true },
+      });
+    }
+
     const session = await createSession(user.id, request, reply);
     await audit({ actorUserId: user.id, action: "AUTH_SIGNIN", resourceType: "user", resourceId: user.id, request });
     reply.send({
-      user: { id: user.id, email: user.email, name: user.name, emailVerified: Boolean(user.email_verified_at) },
+      user: { id: user.id, email: user.email, name: user.name, emailVerified: Boolean(user.email_verified_at), platformAdmin: user.admin_active },
       csrfToken: session.csrfToken,
+      mfaSetupRequired: Boolean(user.admin_active && user.mfa_required && !user.mfa_enabled),
     });
   });
 
@@ -124,7 +150,8 @@ export async function authRoutes(app: FastifyInstance) {
       WHERE tm.user_id=$1
       ORDER BY t.created_at
     `, [principal.userId]);
-    reply.send({ principal, memberships: memberships.rows, csrfTokenHash: principal.csrfToken });
+    const { csrfToken: _csrfHash, ...safePrincipal } = principal;
+    reply.send({ principal: safePrincipal, memberships: memberships.rows });
   });
 
   app.post("/v1/auth/verify-email", async (request, reply) => {
