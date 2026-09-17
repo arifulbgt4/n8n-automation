@@ -33,6 +33,8 @@ Customer/Super Admin Web Apps
          AI Providers
 ```
 
+PostgreSQL/Redis/n8n/Media Storage infrastructure is already provisioned outside this application repository. The implementation work in this repository is integration, data/schema, workflow artifacts, APIs, workers, and the two SaaS applications—not reinstalling those services.
+
 ## 2. Primary outcomes
 
 The platform must let a business owner:
@@ -44,7 +46,7 @@ The platform must let a business owner:
 - Use different catalogs, prompts, limits, or agent behavior on different channels when required.
 - Create product, service, property, package, menu, course, or completely custom datasets.
 - Define custom fields without database migrations per tenant.
-- Upload and reuse images/files through the existing VPS media service.
+- Upload and reuse images/files through the existing Media Storage service.
 - Configure AI providers, models, task-specific model selection, and BYOK API keys.
 - Create AI agent profiles and attach them to businesses/channels.
 - Train desired AI behavior from example human conversations.
@@ -69,7 +71,7 @@ The n8n internal database is not a mirror of the SaaS database. It stores only n
 
 ### 3.2 No spreadsheet control plane
 
-Google Sheets were useful in the earlier prototype but are removed from the target system. Business configuration, catalogs, prompts, providers, orders, support control, and runtime settings are managed through the SaaS UI and application database.
+Google Sheets are removed from the target system. Business configuration, catalogs, prompts, providers, orders, support control, and runtime settings are managed through the SaaS UI and application database.
 
 ### 3.3 Configurable instead of e-commerce-only
 
@@ -109,6 +111,12 @@ Prompts define behavior and rules; live facts remain in the database/knowledge l
 ### 3.6 Async and idempotent messaging
 
 Meta webhooks and application actions may retry or arrive in bursts. Message processing, media uploads, AI work, and outbound delivery must use idempotency keys, queueing, retries, and rate limiting.
+
+### 3.7 Existing infrastructure is consumed, not re-provisioned
+
+Application code receives PostgreSQL, Redis, n8n, and Media Storage connection details through environment/secret configuration. Canonical documentation does not depend on infrastructure repository paths, admin-panel URLs, public hostnames, or machine-specific ports.
+
+The application owns `app_db` schema/migrations, Redis namespaces/job contracts, Media Storage adapter logic, and n8n workflow JSON artifacts. It does not own installation of the underlying services.
 
 ## 4. Multi-tenant / multi-business / multi-channel model
 
@@ -174,6 +182,8 @@ The platform must support:
 - Persistent channel media mappings such as reusable Facebook attachment IDs or WhatsApp media IDs where supported.
 - Fallback re-upload when a remote media ID is invalid or expired.
 - Delivery queues, retries, dead-letter handling, and delivery status.
+
+The existing Media Storage service is consumed through a server-side adapter. Its bearer key is never exposed to customer browsers. Private conversation/training media remains private by default; provider-accessible public media is used only when the delivery path requires it and policy allows it.
 
 ## 8. Rate limits and quotas
 
@@ -241,19 +251,27 @@ Super Admin authentication is logically separated and uses elevated RBAC. Super 
 
 Tenant authorization is mandatory on every tenant-owned record.
 
-## 13. Infrastructure
+## 13. Infrastructure integration
 
-Target infrastructure:
+Target application integrations:
 
-- PostgreSQL for `app_db` and a separate n8n database.
+- Existing PostgreSQL service, with this project owning `app_db` schema/migrations and keeping the n8n internal DB separate.
 - pgvector extension for semantic retrieval.
-- Redis for caching, rate limiting, distributed locks, short-lived state, and queue coordination.
+- Existing Redis service for caching, rate limiting, distributed locks, short-lived state, and queue coordination.
 - Worker processes for async jobs.
-- Existing VPS media service at `https://admin.openmusk.store/media` behind a storage adapter.
-- n8n as workflow/orchestration runtime.
+- Existing multi-user Media Storage service through an authenticated storage adapter.
+- Existing n8n runtime consuming version-controlled workflow JSON bundles from this project.
 - Web/API services for customer and admin applications.
 
-## 14. Operational safety
+No application feature should require hard-coded infrastructure admin URLs or repository references.
+
+## 14. n8n workflow artifact principle
+
+The n8n instance already exists. This project will create modular workflow JSON exports and a versioned workflow manifest. Deployment means importing/updating those JSON artifacts in the existing n8n runtime, binding environment-specific platform/internal credentials, testing while inactive, and activating through a controlled cutover.
+
+Workflow JSON must contain no customer secrets and should avoid environment-specific hostnames/opaque production credential IDs where possible.
+
+## 15. Operational safety
 
 Required from the first production release:
 
@@ -268,17 +286,18 @@ Required from the first production release:
 - Webhook signature verification.
 - Rate-limit protection.
 - Tenant isolation tests.
+- Workflow bundle/version visibility and rollback discipline.
 
-## 15. Target end-to-end flows
+## 16. Target end-to-end flows
 
-### 15.1 Customer setup
+### 16.1 Customer setup
 
 ```text
 Signup -> Verify -> Create Tenant/Business -> Connect Channel ->
 Create/Import Data -> Configure Agent/Provider -> Test -> Publish Automation
 ```
 
-### 15.2 Normal customer message
+### 16.2 Normal customer message
 
 ```text
 Meta Webhook -> Verify/Dedupe -> Resolve Channel/Tenant/Business ->
@@ -286,7 +305,7 @@ Aggregate Turn -> Detect Intent/Capability -> Retrieve Data/Knowledge ->
 AI/Business Action -> Response Plan -> Queue -> Rate Limit -> Deliver -> Meter
 ```
 
-### 15.3 Order/booking
+### 16.3 Order/booking
 
 ```text
 Conversation -> Collect required fields -> Validate ->
@@ -294,14 +313,14 @@ Create transaction through application service -> Commit app_db ->
 Queue confirmation -> Send -> Customer Panel reflects transaction immediately
 ```
 
-### 15.4 Training
+### 16.4 Training
 
 ```text
 Trainer identity / panel simulator -> Capture examples -> Analyze ->
 Generate candidate prompt/agent version -> Diff/Test -> Publish -> Audit
 ```
 
-### 15.5 Human handoff
+### 16.5 Human handoff
 
 ```text
 AI conversation -> escalation/manual takeover -> HUMAN mode ->
@@ -309,18 +328,27 @@ AI replies stop -> staff/page owner responds -> history recorded ->
 optional resume to AI -> AI uses updated conversation context
 ```
 
-## 16. Explicit non-goals for the first implementation
+### 16.6 Media-backed multi-image response
+
+```text
+AI response plan -> media_asset IDs -> remote media cache lookup ->
+reuse provider media ID OR fetch from Media Storage -> provider upload ->
+queue/rate-limit delivery -> persist provider message IDs -> meter
+```
+
+## 17. Explicit non-goals for the first implementation
 
 These can be added later but must not block the core design:
 
 - Building a custom foundation model.
 - Fine-tuning a model from every training conversation by default; initial training is example-driven prompt/agent synthesis.
 - Replacing n8n with a custom orchestration engine.
+- Installing or administering the existing n8n/Redis/Media infrastructure from this repository.
 - Giving tenants direct SQL/database access.
 - Storing media binaries in PostgreSQL.
 - Using Google Sheets as a runtime source of truth.
 
-## 17. Definition of planning completion
+## 18. Definition of planning completion
 
 Planning is complete when the documents in this directory have been reviewed and the following are accepted:
 
@@ -330,7 +358,8 @@ Planning is complete when the documents in this directory have been reviewed and
 - Dynamic-data model.
 - AI agent/training model.
 - Messaging/media/queue model.
-- n8n responsibilities and interfaces.
+- Existing infrastructure integration boundary.
+- n8n JSON workflow artifact/import/update/rollback process.
 - Infrastructure and security rules.
 - Analytics/limits/billing-ready model.
 - Delivery roadmap and acceptance tests.

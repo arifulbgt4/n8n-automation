@@ -4,7 +4,20 @@ This repository is the target SaaS application for a multi-tenant, configurable 
 
 ## Current status
 
-The repository is intentionally in a **documentation-first planning phase**. The existing `customer-panel` and `super-admin-panel` are application shells. No implementation work should begin until the architecture, data model, security boundaries, integration contracts, and implementation phases in `docs/` are reviewed.
+The repository is intentionally in a **documentation-first planning phase**. The existing `customer-panel` and `super-admin-panel` are application shells. No runtime implementation should begin until the architecture, data model, security boundaries, integration contracts, and implementation phases in `docs/` are accepted.
+
+## Existing infrastructure assumption
+
+Core infrastructure services are already provisioned outside this application repository. This repository must **integrate with them, not reinstall or re-provision them**.
+
+The existing services include:
+
+- PostgreSQL runtime/host infrastructure; this project owns the SaaS `app_db` schema and migrations.
+- Redis for cache, rate limiting, locks, aggregation, and queue coordination.
+- n8n runtime for importing and executing this project's version-controlled workflow JSON artifacts.
+- A multi-user Media Storage service for file/object storage.
+
+Infrastructure-specific repository locations, admin-panel URLs, hostnames, ports, and credentials are deployment configuration and must not be hard-coded into this repository's architecture documentation or application code.
 
 ## Core architecture decisions
 
@@ -13,21 +26,21 @@ The repository is intentionally in a **documentation-first planning phase**. The
 - **n8n** is the automation/orchestration runtime, not the source of truth.
 - **Redis** is used for caching, rate limiting, distributed locks, short-lived state, aggregation windows, and queue coordination.
 - Background workers/queues handle outbound messaging, AI jobs, media processing, embeddings, follow-ups, training jobs, analytics aggregation, retries, and other asynchronous work.
-- Existing VPS media storage exposed through `https://admin.openmusk.store/media` is the planned media/object-storage layer, subject to the storage API/security contract defined in the documentation.
+- The existing multi-user Media Storage service is the media/object-storage layer and is consumed through a server-side storage adapter.
 - **pgvector** on PostgreSQL is the initial vector-search layer.
-- Google Sheets are part of the legacy prototype only and are **not part of the target SaaS architecture**.
+- Google Sheets are **not part of the target SaaS architecture**.
 - `customer-panel` is the tenant-facing application.
 - `super-admin-panel` is the platform-operator application.
+
+## n8n workflow delivery
+
+This repository will keep sanitized, version-controlled n8n workflow JSON exports as deployment artifacts. The existing n8n instance is not installed or managed here. Workflow artifacts are imported into that instance, configured with environment-specific credentials/settings, tested while inactive, and then activated according to the workflow deployment specification.
 
 ## Documentation
 
 Start with [`docs/README.md`](docs/README.md) and [`docs/00_MASTER_PLAN.md`](docs/00_MASTER_PLAN.md).
 
-The documentation covers system architecture, database/domain design, authentication and multi-tenancy, both web applications, dynamic business data, messaging/media, AI agents and training, n8n integration, Redis/queues/storage, analytics and limits, security, API/event contracts, deployment, testing, migration, and the complete implementation roadmap.
-
-## Legacy reference
-
-The earlier prototype lives in `arifulbgt4/n8n_local_envirnment`. It is useful as a behavioral reference for Meta routing, human handoff, follow-ups, media reuse, AI-provider routing, and n8n workflow behavior. Its spreadsheet-driven configuration is explicitly replaced by the SaaS database and web panels in this repository.
+The documentation covers system architecture, database/domain design, authentication and multi-tenancy, both web applications, dynamic business data, messaging/media, AI agents and training, n8n workflow artifacts, Redis/queues/storage, analytics and limits, security, API/event contracts, deployment, testing, migration, and the complete implementation roadmap.
 
 ## Documentation-first rule
 

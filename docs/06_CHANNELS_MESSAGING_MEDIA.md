@@ -8,23 +8,21 @@ Initial channels:
 - Instagram messaging for supported professional accounts.
 - WhatsApp Business messaging.
 
-The domain model and runtime must support future adapters without changing core conversation, agent, catalog, and transaction models.
+The domain model/runtime must support future adapters without changing core conversation, agent, catalog, and transaction models.
 
 ## 2. Channel account identity
 
 Every connected channel is a `channel_account` attached to one business.
 
-Runtime routing uses the channel/platform receiving account identity, not merely the parent business ID. Examples:
+Runtime routing uses the channel/platform receiving account identity, not merely the parent business ID:
 
 - Facebook: Page/recipient identity.
 - Instagram: receiving professional account identity provided by webhook/API.
 - WhatsApp: receiving phone-number ID/business account context.
 
-This is necessary because one tenant may operate multiple businesses and multiple accounts of the same platform.
+This supports one tenant operating multiple businesses and multiple accounts of the same platform.
 
 ## 3. Multi-business and shared-data rules
-
-A tenant can have:
 
 ```text
 Business A
@@ -37,13 +35,11 @@ Business B
   WhatsApp B
 ```
 
-A collection/catalog belongs to a business and may link to multiple channel accounts in that business. One change to a shared catalog is immediately visible to every linked channel because they all read the same source-of-truth records.
+A collection/catalog belongs to a business and may link to multiple channel accounts in that business. One change to shared data is immediately visible to every linked channel because they all read the same source-of-truth records.
 
 Channel-specific item/agent overrides are optional mappings, not independent copies by default.
 
 ## 4. Webhook ingestion pipeline
-
-Canonical inbound flow:
 
 ```text
 Provider webhook
@@ -51,14 +47,12 @@ Provider webhook
  -> normalize event
  -> identify channel account
  -> deduplicate platform event/message
- -> persist raw-safe metadata + normalized message
+ -> persist safe raw metadata + normalized message
  -> enqueue/trigger processing
  -> acknowledge provider quickly
 ```
 
-Webhook handlers must avoid long AI/media work before returning the provider acknowledgment.
-
-Store raw payload only if required for diagnostics/compliance; redact or encrypt sensitive fields and apply retention policy.
+Webhook handlers avoid long AI/media work before provider acknowledgment.
 
 ## 5. Event normalization
 
@@ -67,7 +61,7 @@ Each platform adapter converts provider-specific payloads into a common internal
 - tenant/business/channel account
 - provider event/message ID
 - sender/contact identity
-- message direction/type
+- direction/type
 - text/caption
 - media references
 - reply/reaction context
@@ -75,30 +69,30 @@ Each platform adapter converts provider-specific payloads into a common internal
 - normalized timestamp
 - correlation ID
 
-Provider-specific metadata remains available in a constrained metadata field when needed.
+Provider-specific metadata remains available in constrained metadata when needed.
 
 ## 6. Inbound idempotency
 
-Meta/provider retries must not generate duplicate AI responses, orders, or bookings.
+Provider retries must not generate duplicate AI responses, orders, or bookings.
 
-Use durable unique keys such as:
+Durable uniqueness example:
 
 ```text
 (platform, channel_account_id, platform_event_id/message_id)
 ```
 
-Processing states should distinguish `received`, `processing`, `processed`, and terminal/retryable failure where useful.
+Processing states may distinguish `received`, `processing`, `processed`, and terminal/retryable failure.
 
 ## 7. Conversation resolution
 
 For each inbound message:
 
 1. Resolve channel account.
-2. Resolve/create contact within the proper scope.
-3. Resolve active conversation according to product rules.
+2. Resolve/create contact in the correct scope.
+3. Resolve active conversation.
 4. Append message.
 5. Check HUMAN/AI/PAUSED mode.
-6. Check trainer identity before normal production processing.
+6. Check trainer identity before production processing.
 7. Aggregate into a logical turn if eligible.
 
 Do not merge people across platforms merely because names match.
@@ -106,8 +100,6 @@ Do not merge people across platforms merely because names match.
 ## 8. Message burst aggregation
 
 Customers may send several short texts or 5-10 screenshots before the real question. Calling AI once per transport message produces poor answers and unnecessary cost.
-
-Use a configurable aggregation window:
 
 ```text
 message 1 ----+
@@ -119,29 +111,29 @@ question -----+
 
 Requirements:
 
-- Per channel/conversation buffer in Redis or equivalent short-lived state.
-- Window starts/resets according to documented policy.
-- Maximum buffered count/bytes/time to prevent abuse.
-- An explicit terminal signal where provider semantics support it.
-- Persist every transport message in PostgreSQL; Redis only coordinates grouping.
-- One `conversation_turn` records which messages were grouped.
+- per channel/conversation buffer in Redis.
+- documented window/reset policy.
+- maximum buffered count/bytes/time.
+- persist every transport message in PostgreSQL; Redis coordinates grouping only.
+- one `conversation_turn` records grouped messages.
 
 ## 9. Screenshot and image understanding
 
-If inbound turn contains screenshots/photos:
+For inbound screenshots/photos:
 
-- Fetch/download through a secure media ingestion path.
-- Persist/reuse as `media_assets` according to retention policy.
-- Invoke configured vision model only when required.
-- Produce structured observations/search hints.
-- Search the business's attached collections/knowledge.
-- Ground the answer in matched data; do not treat vision output as authoritative price/stock/service availability.
+- fetch through the provider's authenticated media path.
+- ingest into Media Storage as private by default.
+- create `media_assets` and message links.
+- invoke configured vision model only when required.
+- produce structured observations/search hints.
+- search attached business collections/knowledge.
+- ground price/stock/service availability in current application data, not vision guesses.
 
-Multiple screenshots can be analyzed together or in bounded batches depending on model limits and cost.
+Multiple screenshots may be analyzed together or in bounded batches based on model limits/cost.
 
 ## 10. Logical response planning
 
-AI/business logic should produce a provider-neutral response plan, e.g.:
+AI/business logic produces a provider-neutral response plan:
 
 ```json
 {
@@ -153,53 +145,87 @@ AI/business logic should produce a provider-neutral response plan, e.g.:
 }
 ```
 
-The channel adapter decides how to encode/send each action.
+The channel adapter decides how to encode/send each action. Policy/limits are enforced before jobs enter delivery.
 
-The response planner must enforce business/platform policy before jobs enter the delivery queue.
+## 11. Multiple-image responses
 
-## 11. Multiple image responses
+When a customer requests several product/service images or "all images":
 
-A customer may request several product/service images or "all images".
+- determine matching item(s) from current data.
+- load active media in configured order.
+- apply `max_images_per_response` and provider limits.
+- if more assets exist, send a bounded initial batch and allow continuation.
+- enqueue each transport send separately when required by provider.
+- maintain logical response grouping for analytics.
+
+AI cannot bypass configured limits by generating many individual media actions.
+
+## 12. Existing Media Storage integration
+
+Media binaries are stored in the already-running multi-user Media Storage service. This application does not install or administer that service.
+
+The application uses a server-side storage adapter with a configured base URL and tenant-scoped bearer credential. No infrastructure/admin URL is hard-coded into domain code or canonical documentation.
+
+Authenticated user API operations used by the adapter:
+
+```text
+GET    /api/v1/storage
+POST   /api/v1/files
+GET    /api/v1/files?limit=<n>&offset=<n>
+GET    /api/v1/files/:id
+GET    /api/v1/files/:id/content
+PATCH  /api/v1/files/:id
+DELETE /api/v1/files/:id
+```
+
+Upload uses multipart form data:
+
+```text
+file        required
+visibility  private | public
+```
+
+Returned media metadata includes an external file ID, original filename, MIME type, extension, size, kind, visibility, SHA-256 checksum, nullable public URL, authenticated content path, and creation time.
+
+## 13. Media tenant isolation
+
+Preferred mapping:
+
+```text
+SaaS tenant -> dedicated Media Storage user -> dedicated bearer key
+```
+
+The server stores the mapping/credential reference securely. Customer/browser code never receives the media bearer key.
+
+Media Storage per-user quotas can mirror or cap SaaS plan storage quotas. Application-level usage/plan checks and storage-service quota checks are both honored.
+
+## 14. Private and public media policy
+
+Default private:
+
+- customer screenshots.
+- inbound attachments.
+- training media.
+- private documents.
+
+Public visibility may be used for approved catalog/business media when a provider needs a provider-fetchable HTTPS URL and policy permits it.
+
+If public access is not appropriate, the delivery path fetches authenticated binary content server-side and uploads it to the channel provider.
+
+## 15. Media deduplication
+
+The Media Storage service already produces SHA-256 checksum metadata. The application can use that checksum to detect duplicate assets within the allowed tenant scope.
 
 Rules:
 
-- Determine matching item(s) from current collection data.
-- Load active media in configured order.
-- Apply `max_images_per_response` and transport/provider limits.
-- If more assets exist, send an initial bounded batch and offer/allow continuation.
-- Enqueue each transport send separately when the provider requires separate messages.
-- Maintain logical response grouping for analytics.
+- dedup only within an authorized ownership scope.
+- never reveal that another tenant has an identical file.
+- keep original filename/source separately from canonical asset identity.
+- avoid re-uploading to Media Storage when an existing same-tenant asset is intentionally reused.
 
-The AI must not bypass configured limits by generating many individual media actions.
+## 16. Channel media cache
 
-## 12. Media storage
-
-Primary planned storage endpoint: `https://admin.openmusk.store/media`.
-
-The application must treat it as a storage provider through an adapter interface. Required capabilities should include:
-
-- Authenticated upload.
-- Tenant/business namespacing.
-- Stable asset identifier/key.
-- Read/download URL or authorized delivery mechanism.
-- Delete/lifecycle operation.
-- File metadata.
-- Error semantics.
-
-If the existing media service does not expose all required APIs, those gaps must be implemented before relying on it as production object storage.
-
-## 13. Media deduplication
-
-On upload/ingestion:
-
-- Compute content hash where feasible.
-- Reuse an existing same-tenant asset if policy allows.
-- Never leak cross-tenant deduplication information.
-- Store original filename/source separately from canonical asset identity.
-
-## 14. Channel media cache
-
-Avoid repeatedly uploading the same business media to Meta when the provider supports reusable uploaded media.
+Avoid repeatedly uploading the same business media to Meta when reusable remote media identifiers are supported.
 
 `channel_media_cache` maps:
 
@@ -212,20 +238,23 @@ media_asset_id
 
 Delivery behavior:
 
-1. Look for valid cached remote media ID.
-2. Reuse it if supported.
-3. If provider rejects it, mark stale/invalid.
-4. Upload source media again.
-5. Persist the new remote ID.
-6. Retry send under idempotency/retry rules.
+1. Resolve `media_asset`.
+2. Look for valid cached remote media ID.
+3. Reuse when supported.
+4. If provider rejects it, mark stale/invalid.
+5. Acquire refresh lock for `(asset, channel_account)`.
+6. Fetch binary from Media Storage or use approved public URL.
+7. Upload once to provider.
+8. Persist new remote ID.
+9. Retry send under idempotency policy.
 
-Do not assume all provider media IDs are permanent; track status/expiry where known.
+Do not assume all provider media IDs are permanent; track expiry/status where known.
 
-## 15. Outbound delivery queue
+## 17. Outbound delivery queue
 
-n8n/AI should create logical outbound intents/jobs; a delivery worker enforces rate limits and retries.
+n8n/AI creates logical outbound intents; a delivery worker enforces rate limits and retries.
 
-Each outbound message job should include:
+Each outbound message job includes:
 
 - tenant/business/channel/conversation
 - logical response/turn ID
@@ -236,11 +265,11 @@ Each outbound message job should include:
 - not-before time
 - correlation IDs
 
-Persist final delivery status in `messages`/delivery tables.
+Persist final delivery status in message/delivery tables.
 
-## 16. Priorities
+## 18. Priorities
 
-Suggested priority ordering:
+Suggested ordering:
 
 1. Human staff reply.
 2. Active customer-requested transactional confirmation.
@@ -251,7 +280,7 @@ Suggested priority ordering:
 
 Priority cannot bypass provider safety limits.
 
-## 17. Rate limiting
+## 19. Rate limiting
 
 Limits are layered:
 
@@ -268,105 +297,110 @@ Effective runtime rate is the strictest applicable rule.
 
 Track at minimum:
 
-- outbound messages/minute
-- burst messages/short interval
-- media messages/minute
-- images/logical response
-- AI turns/hour/day
-- estimated/actual tokens/day
-- follow-up count/day/contact
+- outbound messages/minute.
+- burst messages/short interval.
+- media messages/minute.
+- images/logical response.
+- AI turns/hour/day.
+- estimated/actual tokens/day.
+- follow-up count/day/contact.
 
 Use Redis atomic counters/token buckets/sliding windows as appropriate; durable usage events remain in PostgreSQL.
 
-## 18. HUMAN mode and manual replies
+## 20. HUMAN mode and manual replies
 
-Conversation mode controls AI delivery.
+When staff explicitly takes over or a verified manual Page-owner reply is detected:
 
-### HUMAN takeover
+- acquire conversation lock.
+- set mode `HUMAN`.
+- cancel/suppress pending AI replies not dispatched.
+- record actor/reason.
+- allow human outbound delivery.
 
-When staff explicitly takes over or a verified manual Page-owner reply is detected under configured policy:
+When staff resumes AI, record transition and provide sufficient recent context/current business data.
 
-- acquire conversation lock
-- set mode `HUMAN`
-- cancel/suppress pending AI replies that have not been dispatched
-- record actor/reason
-- allow human outbound delivery
+A HUMAN conversation blocks automated follow-ups unless an explicit approved policy says otherwise.
 
-### Resume AI
+## 21. Detecting manual Page-owner replies
 
-- staff explicitly resumes AI or configured automation does so
-- system records transition
-- AI receives sufficient recent context and current business data
+Facebook echoes/provider events may include both API sends and human Page-owner sends. Maintain outbound provider message IDs and compare echo events. Only a verified unmatched manual reply triggers automatic HUMAN mode when enabled.
 
-A HUMAN conversation must block automated follow-up sends unless a dedicated human-approved automation policy says otherwise.
+## 22. Follow-ups
 
-## 19. Detecting manual Page-owner replies
+Follow-up jobs check immediately before send:
 
-Facebook echoes or provider events may include both bot/API sends and human Page-owner sends. The system must avoid treating its own outbound echo as a human takeover.
+- conversation still eligible/open.
+- not HUMAN mode.
+- no newer customer response invalidating follow-up.
+- tenant/channel active.
+- plan/rate limits permit send.
+- provider messaging window/policy permits send.
+- idempotency key not already completed.
 
-Maintain outbound provider message IDs / sent-message records and compare echo events. Only a verified unmatched manual reply should trigger automatic HUMAN mode when that option is enabled.
-
-## 20. Follow-ups
-
-Follow-ups are scheduled jobs with guards:
-
-- conversation still eligible/open
-- no HUMAN mode
-- no recent customer reply that invalidates the follow-up
-- tenant/channel active
-- within plan/rate limits
-- within channel messaging policy/window
-- idempotency prevents duplicates
-
-Follow-up timing/count is configurable within platform ceilings.
-
-## 21. Delivery retries and dead letters
+## 23. Delivery retries and dead letters
 
 Classify provider errors:
 
-- transient/retryable (timeouts, certain 5xx/rate limits)
-- credential/reconnect required
-- permanent content/recipient errors
-- stale remote media ID (special re-upload path)
+- transient/retryable.
+- credential/reconnect required.
+- permanent content/recipient error.
+- stale remote media ID with special re-upload path.
+- Media Storage unavailable/quota exceeded/file missing.
 
-Use exponential backoff/jitter for retryable errors. After bounded attempts, send the job to a dead-letter/recovery state and surface it in operator diagnostics.
+Use bounded exponential backoff/jitter. Terminal failures enter dead-letter/recovery state and are visible to operators.
 
-## 22. Usage metering
+## 24. Media deletion
 
-Messaging must emit distinct metrics for:
+Application media deletion is reference-aware:
 
-- inbound transport messages
-- outbound transport messages
-- logical turns
-- logical responses
-- AI turns/calls
-- human replies
-- media uploads
-- media sends
-- remote-media cache hits/misses
-- retries/failures
+```text
+mark/delete request
+ -> verify ownership/references
+ -> optional grace period
+ -> delete Media Storage file
+ -> finalize app_db media state
+```
+
+A Media Storage hard delete frees local storage/quota but does not remove copies previously uploaded to Facebook/Instagram/WhatsApp. External provider cleanup is separate.
+
+## 25. Usage metering
+
+Messaging emits distinct metrics for:
+
+- inbound transport messages.
+- outbound transport messages.
+- logical turns/responses.
+- AI turns/calls.
+- human replies.
+- Media Storage uploads/deletes/bytes.
+- provider media uploads/sends.
+- remote-media cache hits/misses.
+- retries/failures.
 
 These values must not be conflated.
 
-## 23. Channel disconnect/reconnect
+## 26. Channel disconnect/reconnect
 
 If credentials expire/revoke:
 
-- mark channel degraded/disconnected
-- stop unsafe outbound sends
-- preserve queued jobs according to bounded policy or fail with reconnect reason
-- notify customer UI
-- provide reconnect flow
-- revalidate webhook/subscription state after reconnect
+- mark channel degraded/disconnected.
+- stop unsafe outbound sends.
+- preserve/fail queued jobs according to bounded policy.
+- notify customer UI.
+- provide reconnect flow.
+- revalidate webhook/subscription state.
 
-## 24. Acceptance criteria
+## 27. Acceptance criteria
 
 Messaging is complete only when tests prove:
 
-- duplicate webhooks do not duplicate replies/actions
-- 10 rapid screenshots can become one logical AI turn
-- multi-image sends obey configured bounds
-- reusable remote media is reused and stale IDs recover
-- HUMAN mode reliably blocks AI/follow-ups
-- provider rate limits do not cause uncontrolled message loss
-- every delivered/failed message is attributable to tenant/business/channel/conversation/job
+- duplicate webhooks do not duplicate replies/actions.
+- 10 rapid screenshots can become one logical AI turn.
+- inbound screenshots are stored privately by default.
+- multi-image sends obey configured bounds.
+- reusable remote media is reused and stale IDs recover.
+- Media Storage bearer keys never reach browser/client logs.
+- storage quota errors are surfaced safely.
+- HUMAN mode reliably blocks AI/follow-ups.
+- provider rate limits do not cause uncontrolled message loss.
+- every delivered/failed message is attributable to tenant/business/channel/conversation/job.

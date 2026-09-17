@@ -7,7 +7,7 @@
 - Secrets are encrypted and never logged or re-displayed in full.
 - External webhooks are verified and idempotent.
 - Business mutations are validated server-side.
-- Redis/n8n/media storage are not exposed directly to customer browsers.
+- Redis, n8n, Media Storage credentials, and infrastructure administration are not exposed to customer browsers.
 - Production incidents must be diagnosable without weakening tenant privacy.
 
 ## 2. Threat boundaries
@@ -18,10 +18,11 @@ Primary boundaries:
 - Web apps <-> Backend/API.
 - Backend/API <-> PostgreSQL.
 - Backend/API/workers <-> Redis/queues.
-- Backend/workers <-> media storage.
+- Backend/workers/n8n <-> Media Storage user API.
 - n8n/workers <-> Meta/AI providers.
 - Tenant A <-> Tenant B.
 - Customer tenant roles <-> platform super-admin roles.
+- Application repository <-> separately managed infrastructure.
 
 ## 3. Secret management
 
@@ -29,294 +30,316 @@ Secrets include:
 
 - Meta app/page/WhatsApp tokens.
 - AI provider API keys.
+- Media Storage bearer keys.
 - Internal service credentials.
 - Database/Redis credentials.
 - Session signing/encryption keys.
 - Webhook verification secrets.
+- Platform-level n8n credentials where required.
 
 Requirements:
 
-- Encrypt tenant/provider secrets at rest using a dedicated application encryption key/key-management strategy.
-- Keep encryption keys outside database content.
-- Support key rotation.
-- Never return full stored secret after creation.
-- Redact headers/body fields in logs and n8n execution data.
-- Avoid secrets in queue payloads; use references or short-lived scoped values.
-- Rotate/revoke credentials on channel disconnect or compromise.
+- encrypt tenant/provider/storage secrets at rest using a dedicated application encryption/key-management strategy.
+- keep encryption keys outside database content.
+- support key rotation.
+- never return full stored secret after creation.
+- redact headers/body fields in logs and n8n execution data.
+- avoid secrets in queue payloads; use references or short-lived scoped values.
+- rotate/revoke credentials on channel/storage compromise or lifecycle change.
+- never commit secrets to n8n workflow JSON artifacts.
 
 ## 4. Tenant isolation
 
 Controls:
 
-- Every API resource check includes tenant ownership.
-- Business-scoped permissions enforce business membership/assignment.
+- every API resource checks tenant ownership.
+- business-scoped permissions enforce assignment.
 - PostgreSQL RLS where appropriate as defense in depth.
-- Queue jobs carry tenant IDs and workers verify ownership before loading target resources.
-- Media authorization checks tenant ownership.
-- Vector search includes tenant/business filters.
-- Redis keys are tenant-namespaced.
-- Cache entries cannot be shared across tenants unless the data is truly global/public.
+- queue jobs carry tenant IDs and workers re-verify ownership.
+- Media Storage access maps tenant -> approved media user/credential.
+- media asset records carry tenant ownership independent of storage metadata.
+- vector search includes tenant/business filters.
+- Redis keys are application/environment/tenant namespaced.
+- caches are not shared across tenants unless data is truly global/public.
+
+Preferred Media Storage isolation is one media user/account per SaaS tenant.
 
 ## 5. Input validation
 
 Validate:
 
 - IDs and ownership.
-- Dynamic field schemas and values.
+- dynamic field schemas/values.
 - URLs and uploaded file types/sizes.
 - AI structured outputs against schemas.
-- Order/booking numeric values and current source data.
-- Callback URLs/redirects to prevent open redirects/SSRF.
-- Custom OpenAI-compatible base URLs against SSRF/network policy.
+- order/booking numeric values and current source data.
+- callback URLs/redirects.
+- custom compatible-provider base URLs against SSRF/network policy.
 
-Do not let customer-supplied provider URLs access internal metadata/private network ranges without explicit secure proxy policy.
+Do not let customer-supplied URLs access internal metadata/private networks without an explicit secure proxy policy.
 
 ## 6. File/media security
 
-- Validate MIME by file content, not filename alone.
-- Define max sizes/dimensions/durations.
-- Sanitize filenames/metadata.
-- Do not execute uploaded content.
-- Serve files with safe content disposition/type.
-- Private conversation files require authorized access.
-- Public catalog images should use unguessable stable identifiers or controlled signed access.
-- Scan file types that create malware risk as appropriate.
+The Media Storage service already performs MIME/extension validation, safe storage naming, checksum generation, quota checks, and private/public access behavior. The SaaS adds business authorization/policy on top.
+
+Requirements:
+
+- keep tenant Media Storage bearer keys server-side.
+- default screenshots, conversations, training files, and sensitive documents to private.
+- use public visibility only for approved catalog/business media when required.
+- never trust filename alone for policy decisions.
+- enforce product-level size/type rules even if storage also validates.
+- do not execute uploaded content.
+- serve/proxy content with safe content type/disposition.
+- use storage file UUID/checksum metadata; never expose filesystem paths.
+- audit sensitive delete/export actions.
 
 ## 7. Webhook security
 
 For Meta/provider callbacks:
 
-- Verify signature/app secret/token according to provider requirements.
-- Validate expected account identifiers.
-- Deduplicate event/message IDs.
-- Bound request size.
-- Acknowledge quickly after durable receipt/enqueue.
-- Reject unsupported methods/types safely.
-- Rate-limit abusive/unverified traffic.
-
-Verification tokens are not access tokens and must be treated according to their own purpose.
+- verify signature/app secret/token as required.
+- validate expected account identifiers.
+- deduplicate event/message IDs.
+- bound request size.
+- acknowledge quickly after durable receipt/enqueue.
+- reject unsupported methods/types safely.
+- rate-limit abusive/unverified traffic.
 
 ## 8. Authentication security
 
-- Strong password hashing algorithm with appropriate cost.
-- Email verification.
-- Password reset tokens are one-time and expire.
+- strong password hashing.
+- email verification.
+- one-time expiring password reset tokens.
 - HttpOnly/Secure/SameSite session cookies where applicable.
 - CSRF protection for cookie sessions.
-- Session revocation.
+- session revocation.
 - MFA for super admins; customer MFA roadmap.
-- Brute-force/login rate limits.
-- Security event logging.
+- brute-force/login rate limits.
+- security event logging.
 
 ## 9. Authorization failures
 
-Return safe 403/404 behavior without leaking existence of another tenant's resources. Log enough internal context to investigate without exposing it to the caller.
+Return safe 403/404 behavior without leaking another tenant's resource existence. Log sufficient internal context without exposing it to caller.
 
 ## 10. AI security
 
-AI outputs are untrusted input to the application.
+AI outputs are untrusted input.
 
 Controls:
 
-- Structured output validation.
-- Tool/capability allowlist.
-- Server-side validation of all mutations.
-- Prompt/data boundaries prevent cross-tenant context.
-- Do not inject secrets into prompts unless absolutely required.
-- Avoid storing full system prompt/provider payloads in broad-access logs.
-- Prompt-injection-resistant design: retrieved documents/user messages cannot grant new tools or override server authorization.
-- Human handoff for uncertain/high-risk transactional cases according to business policy.
+- structured output validation.
+- tool/capability allowlist.
+- server-side mutation validation.
+- tenant prompt/data boundaries.
+- no unnecessary secrets in prompts.
+- avoid broad logging of full system/provider payloads.
+- retrieved documents/user messages cannot grant server privileges or new tools.
+- human handoff for uncertain/high-risk transactional cases according to policy.
 
 ## 11. Dynamic collection security
 
-Customer-defined schemas are metadata, not SQL. Field keys/labels/filters are never interpolated into raw SQL without safe mapping/parameterization.
-
-Validation rules have complexity limits to prevent abusive schemas or expensive queries.
+Customer-defined schemas are metadata, not SQL. Field keys/labels/filters are never interpolated into raw SQL without safe mapping/parameterization. Validation/query complexity limits prevent abusive schemas.
 
 ## 12. Rate limits and abuse prevention
 
 Apply limits to:
 
-- authentication attempts
-- API requests
-- media uploads
-- webhook/event volume where appropriate
-- AI calls
-- outbound messaging
-- training jobs
-- imports/exports
+- authentication attempts.
+- API requests.
+- media uploads.
+- webhook/event volume where appropriate.
+- AI calls.
+- outbound messaging.
+- training jobs.
+- imports/exports.
 
-Tenant plan limits complement, not replace, security rate limits.
+Tenant plan limits complement security rate limits.
 
 ## 13. Audit logs
 
 Audit at minimum:
 
-- tenant/member/role changes
-- channel connect/disconnect/credential replacement
-- AI provider credential changes
-- prompt publish/rollback
-- training auto-publish changes
-- plan/limit changes
-- order/booking corrective admin edits
-- exports/deletion
-- super-admin impersonation/support access
-- queue recovery/destructive actions
-
-Audit records are append-oriented and protected from normal tenant modification.
+- tenant/member/role changes.
+- channel connect/disconnect/credential replacement.
+- AI provider credential changes.
+- tenant Media Storage account/key lifecycle where application-managed.
+- prompt publish/rollback.
+- training auto-publish changes.
+- plan/limit changes.
+- order/booking corrective admin edits.
+- exports/deletion.
+- super-admin support access/impersonation.
+- queue recovery/destructive actions.
+- n8n workflow bundle deployment/activation/rollback.
 
 ## 14. Application logging
 
-Structured logs should include:
-
-- timestamp
-- service
-- environment
-- severity
-- correlation/request/job ID
-- tenant/business/channel IDs when appropriate
-- error code/category
-- duration
+Structured logs include timestamp, service, environment, severity, correlation/request/job ID, relevant tenant/business/channel IDs, error code/category, and duration.
 
 Never log:
 
-- full access tokens/API keys
-- passwords/reset tokens
-- unredacted authorization headers
-- unnecessary full message/media contents
+- full access tokens/API keys/Media bearer keys.
+- passwords/reset tokens.
+- authorization headers.
+- unnecessary full message/media contents.
+- raw n8n credential payloads.
 
 ## 15. Backup strategy
 
-### PostgreSQL
+### PostgreSQL application data
 
-- Automated scheduled backups.
-- Point-in-time recovery if feasible for production.
-- Backup encryption.
-- Off-machine/off-volume copy.
-- Periodic restore tests.
+- scheduled backups.
+- PITR if feasible.
+- backup encryption.
+- off-machine/off-volume copy.
+- restore tests.
 
-### Media storage
+### Media Storage
 
-- Backup/replication strategy for persistent customer assets.
-- Document RPO/RTO.
-- Reconciliation between database metadata and stored objects.
+A recoverable media service requires both:
+
+- Media Storage metadata/database backup.
+- physical Media Storage file-tree backup.
+
+`app_db` backup alone is insufficient because it stores references, not file bytes.
 
 ### Redis
 
-Redis is not the canonical source of truth. Persistence may improve recovery, but system correctness cannot depend on Redis being the only copy of important state.
+Redis is not canonical truth. Persistence may improve recovery, but correctness cannot depend on Redis being the only copy of important state.
 
 ### n8n
 
-Back up n8n database and workflow exports/configuration according to deployment policy.
+Infrastructure operations own n8n runtime/internal DB backup. This repository additionally keeps sanitized workflow JSON + manifest in Git so application workflow definitions are recoverable independently of editor state.
 
 ## 16. Recovery objectives
 
-Define production targets before launch:
+Define before launch:
 
-- RPO: maximum acceptable durable data loss.
-- RTO: target service recovery time.
-- Queue recovery behavior.
-- Media recovery behavior.
-- Webhook replay/manual reconciliation procedure.
+- RPO.
+- RTO.
+- queue recovery behavior.
+- Media Storage recovery behavior.
+- workflow bundle recovery/cutover behavior.
+- webhook replay/manual reconciliation procedure.
 
 ## 17. Failure modes
 
 ### PostgreSQL unavailable
 
-- Reject state-changing operations safely.
-- Do not acknowledge durable webhook processing if event was not safely recorded according to ingest design.
-- Alert operators.
+- reject state-changing operations safely.
+- do not acknowledge durable webhook processing if event was not safely recorded according to ingest design.
+- alert operators.
 
 ### Redis unavailable
 
-- Fail/enqueue through durable fallback where designed.
-- Do not lose persisted business state.
-- Degrade rate-limited features safely.
+- use designed durable fallback/outbox.
+- do not lose persisted business state.
+- degrade rate-limited/async features safely.
 
-### Media storage unavailable
+### Media Storage unavailable
 
-- Text-only flows may continue if business policy allows.
-- Media sends/uploads queue/retry.
-- Do not lose metadata references.
+- text-only flows may continue if policy allows.
+- media sends/uploads queue/retry.
+- do not lose `media_assets` ownership/reference state.
+- surface storage/quota/file errors distinctly.
 
 ### AI provider unavailable
 
-- Apply configured fallback only if allowed.
-- Otherwise safe error/handoff.
-- Do not duplicate transactional actions on retry.
+- configured fallback only if allowed.
+- otherwise safe error/handoff.
+- no duplicate transactional actions on retry.
 
 ### Meta/provider unavailable
 
-- Queue bounded retries.
-- Respect retry-after.
-- Surface backlog/failure to admin/customer as appropriate.
+- bounded retries.
+- honor retry-after.
+- surface backlog/failure.
 
 ### n8n unavailable
 
-- Application panels remain available for management where possible.
-- Incoming events are durably accepted/queued only if ingest path supports it.
-- Operators see automation outage.
+- management panels remain available where possible.
+- incoming events are durably accepted/queued if ingest design supports it.
+- operators see automation outage/workflow health failure.
 
 ## 18. Database migrations
 
-- Version-controlled migrations only.
-- Backup/recovery consideration for destructive changes.
-- Expand/migrate/contract patterns for zero/low downtime.
-- Workers/n8n must tolerate compatible schema during rolling deployment.
-- Never manually edit production tables without audited emergency procedure.
+- version-controlled migrations only.
+- backup/recovery consideration for destructive changes.
+- expand/migrate/contract for low downtime.
+- workers and deployed n8n bundle must tolerate compatible schema during rollout.
+- no manual production table edits without audited emergency procedure.
 
-## 19. Privacy and retention
+## 19. n8n workflow artifact security
 
-Define configurable/default retention for:
+Committed workflow JSON must be treated as source code.
 
-- conversations/messages
-- raw webhook payloads
-- media attachments
-- training examples
-- AI provider request metadata
-- audit logs
-- usage events
+Before commit/import verify:
 
-Tenant deletion must respect retention/legal policy while revoking access immediately according to product rules.
+- no customer/provider/storage secrets.
+- no n8n credential export.
+- no customer conversation/sample sensitive content.
+- no unnecessary infrastructure hostname/admin URL.
+- no production-only credential ID as the sole portability mechanism.
+- expected workflow bundle/API contract version is updated.
 
-## 20. Data export/deletion
+Production bundle changes use review, inactive testing, controlled cutover, and rollback metadata.
 
-Provide controlled customer export/deletion workflows in later product phases. Exports are authenticated, audited, time-limited, and never contain decrypted provider secrets.
+## 20. Privacy and retention
 
-## 21. Observability/security alerts
+Define retention for:
+
+- conversations/messages.
+- raw webhook payloads.
+- media attachments.
+- training examples.
+- AI provider request metadata.
+- audit logs.
+- usage events.
+
+Tenant deletion respects legal/retention policy while revoking access immediately according to product rules, and eventually deletes/revokes tenant Media Storage content/account according to approved lifecycle.
+
+## 21. Data export/deletion
+
+Exports/deletion are authenticated/audited. Generated exports use Media Storage with controlled access and never contain decrypted provider/storage secrets.
+
+## 22. Observability/security alerts
 
 Alert on:
 
-- repeated auth failures
-- tenant-isolation error signals
-- webhook signature failures spike
-- queue backlog/dead-letter growth
-- database/Redis/media/n8n outage
-- AI cost anomaly
-- provider auth failures/reconnect spike
-- backup failure
-- worker heartbeat loss
+- repeated auth failures.
+- tenant-isolation error signals.
+- webhook signature failure spike.
+- queue backlog/dead-letter growth.
+- app DB/Redis/Media/n8n integration outage.
+- AI cost anomaly.
+- provider auth failures/reconnect spike.
+- storage quota/capacity error spike.
+- backup failure.
+- worker heartbeat loss.
+- workflow bundle mismatch/required workflow missing.
 
-## 22. Reliability patterns
+## 23. Reliability patterns
 
-- Idempotency keys.
-- Database unique constraints.
-- Transactional outbox.
-- Bounded retries with backoff/jitter.
-- Dead-letter queues.
-- Distributed locks plus DB constraints/versioning.
-- Circuit-breaker/degraded behavior where appropriate.
-- Health/readiness checks.
-- Graceful shutdown of workers so active jobs are not abandoned incorrectly.
+- idempotency keys.
+- database unique constraints.
+- transactional outbox.
+- bounded retries with backoff/jitter.
+- dead-letter queues.
+- distributed locks plus DB versioning/constraints.
+- health/readiness checks.
+- graceful worker shutdown.
+- versioned workflow bundle with blue/green cutover for major changes.
 
-## 23. Acceptance criteria
+## 24. Acceptance criteria
 
 Security/reliability is not complete until:
 
-- tenant escape tests fail closed
-- secrets cannot be retrieved from normal logs/read APIs
-- duplicate webhooks/actions remain idempotent
-- backup restoration is demonstrated
-- worker/Redis restart does not lose durable business state
-- privileged admin actions are auditable
-- failure of AI/Meta/media services produces bounded, observable degradation rather than silent corruption
+- tenant escape tests fail closed.
+- secrets cannot be retrieved from normal logs/read APIs/workflow JSON.
+- Media Storage bearer credentials never reach browsers.
+- duplicate webhooks/actions remain idempotent.
+- backup restoration is demonstrated, including physical media bytes.
+- worker/Redis restart does not lose durable business state.
+- privileged admin/deployment actions are auditable.
+- AI/Meta/Media/n8n failure produces bounded observable degradation rather than silent corruption.
