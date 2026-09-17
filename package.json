@@ -1,0 +1,26 @@
+{
+  "name": "n8n-automation-saas",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "customer-panel",
+    "super-admin-panel"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev -w @n8n-automation/api",
+    "dev:worker": "npm run dev -w @n8n-automation/worker",
+    "dev:customer": "npm run dev -w customer-panel",
+    "dev:admin": "npm run dev -w super-admin-panel",
+    "build": "npm run build -ws --if-present",
+    "typecheck": "npm run typecheck -ws --if-present",
+    "test": "npm run test -ws --if-present",
+    "lint": "npm run lint -ws --if-present",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:status": "node scripts/migrate.mjs --status"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  }
+}
