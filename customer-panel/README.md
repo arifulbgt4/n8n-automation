@@ -1,36 +1,36 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Customer Panel
 
-## Getting Started
+This application is the tenant/customer-facing UI for the n8n Automation SaaS.
 
-First, run the development server:
+## Planning status
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+The codebase is currently a Next.js application shell. Do not implement product features until the repository planning documents are approved.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Canonical specification: [`../docs/04_CUSTOMER_PANEL.md`](../docs/04_CUSTOMER_PANEL.md).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Planned responsibilities
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Customer signup/signin, verification, password/session management.
+- Tenant/organization and team management.
+- Multiple businesses per tenant.
+- Facebook, Instagram, and WhatsApp connection/management.
+- Dynamic Products / Services / Custom Collections and custom fields.
+- Shared datasets across multiple channels with optional channel overrides.
+- Unified conversations/inbox with AI/HUMAN handoff.
+- Orders, bookings, leads, appointments, quotes, and capability-specific business actions.
+- AI provider/BYOK configuration.
+- AI agent profiles, prompts, versions, and channel assignments.
+- Training Studio using trainer identities and simulated example conversations.
+- Knowledge/RAG management.
+- Media library backed by the OpenMusk/VPS media storage service.
+- Messaging, AI, media, and follow-up limits.
+- Per-channel usage/analytics and plan consumption.
 
-## Learn More
+## Architecture rules
 
-To learn more about Next.js, take a look at the following resources:
+- The UI talks to the SaaS backend/API; it does not access PostgreSQL, Redis, n8n admin APIs, or secret stores directly from the browser.
+- `app_db` is the source of truth.
+- Google Sheets are not part of the target system.
+- All tenant-owned operations require server-side authorization.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Read the complete documentation starting at [`../docs/README.md`](../docs/README.md).
