@@ -28,6 +28,16 @@ function stable(value){
   return value;
 }
 function equal(a,b){return JSON.stringify(stable(a))===JSON.stringify(stable(b));}
+function webhookSignatures(workflow){
+  return (workflow.nodes??[])
+    .filter((node)=>String(node.type||"").toLowerCase().endsWith(".webhook"))
+    .map((node)=>{
+      const method=String(node.parameters?.httpMethod||"GET").toUpperCase();
+      const route=String(node.parameters?.path||"").replace(/^\/+|\/+$/g,"");
+      return route ? `webhook:${method}:${route}` : null;
+    })
+    .filter(Boolean);
+}
 
 async function n8n(pathname,init={}){
   if(!apiUrl || !apiKey) throw new Error("N8N_API_URL and N8N_API_KEY are required for --apply.");
@@ -52,6 +62,7 @@ async function listWorkflows(){
   }while(cursor);
   return all;
 }
+async function getWorkflow(id){return n8n(`/workflows/${encodeURIComponent(id)}`);}
 
 async function recordDeployment(record){
   const saas=(process.env.SAAS_API_INTERNAL_URL||"").replace(/\/$/,"");
@@ -71,7 +82,7 @@ async function recordDeployment(record){
 const desired=[];
 for(const entry of manifest.workflows){
   const source=JSON.parse(await readFile(path.join(root,entry.file),"utf8"));
-  desired.push({entry,source,payload:workflowPayload(source)});
+  desired.push({entry,source,payload:workflowPayload(source),signatures:webhookSignatures(source)});
 }
 
 if(!apply){
@@ -79,55 +90,135 @@ if(!apply){
     mode:"dry-run",
     bundleVersion:manifest.bundleVersion,
     apiContractVersion:manifest.apiContractVersion,
+    minimumN8nVersion:manifest.minimumN8nVersion??null,
     environment,
-    workflows:desired.map(({entry,source})=>({key:entry.key,name:source.name,file:entry.file,required:Boolean(entry.required),trigger:entry.trigger})),
+    workflows:desired.map(({entry,source,signatures})=>({
+      key:entry.key,name:source.name,file:entry.file,required:Boolean(entry.required),trigger:entry.trigger,webhookSignatures:signatures
+    })),
+    safety:{
+      staging:"All workflows are created/updated before any activation occurs.",
+      activeUpdate:"Changed active canonical workflows are refused to avoid in-place production mutation.",
+      activationRollback:"Workflows activated by this command are deactivated if a later activation fails.",
+      conflictRollback:"Conflicting active SaaS webhooks deactivated during cutover are reactivated if activation fails."
+    },
     next:"Set N8N_API_URL and N8N_API_KEY, then run with --apply. Add --activate only after validation."
   },null,2));
   process.exit(0);
 }
 
 let existing=await listWorkflows();
-const results=[];
-for(const {entry,source,payload} of desired){
+const staged=[];
+for(const item of desired){
+  const {entry,source,payload,signatures}=item;
   const matches=existing.filter((workflow)=>workflow.name===source.name);
   if(matches.length>1) throw new Error(`Multiple n8n workflows have the name "${source.name}". Resolve duplicates before deployment.`);
   let remote=matches[0];
   let action="unchanged";
   if(!remote){
     remote=await n8n("/workflows",{method:"POST",body:JSON.stringify(payload)});
-    existing.push(remote); action="created";
+    existing.push(remote);
+    action="created";
   }else{
-    const remoteComparable=workflowPayload(remote);
+    const full=remote.nodes?remote:await getWorkflow(remote.id);
+    const remoteComparable=workflowPayload(full);
     if(!equal(payload,remoteComparable)){
+      if(full.active){
+        throw new Error(`Refusing to update active workflow "${source.name}" in place. Perform a blue/green cutover or deactivate the previous workflow before applying this bundle.`);
+      }
       remote=await n8n(`/workflows/${encodeURIComponent(remote.id)}`,{method:"PUT",body:JSON.stringify(payload)});
       action="updated";
+    }else{
+      remote=full;
     }
   }
+  staged.push({entry,source,remote,action,signatures});
+}
 
-  if(activate && entry.required && !remote.active){
-    remote=await n8n(`/workflows/${encodeURIComponent(remote.id)}/activate`,{method:"POST"});
-    action=action==="unchanged"?"activated":`${action}+activated`;
+const activatedThisRun=[];
+const deactivatedConflicts=[];
+try{
+  if(activate){
+    // Preflight all required targets before changing trigger state.
+    const required=staged.filter(({entry})=>Boolean(entry.required));
+    const targetIds=new Set(staged.map(({remote})=>String(remote.id)));
+    const activeCandidates=existing.filter((workflow)=>workflow.active && !targetIds.has(String(workflow.id)) && String(workflow.name||"").startsWith("SaaS -"));
+    const activeFull=[];
+    for(const candidate of activeCandidates){
+      activeFull.push(candidate.nodes?candidate:await getWorkflow(candidate.id));
+    }
+
+    const conflicts=[];
+    for(const target of required){
+      for(const signature of target.signatures){
+        for(const candidate of activeFull){
+          if(webhookSignatures(candidate).includes(signature)){
+            conflicts.push({target,conflict:candidate,signature});
+          }
+        }
+      }
+    }
+    if(conflicts.length && !deactivateConflicts){
+      throw new Error(`Active n8n trigger conflicts detected: ${conflicts.map((x)=>`${x.signature} -> ${x.conflict.name}#${x.conflict.id}`).join(", ")}. Re-run with --deactivate-conflicts only after reviewing the cutover.`);
+    }
+
+    // Deactivate conflicting webhook owners only after the entire bundle staged successfully.
+    const uniqueConflicts=[...new Map(conflicts.map((x)=>[String(x.conflict.id),x.conflict])).values()];
+    for(const conflict of uniqueConflicts){
+      await n8n(`/workflows/${encodeURIComponent(conflict.id)}/deactivate`,{method:"POST"});
+      deactivatedConflicts.push(conflict);
+    }
+
+    // Activation is deliberately a second phase. Rollback below prevents a half-activated bundle.
+    for(const target of required){
+      if(!target.remote.active){
+        target.remote=await n8n(`/workflows/${encodeURIComponent(target.remote.id)}/activate`,{method:"POST"});
+        activatedThisRun.push(target.remote);
+        target.action=target.action==="unchanged"?"activated":`${target.action}+activated`;
+      }
+    }
   }
-
-  if(deactivateConflicts){
-    const prefix="SaaS - ";
-    const conflicts=existing.filter((workflow)=>workflow.id!==remote.id && workflow.name?.startsWith(prefix) && workflow.name===source.name && workflow.active);
-    for(const conflict of conflicts) await n8n(`/workflows/${encodeURIComponent(conflict.id)}/deactivate`,{method:"POST"});
+}catch(error){
+  const rollbackErrors=[];
+  for(const workflow of [...activatedThisRun].reverse()){
+    try{await n8n(`/workflows/${encodeURIComponent(workflow.id)}/deactivate`,{method:"POST"});}
+    catch(rollbackError){rollbackErrors.push(`deactivate ${workflow.id}: ${rollbackError instanceof Error?rollbackError.message:String(rollbackError)}`);}
   }
+  for(const workflow of deactivatedConflicts){
+    try{await n8n(`/workflows/${encodeURIComponent(workflow.id)}/activate`,{method:"POST"});}
+    catch(rollbackError){rollbackErrors.push(`reactivate ${workflow.id}: ${rollbackError instanceof Error?rollbackError.message:String(rollbackError)}`);}
+  }
+  if(rollbackErrors.length){
+    throw new Error(`${error instanceof Error?error.message:String(error)}; activation rollback also reported: ${rollbackErrors.join("; ")}`);
+  }
+  throw error;
+}
 
+const results=[];
+for(const target of staged){
   const record={
     environment,
     bundleVersion:manifest.bundleVersion,
     apiContractVersion:manifest.apiContractVersion,
-    workflowKey:entry.key,
-    workflowName:source.name,
-    n8nWorkflowId:String(remote.id),
-    logicalVersion:source.versionId || null,
-    active:Boolean(remote.active || (activate && entry.required)),
-    deploymentStatus:Boolean(remote.active || (activate && entry.required))?"active":"deployed",
-    metadata:{file:entry.file,action,required:Boolean(entry.required),trigger:entry.trigger},
+    workflowKey:target.entry.key,
+    workflowName:target.source.name,
+    n8nWorkflowId:String(target.remote.id),
+    logicalVersion:target.source.versionId || null,
+    active:Boolean(target.remote.active || (activate && target.entry.required)),
+    deploymentStatus:Boolean(target.remote.active || (activate && target.entry.required))?"active":"deployed",
+    metadata:{
+      file:target.entry.file,
+      action:target.action,
+      required:Boolean(target.entry.required),
+      trigger:target.entry.trigger,
+      webhookSignatures:target.signatures,
+      deactivatedConflicts:deactivatedConflicts.map((workflow)=>({id:String(workflow.id),name:workflow.name}))
+    },
   };
   await recordDeployment(record);
-  results.push({...record,action});
+  results.push({...record,action:target.action});
 }
-console.log(JSON.stringify({mode:"apply",environment,bundleVersion:manifest.bundleVersion,results},null,2));
+console.log(JSON.stringify({
+  mode:"apply",environment,bundleVersion:manifest.bundleVersion,
+  activation:{requested:activate,activatedThisRun:activatedThisRun.map((workflow)=>String(workflow.id)),deactivatedConflicts:deactivatedConflicts.map((workflow)=>String(workflow.id))},
+  results
+},null,2));
