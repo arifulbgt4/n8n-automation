@@ -85,7 +85,8 @@ export async function adminRoutes(app: FastifyInstance) {
       const q = queue(name);
       const counts = await q.getJobCounts("waiting","active","delayed","failed","completed","paused");
       const waiting = await q.getWaiting(0,0);
-      stats.push({ name, counts, oldestWaitingTimestamp: waiting[0]?.timestamp ?? null });
+      const isPaused = await q.isPaused();
+      stats.push({ name, counts, isPaused, oldestWaitingTimestamp: waiting[0]?.timestamp ?? null });
     }
     reply.send({ queues: stats });
   });
