@@ -99,10 +99,68 @@ export async function adminRoutes(app: FastifyInstance) {
     if (env().MEDIA_BASE_URL) {
       try { const response = await fetch(`${env().MEDIA_BASE_URL.replace(/\/$/,"")}/healthz`); health.media = { ok: response.ok, status: response.status }; } catch (error) { health.media = { ok: false, error: error instanceof Error ? error.message : "error" }; }
     } else health.media = { ok: false, status: "not_configured" };
+    const heartbeat = await query<any>("SELECT * FROM automation_runtime_heartbeats ORDER BY last_seen_at DESC LIMIT 1").catch(() => ({ rows: [] as any[] }));
+    const heartbeatRow = heartbeat.rows[0];
+    const heartbeatFresh = heartbeatRow ? Date.now() - new Date(heartbeatRow.last_seen_at).getTime() < 180_000 : false;
     if (env().N8N_HEALTH_WEBHOOK_URL) {
-      try { const response = await fetch(env().N8N_HEALTH_WEBHOOK_URL, { headers: { authorization: `Bearer ${env().INTERNAL_SERVICE_AUTH_SECRET}` } }); health.n8n = { ok: response.ok, status: response.status, bundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION }; } catch (error) { health.n8n = { ok: false, error: error instanceof Error ? error.message : "error" }; }
-    } else health.n8n = { ok: false, status: "health_webhook_not_configured", bundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION };
+      try {
+        const response = await fetch(env().N8N_HEALTH_WEBHOOK_URL, { headers: { authorization: `Bearer ${env().INTERNAL_SERVICE_AUTH_SECRET}` } });
+        health.n8n = {
+          ok: response.ok && (!heartbeatRow || heartbeatFresh),
+          status: response.status,
+          expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
+          reportedBundleVersion: heartbeatRow?.bundle_version ?? null,
+          lastHeartbeatAt: heartbeatRow?.last_seen_at ?? null,
+        };
+      } catch (error) {
+        health.n8n = { ok: heartbeatFresh, error: error instanceof Error ? error.message : "error", reportedBundleVersion: heartbeatRow?.bundle_version ?? null, lastHeartbeatAt: heartbeatRow?.last_seen_at ?? null };
+      }
+    } else {
+      health.n8n = {
+        ok: heartbeatFresh,
+        status: heartbeatRow ? (heartbeatFresh ? "heartbeat_ok" : "heartbeat_stale") : "not_configured",
+        expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
+        reportedBundleVersion: heartbeatRow?.bundle_version ?? null,
+        lastHeartbeatAt: heartbeatRow?.last_seen_at ?? null,
+      };
+    }
     reply.send({ health, elapsedMs: Date.now()-started });
+  });
+
+  app.get("/v1/admin/automation", async (request, reply) => {
+    await requirePlatformAdmin(request);
+    const [heartbeats,outbox,followups] = await Promise.all([
+      query("SELECT * FROM automation_runtime_heartbeats ORDER BY last_seen_at DESC"),
+      query("SELECT status,count(*)::int AS count,min(created_at) AS oldest FROM outbox_events GROUP BY status ORDER BY status"),
+      query("SELECT status,count(*)::int AS count,min(due_at) AS oldest_due FROM followup_jobs GROUP BY status ORDER BY status"),
+    ]);
+    reply.send({
+      expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
+      heartbeats: heartbeats.rows,
+      outbox: outbox.rows,
+      followups: followups.rows,
+    });
+  });
+
+  app.get("/v1/admin/feature-flags", async (request, reply) => {
+    await requirePlatformAdmin(request);
+    const result = await query("SELECT * FROM feature_flags ORDER BY key");
+    reply.send({ flags: result.rows });
+  });
+
+  app.put("/v1/admin/feature-flags/:key", async (request, reply) => {
+    const principal = await requirePlatformAdmin(request);
+    requireCsrf(request);
+    const { key } = z.object({ key: z.string().regex(/^[a-z0-9_.-]+$/).max(120) }).parse(request.params);
+    const input = z.object({ enabled: z.boolean(), description: z.string().max(500).nullable().optional(), rules: z.record(z.string(),z.unknown()).default({}) }).parse(request.body);
+    const result = await query(`
+      INSERT INTO feature_flags(key,description,enabled,rules,updated_by)
+      VALUES ($1,$2,$3,$4::jsonb,$5)
+      ON CONFLICT(key) DO UPDATE SET description=COALESCE(EXCLUDED.description,feature_flags.description),enabled=EXCLUDED.enabled,rules=EXCLUDED.rules,updated_by=EXCLUDED.updated_by,updated_at=now()
+      RETURNING *
+    `, [key,input.description ?? null,input.enabled,JSON.stringify(input.rules),principal.userId]);
+    await audit({ actorUserId: principal.userId, actorType: "platform_admin", action: "FEATURE_FLAG_UPDATED", resourceType: "feature_flag", resourceId: key, safeDiff: { enabled: input.enabled, rules: input.rules }, request });
+    reply.send({ flag: result.rows[0] });
   });
 
   app.get("/v1/admin/plans", async (request, reply) => {
