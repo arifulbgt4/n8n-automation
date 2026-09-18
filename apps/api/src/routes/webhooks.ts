@@ -44,7 +44,12 @@ function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
             text: message.text?.body ?? message.image?.caption ?? message.video?.caption ?? message.document?.caption ?? null,
             providerMediaId: mediaNode?.id ?? null,
             providerTimestamp: message.timestamp ? new Date(Number(message.timestamp) * 1000).toISOString() : null,
-            metadata: { rawType: message.type, context: message.context ?? null },
+            metadata: {
+              rawType: message.type,
+              context: message.context ?? null,
+              providerMimeType: mediaNode?.mime_type ?? null,
+              providerFilename: message.document?.filename ?? null,
+            },
           });
         }
       }
@@ -78,6 +83,8 @@ function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
             appId: event.message.app_id ?? null,
             attachments: event.message.attachments ?? [],
             replyTo: event.message.reply_to?.mid ?? null,
+            recipientId: event.recipient?.id ?? null,
+            providerFilename: attachment?.payload?.title ?? null,
           },
         });
       }
@@ -164,12 +171,39 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
       INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,platform_message_id,platform_event_id,direction,sender_type,message_type,text_content,provider_timestamp,delivery_status,metadata)
       VALUES ($1,$2,$3,$4,$5,$6,'INBOUND',$7,$8,$9,$10,'received',$11::jsonb)
       RETURNING id
-    `, [channel.tenant_id, channel.business_id, channel.id, conversation.rows[0].id, message.messageId, message.eventId, senderType, message.type, message.text ?? null, message.providerTimestamp ?? null, JSON.stringify({ ...message.metadata, providerMediaId: message.providerMediaId, providerMediaUrl: message.providerMediaUrl })]);
+    `, [channel.tenant_id, channel.business_id, channel.id, conversation.rows[0].id, message.messageId, message.eventId, senderType, message.type, message.text ?? null, message.providerTimestamp ?? null, JSON.stringify({
+      ...message.metadata,
+      providerMediaId: message.providerMediaId,
+      providerMediaUrl: message.providerMediaUrl,
+      mediaIngestStatus: ["image","audio","video","document"].includes(message.type) ? "pending" : "none",
+    })]);
     await client.query("UPDATE conversations SET last_message_at=now(),updated_at=now() WHERE id=$1", [conversation.rows[0].id]);
+    if (senderType === "CONTACT") {
+      await client.query(
+        "UPDATE followup_jobs SET status='cancelled',policy_snapshot=policy_snapshot||'{\"cancelled_by_inbound\":true}'::jsonb,updated_at=now() WHERE conversation_id=$1 AND status IN ('scheduled','queued')",
+        [conversation.rows[0].id],
+      );
+    }
     await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key)
       VALUES ($1,$2,$3,$4,'inbound_message',1,'message',$5,$6) ON CONFLICT DO NOTHING`, [channel.tenant_id, channel.business_id, channel.id, conversation.rows[0].id, correlationId, `inbound:${message.messageId}`]);
     return { duplicate: false, messageId: inserted.rows[0].id, conversationId: conversation.rows[0].id, mode: conversation.rows[0].mode, senderType };
   });
+
+  if (!created.duplicate && ["image","audio","video","document"].includes(message.type) && (message.providerMediaId || message.providerMediaUrl)) {
+    const mediaJobId = `media:inbound:${created.messageId}`;
+    await enqueue(QUEUES.media, {
+      jobId: mediaJobId,
+      jobType: "INGEST_INBOUND_MEDIA",
+      tenantId: channel.tenant_id,
+      businessId: channel.business_id,
+      channelAccountId: channel.id,
+      conversationId: created.conversationId,
+      correlationId,
+      idempotencyKey: mediaJobId,
+      createdAt: new Date().toISOString(),
+      payload: { messageId: created.messageId },
+    });
+  }
 
   if (!created.duplicate && created.senderType !== "TRAINER" && created.mode === "AI") {
     const jobId = `inbound:${created.conversationId}:${message.messageId}`;
