@@ -13,12 +13,18 @@
     "dev:worker": "npm run dev -w @n8n-automation/worker",
     "dev:customer": "npm run dev -w customer-panel",
     "dev:admin": "npm run dev -w super-admin-panel",
-    "build": "npm run build -ws --if-present",
-    "typecheck": "npm run typecheck -ws --if-present",
-    "test": "npm run test -ws --if-present",
+    "build": "npm run build:core && npm run build -w @n8n-automation/api && npm run build -w @n8n-automation/worker && npm run build:apps",
+    "typecheck": "npm run build:core && npm run typecheck -w @n8n-automation/api && npm run typecheck -w @n8n-automation/worker && npm run typecheck -w customer-panel && npm run typecheck -w super-admin-panel",
+    "test": "npm run build:core && npm run test -w @n8n-automation/api && npm run test -w @n8n-automation/worker && npm run test -w @n8n-automation/core",
     "lint": "npm run lint -ws --if-present",
     "db:migrate": "node scripts/migrate.mjs",
-    "db:status": "node scripts/migrate.mjs --status"
+    "db:status": "node scripts/migrate.mjs --status",
+    "build:core": "npm run build -w @n8n-automation/core",
+    "build:api": "npm run build:core && npm run build -w @n8n-automation/api",
+    "build:worker": "npm run build:core && npm run build -w @n8n-automation/worker",
+    "build:apps": "npm run build -w customer-panel && npm run build -w super-admin-panel",
+    "ci": "npm run typecheck && npm run test && npm run build",
+    "admin:create": "node scripts/create-super-admin.mjs"
   },
   "engines": {
     "node": ">=20.11.0"
