@@ -1,8 +1,10 @@
-import { Worker, type Job } from "bullmq";
+import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
+  closeQueues,
   decryptSecret,
   env,
   query,
+  queue,
   QUEUES,
   redis,
   redisKey,
@@ -459,6 +461,27 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
     return;
   }
 
+  const effectiveLimits = await query<any>(`
+    SELECT
+      COALESCE((SELECT value FROM tenant_limit_overrides WHERE tenant_id=t.id AND key='messagesPerMinute' AND (expires_at IS NULL OR expires_at>now()) LIMIT 1),
+               NULLIF(p.limits->>'messagesPerMinute','')::numeric,$2::numeric) AS tenant_per_minute,
+      COALESCE((SELECT value FROM tenant_limit_overrides WHERE tenant_id=t.id AND key='messagesPerContactPerMinute' AND (expires_at IS NULL OR expires_at>now()) LIMIT 1),
+               NULLIF(p.limits->>'messagesPerContactPerMinute','')::numeric,12::numeric) AS contact_per_minute
+    FROM tenants t LEFT JOIN plans p ON p.id=t.plan_id WHERE t.id=$1
+  `, [tenantId,config.OUTBOUND_DEFAULT_RATE_PER_MINUTE]);
+  const tenantPerMinute=Math.max(1,Number(effectiveLimits.rows[0]?.tenant_per_minute ?? config.OUTBOUND_DEFAULT_RATE_PER_MINUTE));
+  const tenantLimitResult=await rateLimit(redisKey("rate","tenant",tenantId,"minute"),tenantPerMinute,60_000);
+  if(!tenantLimitResult.allowed){
+    await job.moveToDelayed(Date.now()+tenantLimitResult.retryAfterMs,job.token!);
+    return;
+  }
+  const contactPerMinute=Math.max(1,Number(effectiveLimits.rows[0]?.contact_per_minute ?? 12));
+  const contactLimitResult=await rateLimit(redisKey("rate","contact",channelAccountId,channel.external_contact_id,"minute"),contactPerMinute,60_000);
+  if(!contactLimitResult.allowed){
+    await job.moveToDelayed(Date.now()+contactLimitResult.retryAfterMs,job.token!);
+    return;
+  }
+
   const message = payload.message;
   const persisted = await query<any>(`
     INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,direction,sender_type,message_type,text_content,delivery_status,metadata)
@@ -476,7 +499,17 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
       VALUES ($1,$2,$3,$4,'outbound_message',1,'message',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`, [tenantId,businessId,channelAccountId,conversationId,correlationId,`outbound:${idempotencyKey}`,JSON.stringify({ messageType: message.type, senderType: payload.senderType })]);
     if (message.type === "media") await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key) VALUES ($1,$2,$3,$4,'media_send',1,'media',$5,$6) ON CONFLICT DO NOTHING`, [tenantId,businessId,channelAccountId,conversationId,correlationId,`media-send:${idempotencyKey}`]);
   } catch (error) {
-    await query("UPDATE messages SET delivery_status='failed',metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1", [messageId,JSON.stringify({ error: error instanceof Error ? error.message : "send failed" })]);
+    const status=Number((error as any)?.status || 0);
+    const permanent=[400,401,403,404,410,422].includes(status);
+    await query("UPDATE messages SET delivery_status=$2,metadata=metadata||$3::jsonb,updated_at=now() WHERE id=$1", [
+      messageId,
+      permanent ? "dead_letter" : "failed",
+      JSON.stringify({ error: error instanceof Error ? error.message : "send failed", providerStatus: status || null, permanent }),
+    ]);
+    if([401,403].includes(status)) {
+      await query("UPDATE channel_accounts SET connection_status='degraded',updated_at=now() WHERE id=$1",[channelAccountId]).catch(()=>undefined);
+    }
+    if(permanent) throw new UnrecoverableError(error instanceof Error ? error.message : "Permanent provider delivery failure");
     throw error;
   }
 }
@@ -619,7 +652,6 @@ async function scheduleDueFollowups(limit = 100) {
   for (const row of due) {
     const jobId = `followup:${row.id}`;
     try {
-      const { queue } = await import("@n8n-automation/core");
       await queue(QUEUES.followups).add("SEND_FOLLOWUP", {
         jobId,
         jobType: "SEND_FOLLOWUP",
@@ -711,7 +743,8 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
       const bytes = Buffer.from(JSON.stringify(exportPayload,null,2),"utf8");
       const form = new FormData();
       form.set("visibility","private");
-      form.set("file",new Blob([bytes],{type:"application/json"}),record.type === "tenant_export" ? "tenant-export.json" : "collection-export.json");
+      const exportBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      form.set("file",new Blob([exportBuffer],{type:"application/json"}),record.type === "tenant_export" ? "tenant-export.json" : "collection-export.json");
       const upload = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files`,{method:"POST",headers:{authorization:`Bearer ${credential}`},body:form});
       const body = await upload.json().catch(()=>({})) as any;
       if(!upload.ok || !(body.file ?? body).id) throw new Error(body?.message || "Export upload failed");
@@ -757,7 +790,15 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
 function makeWorker(name: string, handler: (job: Job<any>) => Promise<any>, concurrency = config.WORKER_CONCURRENCY) {
   const worker = new Worker(name, handler, { connection: redis(), prefix: config.QUEUE_PREFIX, concurrency });
   worker.on("completed", (job) => log("job_completed", { queue: name, jobId: job.id, jobName: job.name }));
-  worker.on("failed", (job, error) => log("job_failed", { queue: name, jobId: job?.id, jobName: job?.name, error: error.message }));
+  worker.on("failed", (job, error) => {
+    log("job_failed", { queue: name, jobId: job?.id, jobName: job?.name, error: error.message, attemptsMade: job?.attemptsMade });
+    if (job && job.attemptsMade >= Number(job.opts.attempts ?? 1)) {
+      void query(`INSERT INTO audit_logs(actor_type,tenant_id,business_id,action,resource_type,resource_id,safe_diff)
+        VALUES ('system',$1,$2,'QUEUE_JOB_DEAD_LETTERED','queue_job',$3,$4::jsonb)`, [
+        job.data?.tenantId ?? null,job.data?.businessId ?? null,String(job.id ?? ""),JSON.stringify({queue:name,jobName:job.name,error:error.message})
+      ]).catch(()=>undefined);
+    }
+  });
   worker.on("error", (error) => log("worker_error", { queue: name, error: error.message }));
   workers.push(worker);
 }
@@ -774,6 +815,7 @@ makeWorker(QUEUES.maintenance, async (job) => {
   if(job.name==="CLEAN_EXPIRED_SESSIONS") return query("DELETE FROM sessions WHERE expires_at<now() OR revoked_at<now()-interval '30 days'");
   if(job.name==="CLEAN_IDEMPOTENCY") return query("DELETE FROM idempotency_keys WHERE expires_at IS NOT NULL AND expires_at<now()");
 },1);
+makeWorker(QUEUES.bulk, bulkJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/4)));
 
 // Lightweight periodic durable maintenance. Queue-based jobs remain the canonical long-running path.
 const workerKey = `worker-${process.pid}`;
@@ -817,6 +859,8 @@ async function shutdown(signal:string){
   clearInterval(outboxTimer);
   clearInterval(followupTimer);
   await Promise.all(workers.map((worker)=>worker.close()));
+  await query("DELETE FROM worker_heartbeats WHERE worker_key=$1",[workerKey]).catch(()=>undefined);
+  await closeQueues().catch(()=>undefined);
   process.exit(0);
 }
 process.on("SIGTERM",()=>void shutdown("SIGTERM"));
