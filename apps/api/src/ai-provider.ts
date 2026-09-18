@@ -23,6 +23,30 @@ export type ChatResult = {
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 };
 
+export function assertSafeAiBaseUrl(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("AI provider base URL is invalid"); }
+  if (url.protocol !== "https:" && !(env().NODE_ENV !== "production" && url.protocol === "http:")) {
+    throw new Error("AI provider base URL must use HTTPS");
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g,"");
+  const blockedNames = new Set(["localhost","localhost.localdomain","metadata.google.internal"]);
+  if (blockedNames.has(host) || host.endsWith(".local") || host.endsWith(".internal")) throw new Error("AI provider base URL points to a private hostname");
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.some((n) => n < 0 || n > 255)) throw new Error("AI provider base URL contains an invalid IP address");
+    const [a,b] = octets;
+    if (a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) {
+      throw new Error("AI provider base URL points to a private network");
+    }
+  }
+  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) throw new Error("AI provider base URL points to a private IPv6 address");
+  url.username = "";
+  url.password = "";
+  return url.toString().replace(/\/$/,"");
+}
+
 function apiKey(connection: AiConnection): string {
   if (!connection.encrypted_api_key) throw new Error("AI provider API key is missing");
   return decryptSecret(connection.encrypted_api_key);
@@ -42,7 +66,7 @@ async function jsonResponse(response: Response): Promise<any> {
 
 export async function chat(connection: AiConnection, config: AiModelConfig, input: ChatInput): Promise<ChatResult> {
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url || "https://api.openai.com/v1").replace(/\/$/, "");
+    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const messages = [
       ...(input.system ? [{ role: "system", content: input.system }] : []),
       ...input.messages,
