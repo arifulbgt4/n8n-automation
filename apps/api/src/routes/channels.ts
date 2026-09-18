@@ -10,6 +10,7 @@ import {
   transaction,
 } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireCsrf, requireTenant } from "../lib.js";
+import { assertChannelOverrideWithinPlan, assertTenantCountLimit } from "../limits.js";
 
 const platformSchema = z.enum(["facebook", "instagram", "whatsapp"]);
 const credentialInput = z.object({
@@ -82,6 +83,7 @@ export async function channelRoutes(app: FastifyInstance) {
     const principal = await requireAuth(request);
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
+    await assertTenantCountLimit(params.tenantId, "channels", "SELECT count(*) FROM channel_accounts WHERE tenant_id=$1 AND active=true");
     const input = z.object({
       businessId: z.string().uuid(),
       platform: platformSchema,
@@ -185,6 +187,7 @@ export async function channelRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.record(z.string().min(1).max(100), z.number().nonnegative()).parse(request.body);
+    for (const [key,value] of Object.entries(input)) await assertChannelOverrideWithinPlan(params.tenantId,key,value);
     const channel = await query<{ business_id: string }>("SELECT business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId, params.tenantId]);
     if (!channel.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
     await transaction(async (client) => {
