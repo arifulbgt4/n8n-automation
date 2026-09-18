@@ -171,6 +171,13 @@ export async function createSession(
     INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
     VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval,CASE WHEN $7 THEN now() ELSE NULL END)
   `, [userId, sha256(token), csrfHash, request.ip || null, request.headers["user-agent"] || null, String(days), Boolean(options.mfaVerified)]);
+  reply.setCookie("n8nauto_csrf", csrfRaw, {
+    httpOnly: false,
+    secure: env().NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: days * 24 * 60 * 60,
+  });
   reply.setCookie(env().SESSION_COOKIE_NAME, token, {
     httpOnly: true,
     secure: env().NODE_ENV === "production",
@@ -183,6 +190,7 @@ export async function createSession(
 
 export function clearSessionCookie(reply: FastifyReply): void {
   reply.clearCookie(env().SESSION_COOKIE_NAME, { path: "/" });
+  reply.clearCookie("n8nauto_csrf", { path: "/" });
 }
 
 export async function audit(input: {
