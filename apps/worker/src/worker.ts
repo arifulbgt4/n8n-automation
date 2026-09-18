@@ -630,6 +630,120 @@ async function scheduleDueFollowups(limit = 100) {
   return due.length;
 }
 
+
+async function bulkJob(job: Job<JobEnvelope<any>>) {
+  const jobRecordId = String(job.data.payload.jobRecordId || "");
+  if (!jobRecordId) throw new Error("Bulk job is missing jobRecordId");
+  const recordResult = await query<any>("SELECT * FROM job_records WHERE id=$1 AND tenant_id=$2", [jobRecordId,job.data.tenantId]);
+  const record = recordResult.rows[0];
+  if (!record || record.status === "cancelled") return;
+  await query("UPDATE job_records SET status='processing',started_at=COALESCE(started_at,now()),progress=5,updated_at=now() WHERE id=$1", [jobRecordId]);
+
+  try {
+    if (record.type === "collection_import") {
+      const collectionId = String(record.input_json?.collectionId || "");
+      const rows = Array.isArray(record.input_json?.items) ? record.input_json.items : [];
+      const collection = await query<any>("SELECT * FROM collections WHERE id=$1 AND tenant_id=$2 AND status<>'archived'", [collectionId,job.data.tenantId]);
+      if (!collection.rows[0]) throw new Error("Import collection not found");
+      let inserted = 0;
+      await transaction(async (client) => {
+        for (const entry of rows) {
+          const title = typeof entry?.title === "string" ? entry.title.slice(0,240) : null;
+          const data = entry?.data && typeof entry.data === "object" && !Array.isArray(entry.data) ? entry.data : {};
+          await client.query(`
+            INSERT INTO collection_items(tenant_id,business_id,collection_id,title,status,data_jsonb)
+            VALUES ($1,$2,$3,$4,'active',$5::jsonb)
+          `, [job.data.tenantId,collection.rows[0].business_id,collectionId,title,JSON.stringify(data)]);
+          inserted++;
+        }
+      });
+      await query("UPDATE job_records SET status='completed',progress=100,result_json=$2::jsonb,completed_at=now(),updated_at=now() WHERE id=$1",
+        [jobRecordId,JSON.stringify({inserted})]);
+      return;
+    }
+
+    if (record.type === "collection_export" || record.type === "tenant_export") {
+      let exportPayload: any;
+      let businessId: string | null = record.business_id ?? null;
+      if (record.type === "collection_export") {
+        const collectionId = String(record.input_json?.collectionId || "");
+        const [collection,fields,items] = await Promise.all([
+          query("SELECT * FROM collections WHERE id=$1 AND tenant_id=$2",[collectionId,job.data.tenantId]),
+          query("SELECT * FROM collection_fields WHERE collection_id=$1 AND tenant_id=$2 ORDER BY display_order,id",[collectionId,job.data.tenantId]),
+          query("SELECT * FROM collection_items WHERE collection_id=$1 AND tenant_id=$2 AND status<>'deleted' ORDER BY created_at",[collectionId,job.data.tenantId]),
+        ]);
+        if (!collection.rows[0]) throw new Error("Export collection not found");
+        businessId = collection.rows[0].business_id;
+        exportPayload = { exportedAt:new Date().toISOString(),collection:collection.rows[0],fields:fields.rows,items:items.rows };
+      } else {
+        const tenant = await query("SELECT id,name,slug,status,settings_json,created_at FROM tenants WHERE id=$1",[job.data.tenantId]);
+        if (!tenant.rows[0]) throw new Error("Tenant not found");
+        const [businesses,channels,collections,fields,items,orders,bookings,leads,quotes,cases,agents,prompts,knowledge] = await Promise.all([
+          query("SELECT * FROM businesses WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT id,business_id,platform,name,external_account_id,public_identifier,connection_status,settings_json,created_at FROM channel_accounts WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM collections WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM collection_fields WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM collection_items WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM orders WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM bookings WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM leads WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM quote_requests WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM support_cases WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM agent_profiles WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT * FROM prompt_versions WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT id,business_id,agent_profile_id,type,title,content,status,source_version,metadata,created_at,updated_at FROM knowledge_sources WHERE tenant_id=$1",[job.data.tenantId]),
+        ]);
+        exportPayload={exportedAt:new Date().toISOString(),tenant:tenant.rows[0],businesses:businesses.rows,channels:channels.rows,collections:collections.rows,fields:fields.rows,items:items.rows,orders:orders.rows,bookings:bookings.rows,leads:leads.rows,quoteRequests:quotes.rows,supportCases:cases.rows,agents:agents.rows,prompts:prompts.rows,knowledge:knowledge.rows};
+      }
+
+      if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
+      const credential = await tenantMediaCredential(job.data.tenantId);
+      const bytes = Buffer.from(JSON.stringify(exportPayload,null,2),"utf8");
+      const form = new FormData();
+      form.set("visibility","private");
+      form.set("file",new Blob([bytes],{type:"application/json"}),record.type === "tenant_export" ? "tenant-export.json" : "collection-export.json");
+      const upload = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files`,{method:"POST",headers:{authorization:`Bearer ${credential}`},body:form});
+      const body = await upload.json().catch(()=>({})) as any;
+      if(!upload.ok || !(body.file ?? body).id) throw new Error(body?.message || "Export upload failed");
+      const file=body.file ?? body;
+      const asset=await query<any>(`
+        INSERT INTO media_assets(tenant_id,business_id,storage_file_id,storage_user_id,original_name,mime_type,kind,size_bytes,visibility,content_hash,public_url,processing_status,metadata)
+        VALUES ($1,$2,$3,$4,$5,$6,'document',$7,'private',$8,NULL,'ready',$9::jsonb) RETURNING id
+      `,[job.data.tenantId,businessId,file.id,file.user_id ?? null,file.original_name ?? "export.json",file.mime_type ?? "application/json",file.size_bytes ?? bytes.length,file.checksum_sha256 ?? sha256(bytes),JSON.stringify({source:record.type,jobRecordId})]);
+      await query("UPDATE job_records SET status='completed',progress=100,result_json=$2::jsonb,completed_at=now(),updated_at=now() WHERE id=$1",
+        [jobRecordId,JSON.stringify({mediaAssetId:asset.rows[0].id})]);
+      await query("UPDATE tenant_data_requests SET status='completed',result_media_asset_id=$2,completed_at=now() WHERE job_record_id=$1",
+        [jobRecordId,asset.rows[0].id]).catch(()=>undefined);
+      return;
+    }
+
+    if (record.type === "tenant_delete") {
+      const assets = await query<{ storage_file_id: string }>("SELECT storage_file_id FROM media_assets WHERE tenant_id=$1 AND processing_status<>'deleted'",[job.data.tenantId]);
+      if (config.MEDIA_BASE_URL) {
+        const credential = await tenantMediaCredential(job.data.tenantId).catch(()=>null);
+        if (credential) {
+          for (const asset of assets.rows) {
+            await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}}).catch(()=>undefined);
+          }
+        }
+      }
+      await query("UPDATE tenants SET status='deleted',updated_at=now() WHERE id=$1",[job.data.tenantId]);
+      await query("UPDATE channel_accounts SET active=false,connection_status='disconnected',updated_at=now() WHERE tenant_id=$1",[job.data.tenantId]);
+      await query("DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id=$1)",[job.data.tenantId]);
+      await query("UPDATE job_records SET status='completed',progress=100,result_json='{\"tenantDisabled\":true}'::jsonb,completed_at=now(),updated_at=now() WHERE id=$1",[jobRecordId]);
+      await query("UPDATE tenant_data_requests SET status='completed',completed_at=now() WHERE job_record_id=$1",[jobRecordId]).catch(()=>undefined);
+      return;
+    }
+
+    throw new Error(`Unsupported bulk job type: ${record.type}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Bulk job failed";
+    await query("UPDATE job_records SET status='failed',error_json=$2::jsonb,completed_at=now(),updated_at=now() WHERE id=$1",[jobRecordId,JSON.stringify({message})]).catch(()=>undefined);
+    await query("UPDATE tenant_data_requests SET status='failed',completed_at=now(),metadata=metadata||$2::jsonb WHERE job_record_id=$1",[jobRecordId,JSON.stringify({error:message})]).catch(()=>undefined);
+    throw error;
+  }
+}
+
 function makeWorker(name: string, handler: (job: Job<any>) => Promise<any>, concurrency = config.WORKER_CONCURRENCY) {
   const worker = new Worker(name, handler, { connection: redis(), prefix: config.QUEUE_PREFIX, concurrency });
   worker.on("completed", (job) => log("job_completed", { queue: name, jobId: job.id, jobName: job.name }));
@@ -652,6 +766,20 @@ makeWorker(QUEUES.maintenance, async (job) => {
 },1);
 
 // Lightweight periodic durable maintenance. Queue-based jobs remain the canonical long-running path.
+const workerKey = `worker-${process.pid}`;
+const workerHeartbeat = async () => {
+  await query(`
+    INSERT INTO worker_heartbeats(worker_key,worker_type,queues,metadata,last_seen_at)
+    VALUES ($1,'general',$2,$3::jsonb,now())
+    ON CONFLICT(worker_key) DO UPDATE SET queues=EXCLUDED.queues,metadata=EXCLUDED.metadata,last_seen_at=now()
+  `,[workerKey,Object.values(QUEUES),JSON.stringify({pid:process.pid,concurrency:config.WORKER_CONCURRENCY})]);
+};
+const heartbeatTimer=setInterval(()=>{
+  void workerHeartbeat().catch((error)=>log("worker_heartbeat_error",{error:error instanceof Error?error.message:"error"}));
+},15_000);
+heartbeatTimer.unref();
+void workerHeartbeat().catch((error)=>log("worker_heartbeat_error",{error:error instanceof Error?error.message:"error"}));
+
 const timer=setInterval(()=>{
   void analyticsRollup().catch((error)=>log("analytics_rollup_error",{error:error instanceof Error?error.message:"error"}));
 },15*60*1000);
@@ -675,6 +803,7 @@ log("worker_started", { queues: workers.map((worker)=>worker.name), concurrency:
 async function shutdown(signal:string){
   log("worker_shutdown",{signal});
   clearInterval(timer);
+  clearInterval(heartbeatTimer);
   clearInterval(outboxTimer);
   clearInterval(followupTimer);
   await Promise.all(workers.map((worker)=>worker.close()));
