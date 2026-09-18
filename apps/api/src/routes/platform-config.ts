@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { query } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requirePlatformAdmin, requireTenant } from "../lib.js";
+import { query, transaction } from "@n8n-automation/core";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requirePlatformAdmin, requireRecentPlatformAdmin, requireTenant } from "../lib.js";
 
 async function validatePolicyScope(tenantId:string,businessId:string,agentProfileId?:string|null,channelAccountId?:string|null){
   const business=await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2 AND status<>'archived'",[businessId,tenantId]);
@@ -188,6 +188,78 @@ export async function platformConfigRoutes(app:FastifyInstance){
     await requireTenant(request,tenantId);
     const result=await query("SELECT id,key,name,description,capabilities,sections_json FROM prompt_templates WHERE active=true ORDER BY name");
     reply.send({templates:result.rows});
+  });
+
+  app.get("/v1/admin/tenants/:tenantId/billing",async(request,reply)=>{
+    await requirePlatformAdmin(request);
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const tenant=await query("SELECT id,name,plan_id,status FROM tenants WHERE id=$1",[tenantId]);
+    if(!tenant.rows[0])throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
+    const [subscription,credits,invoices,usageBilling]=await Promise.all([
+      query("SELECT ts.*,p.key AS plan_key,p.name AS plan_name FROM tenant_subscriptions ts JOIN plans p ON p.id=ts.plan_id WHERE ts.tenant_id=$1 ORDER BY ts.created_at DESC LIMIT 10",[tenantId]),
+      query("SELECT * FROM tenant_credits WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100",[tenantId]),
+      query("SELECT * FROM invoice_records WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100",[tenantId]),
+      query("SELECT * FROM usage_billing_records WHERE tenant_id=$1 ORDER BY period_start DESC LIMIT 36",[tenantId])
+    ]);
+    reply.send({tenant:tenant.rows[0],subscriptions:subscription.rows,credits:credits.rows,invoices:invoices.rows,usageBilling:usageBilling.rows});
+  });
+
+  app.put("/v1/admin/tenants/:tenantId/subscription",async(request,reply)=>{
+    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const input=z.object({
+      planId:z.string().uuid(),
+      status:z.enum(["trialing","active","past_due","paused","cancelled"]).default("active"),
+      provider:z.string().max(80).nullable().optional(),
+      providerSubscriptionId:z.string().max(240).nullable().optional(),
+      currentPeriodStart:z.string().datetime().nullable().optional(),
+      currentPeriodEnd:z.string().datetime().nullable().optional(),
+      trialEndsAt:z.string().datetime().nullable().optional(),
+      metadata:z.record(z.string(),z.unknown()).default({})
+    }).parse(request.body);
+    const [tenant,plan]=await Promise.all([query("SELECT id FROM tenants WHERE id=$1",[tenantId]),query("SELECT id FROM plans WHERE id=$1 AND active=true",[input.planId])]);
+    if(!tenant.rows[0])throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
+    if(!plan.rows[0])throw new ApiError(400,"PLAN_NOT_FOUND","Plan not found or inactive.");
+    const row=await transaction(async(client)=>{
+      await client.query("UPDATE tenant_subscriptions SET status='cancelled',updated_at=now() WHERE tenant_id=$1 AND status IN ('trialing','active','past_due','paused')",[tenantId]);
+      const created=await client.query<any>(`
+        INSERT INTO tenant_subscriptions(tenant_id,plan_id,status,provider,provider_subscription_id,current_period_start,current_period_end,trial_ends_at,metadata)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *
+      `,[tenantId,input.planId,input.status,input.provider??null,input.providerSubscriptionId??null,input.currentPeriodStart??null,input.currentPeriodEnd??null,input.trialEndsAt??null,JSON.stringify(input.metadata)]);
+      await client.query("UPDATE tenants SET plan_id=$2,updated_at=now() WHERE id=$1",[tenantId,input.planId]);
+      return created.rows[0];
+    });
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",tenantId,action:"ADMIN_SUBSCRIPTION_UPDATED",resourceType:"tenant_subscription",resourceId:row.id,safeDiff:{planId:input.planId,status:input.status,provider:input.provider},request});
+    reply.send({subscription:row});
+  });
+
+  app.post("/v1/admin/tenants/:tenantId/credits",async(request,reply)=>{
+    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const input=z.object({amount:z.number(),currency:z.string().length(3).transform(v=>v.toUpperCase()),reason:z.string().max(1000).nullable().optional(),expiresAt:z.string().datetime().nullable().optional()}).parse(request.body);
+    const tenant=await query("SELECT id FROM tenants WHERE id=$1",[tenantId]);if(!tenant.rows[0])throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
+    const row=await query<any>("INSERT INTO tenant_credits(tenant_id,amount,currency,reason,expires_at,created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",[tenantId,input.amount,input.currency,input.reason??null,input.expiresAt??null,principal.userId]);
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",tenantId,action:"ADMIN_CREDIT_CREATED",resourceType:"tenant_credit",resourceId:row.rows[0].id,safeDiff:{amount:input.amount,currency:input.currency,reason:input.reason},request});
+    reply.code(201).send({credit:row.rows[0]});
+  });
+
+  app.post("/v1/admin/tenants/:tenantId/invoices",async(request,reply)=>{
+    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const input=z.object({
+      provider:z.string().max(80).nullable().optional(),externalInvoiceId:z.string().max(240).nullable().optional(),
+      status:z.string().min(1).max(80).default("draft"),currency:z.string().length(3).transform(v=>v.toUpperCase()),
+      amountDue:z.number().nonnegative(),amountPaid:z.number().nonnegative().default(0),hostedUrl:z.string().url().nullable().optional(),
+      issuedAt:z.string().datetime().nullable().optional(),dueAt:z.string().datetime().nullable().optional(),paidAt:z.string().datetime().nullable().optional(),
+      metadata:z.record(z.string(),z.unknown()).default({})
+    }).parse(request.body);
+    const tenant=await query("SELECT id FROM tenants WHERE id=$1",[tenantId]);if(!tenant.rows[0])throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
+    const row=await query<any>(`
+      INSERT INTO invoice_records(tenant_id,provider,external_invoice_id,status,currency,amount_due,amount_paid,hosted_url,metadata,issued_at,due_at,paid_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12) RETURNING *
+    `,[tenantId,input.provider??null,input.externalInvoiceId??null,input.status,input.currency,input.amountDue,input.amountPaid,input.hostedUrl??null,JSON.stringify(input.metadata),input.issuedAt??null,input.dueAt??null,input.paidAt??null]);
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",tenantId,action:"ADMIN_INVOICE_RECORDED",resourceType:"invoice_record",resourceId:row.rows[0].id,safeDiff:{provider:input.provider,status:input.status,currency:input.currency,amountDue:input.amountDue},request});
+    reply.code(201).send({invoice:row.rows[0]});
   });
 
   app.get("/v1/admin/ai-model-registry",async(request,reply)=>{
