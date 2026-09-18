@@ -309,6 +309,31 @@ export async function aiRoutes(app: FastifyInstance) {
     reply.code(201).send({ example: result.rows[0] });
   });
 
+  app.patch("/v1/tenants/:tenantId/agents/:agentId/training-examples/:exampleId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),agentId:z.string().uuid(),exampleId:z.string().uuid()}).parse(request.params);
+    const principal=await requireAuth(request);
+    await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
+    requireCsrf(request);
+    const agent=await loadAgent(params.tenantId,params.agentId);
+    const input=z.object({approvalStatus:z.enum(["pending","approved","rejected"])}).parse(request.body);
+    const result=await query<any>("UPDATE training_examples SET approval_status=$4 WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 RETURNING *",[params.exampleId,params.tenantId,params.agentId,input.approvalStatus]);
+    if(!result.rows[0]) throw new ApiError(404,"TRAINING_EXAMPLE_NOT_FOUND","Training example not found.");
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:agent.business_id,action:"TRAINING_EXAMPLE_REVIEWED",resourceType:"training_example",resourceId:params.exampleId,safeDiff:input,request});
+    reply.send({example:result.rows[0]});
+  });
+
+  app.post("/v1/tenants/:tenantId/agents/:agentId/prompts/:promptId/discard", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),agentId:z.string().uuid(),promptId:z.string().uuid()}).parse(request.params);
+    const principal=await requireAuth(request);
+    await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
+    requireCsrf(request);
+    const agent=await loadAgent(params.tenantId,params.agentId);
+    const result=await query<any>("UPDATE prompt_versions SET status='rejected' WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 AND status IN ('candidate','draft') RETURNING id,version,status",[params.promptId,params.tenantId,params.agentId]);
+    if(!result.rows[0]) throw new ApiError(409,"PROMPT_NOT_DISCARDABLE","Prompt version cannot be discarded.");
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:agent.business_id,action:"PROMPT_DISCARDED",resourceType:"prompt_version",resourceId:params.promptId,request});
+    reply.send({prompt:result.rows[0]});
+  });
+
   app.post("/v1/tenants/:tenantId/agents/:agentId/training-jobs", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
