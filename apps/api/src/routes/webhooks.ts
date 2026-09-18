@@ -24,6 +24,56 @@ function verifyMetaSignature(request: FastifyRequest): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+async function applyProviderDeliveryEvents(payload:any,correlationId:string){
+  if(payload?.object==="whatsapp_business_account"){
+    for(const entry of payload.entry??[]){
+      for(const change of entry.changes??[]){
+        for(const status of change.value?.statuses??[]){
+          const providerId=String(status.id??"");if(!providerId)continue;
+          const mapped=status.status==="read"?"read":status.status==="delivered"?"delivered":status.status==="sent"?"sent":status.status==="failed"?"failed":String(status.status||"sent");
+          const updated=await query<any>(`
+            UPDATE messages SET delivery_status=$2,metadata=metadata||$3::jsonb,updated_at=now()
+            WHERE platform_message_id=$1 AND direction='OUTBOUND'
+            RETURNING tenant_id,business_id,channel_account_id,conversation_id,id
+          `,[providerId,mapped,JSON.stringify({providerStatus:status.status,providerStatusAt:status.timestamp?new Date(Number(status.timestamp)*1000).toISOString():null,providerErrors:status.errors??null})]);
+          for(const row of updated.rows){
+            await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
+              VALUES ($1,$2,$3,$4,'delivery_status',1,'event',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`,
+              [row.tenant_id,row.business_id,row.channel_account_id,row.conversation_id,correlationId,`delivery:${providerId}:${mapped}`,JSON.stringify({messageId:row.id,status:mapped})]);
+          }
+        }
+      }
+    }
+    return;
+  }
+  if(payload?.object==="page"||payload?.object==="instagram"){
+    const platform=payload.object==="instagram"?"instagram":"facebook";
+    for(const entry of payload.entry??[]){
+      for(const event of entry.messaging??[]){
+        const receivingId=String(event.recipient?.id??entry.id??"");
+        if(!receivingId)continue;
+        const channel=await query<any>("SELECT id,tenant_id,business_id FROM channel_accounts WHERE platform=$1 AND external_account_id=$2",[platform,receivingId]);
+        if(!channel.rows[0])continue;
+        if(event.delivery?.mids?.length){
+          await query("UPDATE messages SET delivery_status='delivered',metadata=metadata||$3::jsonb,updated_at=now() WHERE channel_account_id=$1 AND platform_message_id=ANY($2::text[]) AND direction='OUTBOUND'",
+            [channel.rows[0].id,event.delivery.mids,JSON.stringify({deliveredAt:event.delivery.watermark?new Date(Number(event.delivery.watermark)).toISOString():null})]);
+        }
+        if(event.read?.watermark){
+          const contact=await query<any>("SELECT id FROM contacts WHERE channel_account_id=$1 AND external_contact_id=$2",[channel.rows[0].id,String(event.sender?.id??"")]);
+          if(contact.rows[0]){
+            await query(`
+              UPDATE messages m SET delivery_status='read',metadata=metadata||$3::jsonb,updated_at=now()
+              FROM conversations cv
+              WHERE m.conversation_id=cv.id AND cv.contact_id=$1 AND m.channel_account_id=$2 AND m.direction='OUTBOUND'
+                AND m.created_at<=to_timestamp($4::double precision/1000.0) AND m.delivery_status IN ('sent','delivered')
+            `,[contact.rows[0].id,channel.rows[0].id,JSON.stringify({readAt:new Date(Number(event.read.watermark)).toISOString()}),Number(event.read.watermark)]);
+          }
+        }
+      }
+    }
+  }
+}
+
 function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
   const messages: NormalizedInboundMessage[] = [];
   if (payload?.object === "whatsapp_business_account") {
@@ -235,6 +285,7 @@ export async function webhookRoutes(app: FastifyInstance) {
   app.post("/webhooks/meta", async (request, reply) => {
     if (!verifyMetaSignature(request)) throw new ApiError(401, "WEBHOOK_SIGNATURE_INVALID", "Meta webhook signature is invalid.");
     const correlationId = requestId(request);
+    await applyProviderDeliveryEvents(request.body,correlationId);
     const normalized = normalizeMetaPayload(request.body);
     const results = [];
     for (const message of normalized) results.push(await ingestOne(message, correlationId));
