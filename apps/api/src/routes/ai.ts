@@ -308,6 +308,57 @@ export async function aiRoutes(app: FastifyInstance) {
     reply.code(201).send({ trainer: result.rows[0] });
   });
 
+  app.patch("/v1/tenants/:tenantId/agents/:agentId/trainers/:trainerId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),agentId:z.string().uuid(),trainerId:z.string().uuid()}).parse(request.params);
+    const principal=await requireAuth(request);
+    await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
+    requireCsrf(request);
+    const agent=await loadAgent(params.tenantId,params.agentId);
+    await requireBusinessAccess(request,params.tenantId,agent.business_id,["OWNER","ADMIN","STAFF"]);
+    const input=z.object({
+      active:z.boolean().optional(),
+      label:z.string().trim().max(120).nullable().optional(),
+      identifier:z.string().min(1).max(500).optional(),
+      channelAccountId:z.string().uuid().nullable().optional(),
+    }).parse(request.body);
+    if(input.channelAccountId){
+      const channel=await query("SELECT 1 FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3",[input.channelAccountId,params.tenantId,agent.business_id]);
+      if(!channel.rows[0])throw new ApiError(400,"TRAINER_CHANNEL_INVALID","Trainer channel does not belong to this business.");
+    }
+    const row=await query<any>(`
+      UPDATE trainer_identities SET
+        active=COALESCE($4,active),
+        label=CASE WHEN $5::boolean THEN $6 ELSE label END,
+        identifier_hash=CASE WHEN $7::boolean THEN $8 ELSE identifier_hash END,
+        encrypted_identifier=CASE WHEN $7::boolean THEN $9 ELSE encrypted_identifier END,
+        channel_account_id=CASE WHEN $10::boolean THEN $11::uuid ELSE channel_account_id END,
+        updated_at=now()
+      WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3
+      RETURNING id,business_id,channel_account_id,agent_profile_id,type,label,active,created_at,updated_at
+    `,[
+      params.trainerId,params.tenantId,params.agentId,input.active??null,
+      Object.prototype.hasOwnProperty.call(input,"label"),input.label??null,
+      Boolean(input.identifier),input.identifier?sha256(input.identifier):null,input.identifier?encryptSecret(input.identifier):null,
+      Object.prototype.hasOwnProperty.call(input,"channelAccountId"),input.channelAccountId??null
+    ]);
+    if(!row.rows[0])throw new ApiError(404,"TRAINER_NOT_FOUND","Trainer identity not found.");
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:agent.business_id,action:"TRAINER_IDENTITY_UPDATED",resourceType:"trainer_identity",resourceId:params.trainerId,safeDiff:{active:input.active,label:input.label,identifierRotated:Boolean(input.identifier),channelAccountId:input.channelAccountId},request});
+    reply.send({trainer:row.rows[0]});
+  });
+
+  app.delete("/v1/tenants/:tenantId/agents/:agentId/trainers/:trainerId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),agentId:z.string().uuid(),trainerId:z.string().uuid()}).parse(request.params);
+    const principal=await requireAuth(request);
+    await requireTenant(request,params.tenantId,["OWNER","ADMIN"]);
+    requireCsrf(request);
+    const agent=await loadAgent(params.tenantId,params.agentId);
+    await requireBusinessAccess(request,params.tenantId,agent.business_id,["OWNER","ADMIN"]);
+    const row=await query("DELETE FROM trainer_identities WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 RETURNING id",[params.trainerId,params.tenantId,params.agentId]);
+    if(!row.rows[0])throw new ApiError(404,"TRAINER_NOT_FOUND","Trainer identity not found.");
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:agent.business_id,action:"TRAINER_IDENTITY_DELETED",resourceType:"trainer_identity",resourceId:params.trainerId,request});
+    reply.send({ok:true});
+  });
+
   app.get("/v1/tenants/:tenantId/agents/:agentId/training-examples", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid() }).parse(request.params);
     await requireTenant(request, params.tenantId);
