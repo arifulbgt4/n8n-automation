@@ -27,6 +27,6 @@
     "admin:create": "node scripts/create-super-admin.mjs"
   },
   "engines": {
-    "node": ">=20.11.0"
+    "node": ">=22.0.0"
   }
 }
