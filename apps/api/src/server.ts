@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
-import { assertDatabaseReady, env, redis } from "@n8n-automation/core";
+import { assertDatabaseReady, env, redis, redisKey } from "@n8n-automation/core";
 import { ApiError, jsonError, requestId } from "./lib.js";
 import { authRoutes } from "./routes/auth.js";
 import { adminAuthRoutes } from "./routes/admin-auth.js";
@@ -56,12 +56,33 @@ await app.register(multipart, {
 });
 
 app.addHook("onRequest", async (request, reply) => {
+  (request as any).metricsStartedAt = Date.now();
   reply.header("x-request-id", requestId(request));
   reply.header("x-content-type-options", "nosniff");
   reply.header("referrer-policy", "strict-origin-when-cross-origin");
   reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
   reply.header("cross-origin-opener-policy", "same-origin");
   if (config.NODE_ENV === "production") reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+});
+
+app.addHook("onResponse", async (request, reply) => {
+  const started=Number((request as any).metricsStartedAt ?? Date.now());
+  const latency=Math.max(0,Date.now()-started);
+  const minute=new Date().toISOString().slice(0,16);
+  const key=redisKey("metrics","api",minute);
+  const statusClass=`${Math.floor(reply.statusCode/100)}xx`;
+  const route=String(request.routeOptions?.url || request.url.split("?")[0]).replace(/[^a-zA-Z0-9_/:.-]/g,"_").slice(0,180);
+  try {
+    const pipeline=redis().multi();
+    pipeline.hincrby(key,"requests",1);
+    pipeline.hincrbyfloat(key,"latency_ms_total",latency);
+    pipeline.hincrby(key,`status_${statusClass}`,1);
+    pipeline.hincrby(key,`route:${route}`,1);
+    pipeline.expire(key,48*60*60);
+    await pipeline.exec();
+  } catch {
+    // Metrics must never break request delivery.
+  }
 });
 
 app.setErrorHandler((error, request, reply) => {
