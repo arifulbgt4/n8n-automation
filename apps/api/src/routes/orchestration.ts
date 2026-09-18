@@ -183,6 +183,40 @@ export async function orchestrationRoutes(app: FastifyInstance) {
     reply.send({ ok: true, expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION });
   });
 
+  app.post("/v1/internal/n8n/deployments", async (request, reply) => {
+    requireInternal(request);
+    const input=z.object({
+      environment:z.string().trim().min(1).max(80),
+      bundleVersion:z.string().trim().min(1).max(80),
+      apiContractVersion:z.string().trim().min(1).max(40).default("1"),
+      workflowKey:z.string().trim().min(1).max(120),
+      workflowName:z.string().trim().min(1).max(240),
+      n8nWorkflowId:z.string().trim().min(1).max(200),
+      logicalVersion:z.string().trim().max(200).nullable().optional(),
+      active:z.boolean().default(false),
+      deploymentStatus:z.enum(["planned","deployed","active","inactive","failed","rolled_back"]).default("deployed"),
+      metadata:z.record(z.string(),z.unknown()).default({}),
+    }).parse(request.body);
+    const previous=await query<{id:string}>(`
+      SELECT id FROM automation_deployments
+      WHERE environment=$1 AND workflow_key=$2
+      ORDER BY deployed_at DESC LIMIT 1
+    `,[input.environment,input.workflowKey]);
+    const result=await query<any>(`
+      INSERT INTO automation_deployments(
+        environment,bundle_version,api_contract_version,workflow_key,workflow_name,n8n_workflow_id,
+        logical_version,active,deployment_status,previous_deployment_id,metadata,last_seen_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,now())
+      ON CONFLICT(environment,workflow_key,bundle_version) DO UPDATE SET
+        api_contract_version=EXCLUDED.api_contract_version,workflow_name=EXCLUDED.workflow_name,
+        n8n_workflow_id=EXCLUDED.n8n_workflow_id,logical_version=EXCLUDED.logical_version,
+        active=EXCLUDED.active,deployment_status=EXCLUDED.deployment_status,
+        metadata=EXCLUDED.metadata,last_seen_at=now()
+      RETURNING *
+    `,[input.environment,input.bundleVersion,input.apiContractVersion,input.workflowKey,input.workflowName,input.n8nWorkflowId,input.logicalVersion??null,input.active,input.deploymentStatus,previous.rows[0]?.id??null,JSON.stringify(input.metadata)]);
+    reply.send({deployment:result.rows[0]});
+  });
+
   app.get("/v1/internal/n8n/config", async (request, reply) => {
     requireInternal(request);
     reply.send({
