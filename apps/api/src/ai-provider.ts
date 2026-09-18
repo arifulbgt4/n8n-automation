@@ -1,4 +1,4 @@
-import { decryptSecret } from "@n8n-automation/core";
+import { decryptSecret, env } from "@n8n-automation/core";
 
 export type AiConnection = {
   provider: "openai" | "anthropic" | "gemini" | "openai_compatible";
@@ -164,7 +164,7 @@ export async function chat(connection: AiConnection, config: AiModelConfig, inpu
 
 export async function embedding(connection: AiConnection, config: AiModelConfig, text: string): Promise<{ vector: number[]; usage: { inputTokens?: number } }> {
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url || "https://api.openai.com/v1").replace(/\/$/, "");
+    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const response = await fetch(`${base}/embeddings`, {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey(connection)}`, "content-type": "application/json" },
@@ -215,7 +215,7 @@ export async function analyzeImages(
   if (!images.length) throw new Error("At least one image is required");
 
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url || "https://api.openai.com/v1").replace(/\/$/, "");
+    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const content: any[] = [{ type: "text", text: prompt }];
     for (const image of images) {
       content.push({
@@ -319,10 +319,11 @@ export async function transcribeAudio(
   audio: BinaryAiInput,
 ): Promise<ChatResult> {
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url || "https://api.openai.com/v1").replace(/\/$/, "");
+    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const form = new FormData();
     form.set("model", config.model);
-    form.set("file", new Blob([audio.bytes], { type: audio.mimeType }), audio.filename || "audio.bin");
+    const audioBuffer = audio.bytes.buffer.slice(audio.bytes.byteOffset, audio.bytes.byteOffset + audio.bytes.byteLength) as ArrayBuffer;
+    form.set("file", new Blob([audioBuffer], { type: audio.mimeType }), audio.filename || "audio.bin");
     if (typeof config.parameters.language === "string") form.set("language", config.parameters.language);
     const response = await fetch(`${base}/audio/transcriptions`, {
       method: "POST",
