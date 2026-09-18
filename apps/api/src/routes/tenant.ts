@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { query, transaction } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireCsrf, requireTenant, slugify } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, slugify } from "../lib.js";
 import { assertTenantCountLimit } from "../limits.js";
 
 const tenantRoles = ["OWNER", "ADMIN", "STAFF", "VIEWER"] as const;
@@ -65,7 +65,7 @@ export async function tenantRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/members/:userId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), userId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    await requireBusinessAccess(request, params.tenantId, params.businessId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       role: z.enum(tenantRoles).optional(),
@@ -86,15 +86,16 @@ export async function tenantRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/businesses", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const result = await query(`
       SELECT b.*,
         (SELECT count(*)::int FROM channel_accounts c WHERE c.business_id=b.id AND c.active=true) AS channel_count,
         (SELECT count(*)::int FROM collections col WHERE col.business_id=b.id AND col.status='active') AS collection_count
       FROM businesses b
-      WHERE b.tenant_id=$1 AND b.status <> 'archived'
+      WHERE b.tenant_id=$1 AND b.status <> 'archived' AND ($2::uuid[] IS NULL OR b.id=ANY($2::uuid[]))
       ORDER BY b.created_at
-    `, [tenantId]);
+    `, [tenantId, scope]);
     reply.send({ businesses: result.rows });
   });
 
@@ -126,7 +127,7 @@ export async function tenantRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/businesses/:businessId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), businessId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, params.tenantId);
+    await requireBusinessAccess(request, params.tenantId, params.businessId);
     const result = await query("SELECT * FROM businesses WHERE id=$1 AND tenant_id=$2", [params.businessId, params.tenantId]);
     if (!result.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     reply.send({ business: result.rows[0] });
@@ -161,7 +162,7 @@ export async function tenantRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/businesses/:businessId/archive", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), businessId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER"]);
+    await requireBusinessAccess(request, params.tenantId, params.businessId, ["OWNER"]);
     requireCsrf(request);
     await transaction(async (client) => {
       const business = await client.query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2 FOR UPDATE", [params.businessId, params.tenantId]);
