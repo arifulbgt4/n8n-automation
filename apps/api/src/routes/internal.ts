@@ -279,24 +279,38 @@ export async function internalRoutes(app: FastifyInstance) {
       businessId: z.string().uuid(),
       channelAccountId: z.string().uuid(),
       conversationId: z.string().uuid(),
-      tool: z.enum(["create_order", "create_booking", "create_lead", "handoff_conversation"]),
+      tool: z.enum(["create_order", "create_booking", "create_lead", "create_quote_request", "create_support_case", "schedule_followup", "handoff_conversation"]),
       arguments: z.record(z.string(), z.unknown()),
       idempotencyKey: z.string().min(1).max(300),
     }).parse(request.body);
     const conversation = await query<any>("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND channel_account_id=$4", [input.conversationId, input.tenantId, input.businessId, input.channelAccountId]);
     if (!conversation.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
     const agent = conversation.rows[0].agent_profile_id ? await query<{ capabilities: string[] }>("SELECT capabilities FROM agent_profiles WHERE id=$1", [conversation.rows[0].agent_profile_id]) : { rows: [] } as any;
-    const capabilityMap: Record<string, string> = { create_order: "ORDER_CREATE", create_booking: "BOOKING_CREATE", create_lead: "LEAD_CAPTURE", handoff_conversation: "HUMAN_HANDOFF" };
+    const capabilityMap: Record<string, string> = { create_order: "ORDER_CREATE", create_booking: "BOOKING_CREATE", create_lead: "LEAD_CAPTURE", create_quote_request: "QUOTE_REQUEST", create_support_case: "SUPPORT_CASE", schedule_followup: "FOLLOW_UP", handoff_conversation: "HUMAN_HANDOFF" };
     if (!agent.rows[0]?.capabilities?.includes(capabilityMap[input.tool])) throw new ApiError(403, "CAPABILITY_DISABLED", `Capability ${capabilityMap[input.tool]} is not enabled.`);
     const existing = await query<{ response_json: any; status: string }>("SELECT response_json,status FROM idempotency_keys WHERE tenant_id=$1 AND scope='agent_action' AND key=$2", [input.tenantId, input.idempotencyKey]);
     if (existing.rows[0]?.status === "completed") return reply.send(existing.rows[0].response_json);
+    if (input.tool === "schedule_followup") {
+      const delayMinutes = Math.max(1, Math.min(60 * 24 * 30, Number(input.arguments.delayMinutes ?? 60)));
+      const message = String(input.arguments.message ?? "").trim();
+      if (!message) throw new ApiError(400,"FOLLOWUP_MESSAGE_REQUIRED","Follow-up message is required.");
+      const created = await query<any>(`
+        INSERT INTO followup_jobs(tenant_id,business_id,channel_account_id,conversation_id,agent_profile_id,due_at,policy_snapshot,idempotency_key)
+        VALUES ($1,$2,$3,$4,$5,now()+($6 || ' minutes')::interval,$7::jsonb,$8)
+        ON CONFLICT(idempotency_key) DO UPDATE SET updated_at=now()
+        RETURNING *
+      `,[input.tenantId,input.businessId,input.channelAccountId,input.conversationId,conversation.rows[0].agent_profile_id,String(delayMinutes),JSON.stringify({message,maxWindowHours:Number(input.arguments.maxWindowHours ?? 23),source:"ai"}),input.idempotencyKey]);
+      const response={tool:input.tool,followup:created.rows[0]};
+      await query(`INSERT INTO idempotency_keys(tenant_id,scope,key,status,response_json) VALUES ($1,'agent_action',$2,'completed',$3::jsonb) ON CONFLICT(tenant_id,scope,key) DO UPDATE SET status='completed',response_json=EXCLUDED.response_json,updated_at=now()`,[input.tenantId,input.idempotencyKey,JSON.stringify(response)]);
+      return reply.send(response);
+    }
     if (input.tool === "handoff_conversation") {
       const updated = await query("UPDATE conversations SET mode='HUMAN',state_version=state_version+1,escalation_metadata=escalation_metadata||$2::jsonb,updated_at=now() WHERE id=$1 RETURNING *", [input.conversationId, JSON.stringify({ aiHandoffReason: input.arguments.reason ?? null })]);
       const response = { tool: input.tool, conversation: updated.rows[0] };
       await query(`INSERT INTO idempotency_keys(tenant_id,scope,key,status,response_json) VALUES ($1,'agent_action',$2,'completed',$3::jsonb) ON CONFLICT(tenant_id,scope,key) DO UPDATE SET status='completed',response_json=EXCLUDED.response_json,updated_at=now()`, [input.tenantId, input.idempotencyKey, JSON.stringify(response)]);
       return reply.send(response);
     }
-    const endpoint = input.tool === "create_order" ? "orders" : input.tool === "create_booking" ? "bookings" : "leads";
+    const endpoint = input.tool === "create_order" ? "orders" : input.tool === "create_booking" ? "bookings" : input.tool === "create_lead" ? "leads" : input.tool === "create_quote_request" ? "quotes" : "support-cases";
     const response = await fetch(`${env().API_PUBLIC_ORIGIN}/v1/tenants/${input.tenantId}/${endpoint}`, {
       method: "POST",
       headers: { authorization: `Bearer ${env().INTERNAL_SERVICE_AUTH_SECRET}`, "content-type": "application/json", "idempotency-key": input.idempotencyKey },
