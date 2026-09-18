@@ -86,6 +86,14 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
     const latest = await query<{ version: number }>("SELECT COALESCE(max(version),0)::int AS version FROM prompt_versions WHERE agent_profile_id=$1", [row.agent_profile_id]);
     const version = (latest.rows[0]?.version ?? 0) + 1;
     const assembled = Object.entries(parsed.sections).map(([key,value]) => `## ${key.replace(/_/g," ")}\n${typeof value === "string" ? value : JSON.stringify(value,null,2)}`).join("\n\n");
+    const requiredSections=["core_role","tone_language","grounding","capabilities","business_process","human_handoff","restrictions"];
+    const validation={
+      requiredSectionsPresent:requiredSections.every((key)=>Object.prototype.hasOwnProperty.call(parsed.sections,key)),
+      nonEmpty:assembled.trim().length>=100,
+      maxLength:assembled.length<=60000,
+      noSecretPlaceholders:!/(api[_ -]?key|access[_ -]?token|app[_ -]?secret)\s*[:=]\s*[A-Za-z0-9_-]{12,}/i.test(assembled),
+    };
+    const validationPassed=Object.values(validation).every(Boolean);
     const candidate = await transaction(async (client) => {
       const created = await client.query(`
         INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,sections_json,assembled_prompt,base_version_id,training_job_id)
@@ -95,7 +103,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
         VALUES ($1,$2,'training_job',1,'job',$3,$4,'PROMPT_SYNTHESIS',$5,$6::jsonb) ON CONFLICT DO NOTHING`, [row.tenant_id,row.business_id,model.provider,model.model,`training:${trainingJobId}`,JSON.stringify(result.usage)]);
       return created.rows[0];
     });
-    reply.send({ candidatePromptVersionId: candidate.id, version, sections: parsed.sections, evaluation: parsed.evaluation ?? {}, usage: result.usage });
+    reply.send({ candidatePromptVersionId: candidate.id, version, sections: parsed.sections, evaluation: { ...(parsed.evaluation ?? {}), validation, passed: validationPassed }, usage: result.usage });
   });
 
   app.post("/v1/internal/knowledge/index", async (request, reply) => {
