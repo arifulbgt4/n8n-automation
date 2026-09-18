@@ -9,7 +9,7 @@ import {
   sha256,
   transaction,
 } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireCsrf, requireTenant } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant } from "../lib.js";
 import { assertChannelOverrideWithinPlan, assertTenantCountLimit } from "../limits.js";
 
 const platformSchema = z.enum(["facebook", "instagram", "whatsapp"]);
@@ -62,7 +62,8 @@ async function testMetaChannel(channel: { id: string; platform: string; external
 export async function channelRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/channels", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, params.tenantId);
+    const context = await requireTenant(request, params.tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const queryParams = z.object({ businessId: z.string().uuid().optional(), platform: platformSchema.optional() }).parse(request.query);
     const result = await query(`
       SELECT c.*, b.name AS business_name,
@@ -73,8 +74,9 @@ export async function channelRoutes(app: FastifyInstance) {
       WHERE c.tenant_id=$1
         AND ($2::uuid IS NULL OR c.business_id=$2)
         AND ($3::text IS NULL OR c.platform=$3)
+        AND ($4::uuid[] IS NULL OR c.business_id=ANY($4::uuid[]))
       ORDER BY c.created_at DESC
-    `, [params.tenantId, queryParams.businessId ?? null, queryParams.platform ?? null]);
+    `, [params.tenantId, queryParams.businessId ?? null, queryParams.platform ?? null, scope]);
     reply.send({ channels: result.rows });
   });
 
@@ -95,6 +97,7 @@ export async function channelRoutes(app: FastifyInstance) {
       credentials: credentialInput.default({}),
       testConnection: z.boolean().default(true),
     }).parse(request.body);
+    await requireBusinessAccess(request, params.tenantId, input.businessId, ["OWNER", "ADMIN"]);
     await ensureBusiness(params.tenantId, input.businessId);
     const existing = await query("SELECT id FROM channel_accounts WHERE platform=$1 AND external_account_id=$2", [input.platform, input.externalAccountId]);
     if (existing.rowCount) throw new ApiError(409, "CHANNEL_ALREADY_CONNECTED", "This channel account is already connected.");
@@ -134,13 +137,16 @@ export async function channelRoutes(app: FastifyInstance) {
       WHERE c.id=$1 AND c.tenant_id=$2
     `, [params.channelId, params.tenantId]);
     if (!result.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
+    await requireBusinessAccess(request, params.tenantId, result.rows[0].business_id);
     reply.send({ channel: result.rows[0] });
   });
 
   app.patch("/v1/tenants/:tenantId/channels/:channelId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), channelId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    const existingChannel = await query<{ business_id: string }>("SELECT business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId,params.tenantId]);
+    if (!existingChannel.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
+    await requireBusinessAccess(request, params.tenantId, existingChannel.rows[0].business_id, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       name: z.string().trim().min(1).max(160).optional(),
@@ -175,6 +181,7 @@ export async function channelRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const result = await query<{ id: string; platform: string; external_account_id: string; business_id: string }>("SELECT id,platform,external_account_id,business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId, params.tenantId]);
     if (!result.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
+    await requireBusinessAccess(request, params.tenantId, result.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
     const test = await testMetaChannel(result.rows[0]);
     await query("UPDATE channel_accounts SET connection_status=$2,updated_at=now() WHERE id=$1", [params.channelId, test.ok ? "connected" : "degraded"]);
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: result.rows[0].business_id, action: "CHANNEL_TESTED", resourceType: "channel_account", resourceId: params.channelId, safeDiff: { ok: test.ok }, request });
@@ -190,6 +197,7 @@ export async function channelRoutes(app: FastifyInstance) {
     for (const [key,value] of Object.entries(input)) await assertChannelOverrideWithinPlan(params.tenantId,key,value);
     const channel = await query<{ business_id: string }>("SELECT business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId, params.tenantId]);
     if (!channel.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
+    await requireBusinessAccess(request, params.tenantId, channel.rows[0].business_id, ["OWNER", "ADMIN"]);
     await transaction(async (client) => {
       for (const [key, value] of Object.entries(input)) {
         await client.query(`
@@ -210,6 +218,7 @@ export async function channelRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const channel = await query<{ business_id: string }>("SELECT business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId, params.tenantId]);
     if (!channel.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
+    await requireBusinessAccess(request, params.tenantId, channel.rows[0].business_id, ["OWNER", "ADMIN"]);
     await query("UPDATE channel_accounts SET active=false,connection_status='disconnected',updated_at=now() WHERE id=$1", [params.channelId]);
     await query("DELETE FROM channel_credentials WHERE channel_account_id=$1", [params.channelId]);
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: channel.rows[0].business_id, action: "CHANNEL_DISCONNECTED", resourceType: "channel_account", resourceId: params.channelId, request });
