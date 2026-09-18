@@ -507,8 +507,17 @@ async function followupJob(job: Job<JobEnvelope<any>>) {
     WHERE f.id=$1
   `,[followupId]);
   const row=result.rows[0];
-  if(!row||row.status!=="scheduled"||row.mode!=="AI"||row.conversation_status!=="open"||!row.active||row.connection_status!=="connected"||row.tenant_status!=="active"){
+  if(!row||!["scheduled","queued"].includes(row.status)||row.mode!=="AI"||row.conversation_status!=="open"||!row.active||row.connection_status!=="connected"||row.tenant_status!=="active"){
     if(row) await query("UPDATE followup_jobs SET status='cancelled',updated_at=now() WHERE id=$1",[followupId]);
+    return;
+  }
+  if (row.last_message_at && new Date(row.last_message_at).getTime() > new Date(row.created_at).getTime()) {
+    await query("UPDATE followup_jobs SET status='cancelled',policy_snapshot=policy_snapshot||'{\"cancelled_by_new_activity\":true}'::jsonb,updated_at=now() WHERE id=$1",[followupId]);
+    return;
+  }
+  const maxWindowHours = Math.max(1, Number(row.policy_snapshot?.maxWindowHours ?? 23));
+  if (row.last_message_at && Date.now() - new Date(row.last_message_at).getTime() > maxWindowHours * 60 * 60 * 1000) {
+    await query("UPDATE followup_jobs SET status='cancelled',policy_snapshot=policy_snapshot||'{\"outside_provider_window\":true}'::jsonb,updated_at=now() WHERE id=$1",[followupId]);
     return;
   }
   const text=String(row.policy_snapshot?.message||"").trim();
@@ -526,6 +535,99 @@ async function analyticsRollup() {
     ON CONFLICT(tenant_id,business_id,channel_account_id,bucket_start,bucket_size,event_type)
     DO UPDATE SET quantity=EXCLUDED.quantity,estimated_cost=EXCLUDED.estimated_cost,updated_at=now()
   `);
+}
+
+
+async function dispatchOutboxBatch(limit = 100) {
+  const events = await transaction(async (client) => {
+    const selected = await client.query<any>(`
+      SELECT * FROM outbox_events
+      WHERE status IN ('pending','failed') AND next_attempt_at<=now()
+      ORDER BY created_at
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    `, [limit]);
+    if (!selected.rows.length) return [];
+    await client.query(
+      "UPDATE outbox_events SET status='dispatching',attempt_count=attempt_count+1 WHERE id=ANY($1::uuid[])",
+      [selected.rows.map((row) => row.id)],
+    );
+    return selected.rows;
+  });
+
+  for (const event of events) {
+    try {
+      if (config.N8N_HEALTH_WEBHOOK_URL && ["CHANNEL_CONNECTED","CHANNEL_DISCONNECTED"].includes(event.event_type)) {
+        // Infrastructure-specific integration hooks can subscribe through the existing n8n runtime.
+        const response = await fetch(config.N8N_HEALTH_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${config.INTERNAL_SERVICE_AUTH_SECRET}` },
+          body: JSON.stringify({ kind: "domain_event", event }),
+        });
+        if (!response.ok && response.status !== 404 && response.status !== 405) {
+          throw new Error(`n8n event hook returned ${response.status}`);
+        }
+      }
+
+      if (event.event_type === "AGENT_PROMPT_PUBLISHED") {
+        await redis().del(redisKey("cache","agent",String(event.resource_id)));
+      }
+      if (event.event_type === "CHANNEL_SETTINGS_CHANGED" || event.event_type === "CHANNEL_CONNECTED" || event.event_type === "CHANNEL_DISCONNECTED") {
+        await redis().del(redisKey("cache","channel",String(event.resource_id)));
+      }
+      if (event.event_type === "COLLECTION_SCHEMA_CHANGED") {
+        await redis().del(redisKey("cache","collection",String(event.resource_id)));
+      }
+
+      await query("UPDATE outbox_events SET status='dispatched',dispatched_at=now() WHERE id=$1", [event.id]);
+    } catch (error) {
+      const attempt = Number(event.attempt_count ?? 0) + 1;
+      const delaySeconds = Math.min(3600, Math.max(5, 2 ** Math.min(attempt, 10)));
+      await query(
+        "UPDATE outbox_events SET status='failed',next_attempt_at=now()+($2 || ' seconds')::interval,payload=payload||$3::jsonb WHERE id=$1",
+        [event.id,String(delaySeconds),JSON.stringify({ lastDispatchError: error instanceof Error ? error.message : "dispatch failed" })],
+      );
+    }
+  }
+  return events.length;
+}
+
+async function scheduleDueFollowups(limit = 100) {
+  const due = await transaction(async (client) => {
+    const selected = await client.query<any>(`
+      SELECT id,tenant_id,business_id,channel_account_id,conversation_id
+      FROM followup_jobs
+      WHERE status='scheduled' AND due_at<=now()
+      ORDER BY due_at
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    `, [limit]);
+    if (!selected.rows.length) return [];
+    await client.query("UPDATE followup_jobs SET status='queued',updated_at=now() WHERE id=ANY($1::uuid[])", [selected.rows.map((row) => row.id)]);
+    return selected.rows;
+  });
+  for (const row of due) {
+    const jobId = `followup:${row.id}`;
+    try {
+      const { queue } = await import("@n8n-automation/core");
+      await queue(QUEUES.followups).add("SEND_FOLLOWUP", {
+        jobId,
+        jobType: "SEND_FOLLOWUP",
+        tenantId: row.tenant_id,
+        businessId: row.business_id,
+        channelAccountId: row.channel_account_id,
+        conversationId: row.conversation_id,
+        correlationId: jobId,
+        idempotencyKey: jobId,
+        createdAt: new Date().toISOString(),
+        payload: { followupId: row.id },
+      }, { jobId });
+    } catch (error) {
+      await query("UPDATE followup_jobs SET status='scheduled',updated_at=now() WHERE id=$1 AND status='queued'", [row.id]).catch(() => undefined);
+      throw error;
+    }
+  }
+  return due.length;
 }
 
 function makeWorker(name: string, handler: (job: Job<any>) => Promise<any>, concurrency = config.WORKER_CONCURRENCY) {
@@ -555,11 +657,26 @@ const timer=setInterval(()=>{
 },15*60*1000);
 timer.unref();
 
+const outboxTimer=setInterval(()=>{
+  void dispatchOutboxBatch().catch((error)=>log("outbox_dispatch_error",{error:error instanceof Error?error.message:"error"}));
+},2_000);
+outboxTimer.unref();
+
+const followupTimer=setInterval(()=>{
+  void scheduleDueFollowups().catch((error)=>log("followup_schedule_error",{error:error instanceof Error?error.message:"error"}));
+},5_000);
+followupTimer.unref();
+
+void dispatchOutboxBatch().catch((error)=>log("outbox_dispatch_error",{error:error instanceof Error?error.message:"error"}));
+void scheduleDueFollowups().catch((error)=>log("followup_schedule_error",{error:error instanceof Error?error.message:"error"}));
+
 log("worker_started", { queues: workers.map((worker)=>worker.name), concurrency: config.WORKER_CONCURRENCY });
 
 async function shutdown(signal:string){
   log("worker_shutdown",{signal});
   clearInterval(timer);
+  clearInterval(outboxTimer);
+  clearInterval(followupTimer);
   await Promise.all(workers.map((worker)=>worker.close()));
   process.exit(0);
 }
