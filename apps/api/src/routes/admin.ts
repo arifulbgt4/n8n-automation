@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env, query, queue, QUEUES, redis } from "@n8n-automation/core";
-import { ApiError, audit, requireCsrf, requirePlatformAdmin } from "../lib.js";
+import { ApiError, audit, requireCsrf, requirePlatformAdmin, requireRecentPlatformAdmin } from "../lib.js";
 
 export async function adminRoutes(app: FastifyInstance) {
   app.get("/v1/admin/dashboard", async (request, reply) => {
@@ -49,7 +49,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.patch("/v1/admin/tenants/:tenantId", async (request, reply) => {
-    const principal = await requirePlatformAdmin(request);
+    const principal = await requireRecentPlatformAdmin(request);
     requireCsrf(request);
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const input = z.object({ status: z.enum(["active", "suspended"]).optional(), planId: z.string().uuid().nullable().optional(), settings: z.record(z.string(), z.unknown()).optional(), reason: z.string().max(1000).optional() }).parse(request.body);
@@ -60,7 +60,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put("/v1/admin/tenants/:tenantId/limits", async (request, reply) => {
-    const principal = await requirePlatformAdmin(request);
+    const principal = await requireRecentPlatformAdmin(request);
     requireCsrf(request);
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const input = z.record(z.string().min(1).max(100), z.number().nonnegative()).parse(request.body);
@@ -123,7 +123,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.delete("/v1/admin/queues/:queueName/jobs/:jobId", async (request, reply) => {
-    const principal=await requirePlatformAdmin(request);
+    const principal=await requireRecentPlatformAdmin(request);
     requireCsrf(request);
     const params=z.object({queueName:z.string().min(1),jobId:z.string().min(1).max(300)}).parse(request.params);
     if(!(Object.values(QUEUES) as string[]).includes(params.queueName)) throw new ApiError(404,"QUEUE_NOT_FOUND","Queue not found.");
@@ -235,7 +235,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.post("/v1/admin/plans", async (request, reply) => {
-    const principal = await requirePlatformAdmin(request);
+    const principal = await requireRecentPlatformAdmin(request);
     requireCsrf(request);
     const input = z.object({ key: z.string().regex(/^[a-z0-9_-]+$/), name: z.string().min(1).max(120), features: z.record(z.string(),z.unknown()).default({}), limits: z.record(z.string(),z.unknown()).default({}), active: z.boolean().default(true) }).parse(request.body);
     const result = await query(`INSERT INTO plans(key,name,features,limits,active) VALUES ($1,$2,$3::jsonb,$4::jsonb,$5) RETURNING *`, [input.key,input.name,JSON.stringify(input.features),JSON.stringify(input.limits),input.active]);
