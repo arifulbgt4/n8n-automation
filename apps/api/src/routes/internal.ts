@@ -11,6 +11,7 @@ import {
 } from "@n8n-automation/core";
 import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
 import { ApiError, requestId } from "../lib.js";
+import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -207,6 +208,7 @@ export async function internalRoutes(app: FastifyInstance) {
     const input = z.object({ turnId: z.string().uuid() }).parse(request.body);
     const context = await runtimeContext(input.turnId);
     const row = context.row;
+    await assertMonthlyUsageLimit(row.tenant_id, "ai_call", "aiTurnsPerMonth");
     if (row.mode !== "AI" || row.conversation_status !== "open") throw new ApiError(409, "CONVERSATION_NOT_AI_ELIGIBLE", "Conversation is not eligible for an AI response.");
     if (!row.agent_profile_id || !row.active_prompt_version_id) throw new ApiError(409, "AGENT_NOT_CONFIGURED", "Conversation has no active AI agent/prompt.");
     const originalTurnText = context.messages.map((message: any) => message.text_content).filter(Boolean).join("\n");
@@ -240,7 +242,10 @@ export async function internalRoutes(app: FastifyInstance) {
     } catch {
       parsed = { messages: [{ type: "text", text: result.text.trim() || "I’m unable to answer that right now." }], actions: [], handoff: false, handoffReason: null };
     }
-    const messages = Array.isArray(parsed.messages) ? parsed.messages.slice(0, 10).filter((message: any) => message && (message.type === "text" || message.type === "media")) : [];
+    const rawMessages = Array.isArray(parsed.messages) ? parsed.messages.slice(0, 20).filter((message: any) => message && (message.type === "text" || message.type === "media")) : [];
+    const imageLimit = await maxImagesPerResponse(row.tenant_id);
+    let mediaCount = 0;
+    const messages = rawMessages.filter((message: any) => message.type !== "media" || mediaCount++ < imageLimit).slice(0, 10);
     const actions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 5) : [];
     if (!messages.length && !parsed.handoff) messages.push({ type: "text", text: "I’m unable to answer that right now. A team member can help if needed." });
     await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,correlation_id,idempotency_key,metadata)
