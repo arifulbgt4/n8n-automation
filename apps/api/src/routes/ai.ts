@@ -427,10 +427,24 @@ export async function aiRoutes(app: FastifyInstance) {
     const input = z.object({ modelConfigId: z.string().uuid().optional(), exampleIds: z.array(z.string().uuid()).min(1).max(200).optional() }).parse(request.body ?? {});
     const examples = input.exampleIds ?? (await query<{ id: string }>("SELECT id FROM training_examples WHERE tenant_id=$1 AND agent_profile_id=$2 AND approval_status='approved' ORDER BY created_at", [params.tenantId, params.agentId])).rows.map((row) => row.id);
     if (!examples.length) throw new ApiError(400, "TRAINING_EXAMPLES_REQUIRED", "At least one approved training example is required.");
+    const collectionVersions=await query<{id:string;schema_version:number;updated_at:Date}>(`
+      SELECT c.id,c.schema_version,c.updated_at
+      FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id
+      WHERE acl.agent_profile_id=$1 AND c.status='active'
+      ORDER BY c.id
+    `,[params.agentId]);
+    const snapshot={
+      exampleIds:examples,
+      basePromptVersionId:agent.active_prompt_version_id ?? null,
+      collectionVersions:collectionVersions.rows.map((row)=>({id:row.id,schemaVersion:Number(row.schema_version),updatedAt:row.updated_at})),
+      capabilities:agent.capabilities ?? [],
+      behaviorSettings:agent.behavior_settings ?? {},
+      capturedAt:new Date().toISOString(),
+    };
     const created = await query(`
       INSERT INTO training_jobs(tenant_id,agent_profile_id,base_prompt_version_id,model_config_id,input_snapshot)
       VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING *
-    `, [params.tenantId, params.agentId, agent.active_prompt_version_id ?? null, input.modelConfigId ?? null, JSON.stringify({ exampleIds: examples })]);
+    `, [params.tenantId, params.agentId, agent.active_prompt_version_id ?? null, input.modelConfigId ?? null, JSON.stringify(snapshot)]);
     const jobId = created.rows[0].id as string;
     await enqueue(QUEUES.training, {
       jobId,
