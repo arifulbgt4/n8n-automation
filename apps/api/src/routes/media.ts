@@ -10,6 +10,7 @@ import {
   transaction,
 } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireCsrf, requireTenant } from "../lib.js";
+import { assertMediaStorageLimit } from "../limits.js";
 
 async function mediaAccount(tenantId: string) {
   const result = await query<{
@@ -141,6 +142,7 @@ export async function mediaRoutes(app: FastifyInstance) {
     const visibilityField = file.fields.visibility;
     const visibility = visibilityField && "value" in visibilityField && visibilityField.value === "public" ? "public" : "private";
     const bytes = await file.toBuffer();
+    await assertMediaStorageLimit(tenantId, bytes.length);
     const form = new FormData();
     form.set("file", new Blob([bytes], { type: file.mimetype }), file.filename);
     form.set("visibility", visibility);
