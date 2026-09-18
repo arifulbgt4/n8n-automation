@@ -1,12 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { enqueue, query, QUEUES, randomToken, transaction } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireCsrf, requireTenant, requestId } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
 
 export async function conversationRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/conversations", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({
       businessId: z.string().uuid().optional(),
       channelId: z.string().uuid().optional(),
@@ -27,8 +28,9 @@ export async function conversationRoutes(app: FastifyInstance) {
         AND ($3::uuid IS NULL OR cv.business_id=$3)
         AND ($4::uuid IS NULL OR cv.channel_account_id=$4)
         AND ($5::text IS NULL OR cv.mode=$5)
-      ORDER BY cv.last_message_at DESC NULLS LAST LIMIT $6 OFFSET $7
-    `, [tenantId, q.status, q.businessId ?? null, q.channelId ?? null, q.mode ?? null, q.limit, q.offset]);
+        AND ($6::uuid[] IS NULL OR cv.business_id=ANY($6::uuid[]))
+      ORDER BY cv.last_message_at DESC NULLS LAST LIMIT $7 OFFSET $8
+    `, [tenantId, q.status, q.businessId ?? null, q.channelId ?? null, q.mode ?? null, scope, q.limit, q.offset]);
     reply.send({ conversations: result.rows, limit: q.limit, offset: q.offset });
   });
 
@@ -42,6 +44,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       WHERE cv.id=$1 AND cv.tenant_id=$2
     `, [params.conversationId, params.tenantId]);
     if (!conversation.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
+    await requireBusinessAccess(request, params.tenantId, conversation.rows[0].business_id);
     const messages = await query(`
       SELECT m.*,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',ma.id,'mimeType',ma.mime_type,'kind',ma.kind,'publicUrl',ma.public_url,'originalName',ma.original_name) ORDER BY mm.display_order)
@@ -59,7 +62,9 @@ export async function conversationRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/conversations/:conversationId/mode", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
+    const scopeConversation = await query<{ business_id: string }>("SELECT business_id FROM conversations WHERE id=$1 AND tenant_id=$2", [params.conversationId,params.tenantId]);
+    if (!scopeConversation.rows[0]) throw new ApiError(404,"CONVERSATION_NOT_FOUND","Conversation not found.");
+    await requireBusinessAccess(request, params.tenantId, scopeConversation.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const input = z.object({ mode: z.enum(["AI", "HUMAN", "PAUSED"]), reason: z.string().max(500).optional() }).parse(request.body);
     const result = await query(`
@@ -82,6 +87,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     const conversation = await query<any>("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2", [params.conversationId, params.tenantId]);
     if (!conversation.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
     const cv = conversation.rows[0];
+    await requireBusinessAccess(request, params.tenantId, cv.business_id, ["OWNER","ADMIN","STAFF"]);
     const messages: Array<Record<string, unknown>> = [];
     if (input.text?.trim()) messages.push({ type: "text", text: input.text.trim() });
     for (const assetId of input.assetIds) {
@@ -117,7 +123,9 @@ export async function conversationRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/conversations/:conversationId/followups", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, params.tenantId);
+    const cvScope = await query<{ business_id: string }>("SELECT business_id FROM conversations WHERE id=$1 AND tenant_id=$2", [params.conversationId,params.tenantId]);
+    if (!cvScope.rows[0]) throw new ApiError(404,"CONVERSATION_NOT_FOUND","Conversation not found.");
+    await requireBusinessAccess(request, params.tenantId, cvScope.rows[0].business_id);
     const result = await query("SELECT * FROM followup_jobs WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY due_at DESC LIMIT 100", [params.tenantId,params.conversationId]);
     reply.send({ followups: result.rows });
   });
@@ -134,6 +142,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     }).parse(request.body);
     const cv = await query<any>("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2 AND status='open'", [params.conversationId,params.tenantId]);
     if (!cv.rows[0]) throw new ApiError(404,"CONVERSATION_NOT_FOUND","Conversation not found.");
+    await requireBusinessAccess(request, params.tenantId, cv.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     const idempotencyKey = `manual-followup:${params.conversationId}:${Date.now()}:${randomToken(6)}`;
     const row = await query<any>(`
       INSERT INTO followup_jobs(tenant_id,business_id,channel_account_id,conversation_id,agent_profile_id,due_at,policy_snapshot,idempotency_key)
@@ -158,7 +167,9 @@ export async function conversationRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/conversations/:conversationId/close", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
+    const closeScope = await query<{ business_id: string }>("SELECT business_id FROM conversations WHERE id=$1 AND tenant_id=$2", [params.conversationId,params.tenantId]);
+    if (!closeScope.rows[0]) throw new ApiError(404,"CONVERSATION_NOT_FOUND","Conversation not found.");
+    await requireBusinessAccess(request, params.tenantId, closeScope.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const result = await query("UPDATE conversations SET status='closed',state_version=state_version+1,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING business_id", [params.conversationId, params.tenantId]);
     if (!result.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
