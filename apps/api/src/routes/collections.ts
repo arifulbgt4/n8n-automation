@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { query, transaction } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireCsrf, requireTenant, slugify } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, slugify } from "../lib.js";
 
 const fieldType = z.enum(["text","long_text","integer","decimal","currency","boolean","date","datetime","email","phone","url","single_select","multi_select","media","relation","json"]);
 const fieldInput = z.object({
@@ -133,7 +133,8 @@ const templates: Record<string, Array<z.input<typeof fieldInput>>> = {
 export async function collectionRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/collections", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, params.tenantId);
+    const context = await requireTenant(request, params.tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({ businessId: z.string().uuid().optional() }).parse(request.query);
     const result = await query(`
       SELECT c.*,
@@ -142,8 +143,9 @@ export async function collectionRoutes(app: FastifyInstance) {
         (SELECT count(*)::int FROM collection_channel_links l WHERE l.collection_id=c.id AND l.active=true) AS channel_count
       FROM collections c
       WHERE c.tenant_id=$1 AND c.status<>'archived' AND ($2::uuid IS NULL OR c.business_id=$2)
+        AND ($3::uuid[] IS NULL OR c.business_id=ANY($3::uuid[]))
       ORDER BY c.created_at DESC
-    `, [params.tenantId, q.businessId ?? null]);
+    `, [params.tenantId, q.businessId ?? null, scope]);
     reply.send({ collections: result.rows });
   });
 
@@ -161,6 +163,7 @@ export async function collectionRoutes(app: FastifyInstance) {
       template: z.enum(["product", "service", "property", "blank"]).default("blank"),
       fields: z.array(fieldInput).optional(),
     }).parse(request.body);
+    await requireBusinessAccess(request, params.tenantId, input.businessId, ["OWNER","ADMIN","STAFF"]);
     const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, params.tenantId]);
     if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     const key = input.key ?? slugify(input.name).replace(/-/g, "_").slice(0, 63);
@@ -186,6 +189,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     const params = z.object({ tenantId: z.string().uuid(), collectionId: z.string().uuid() }).parse(request.params);
     await requireTenant(request, params.tenantId);
     const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const fields = await query("SELECT * FROM collection_fields WHERE collection_id=$1 ORDER BY display_order,id", [params.collectionId]);
     const channels = await query(`
       SELECT ca.id,ca.platform,ca.name,ca.external_account_id,l.settings_json
@@ -201,6 +205,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const input = fieldInput.parse(request.body);
     const result = await transaction(async (client) => {
       const inserted = await client.query(`
@@ -221,6 +226,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const input = fieldInput.partial().parse(request.body);
     const current = await query("SELECT * FROM collection_fields WHERE id=$1 AND collection_id=$2", [params.fieldId, params.collectionId]);
     if (!current.rows[0]) throw new ApiError(404, "FIELD_NOT_FOUND", "Field not found.");
@@ -256,7 +262,8 @@ export async function collectionRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/collections/:collectionId/items", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), collectionId: z.string().uuid() }).parse(request.params);
     await requireTenant(request, params.tenantId);
-    await loadCollection(params.tenantId, params.collectionId);
+    const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const q = z.object({ q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).default(0) }).parse(request.query);
     const result = await query(`
       SELECT i.*,
@@ -278,6 +285,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const input = z.object({ title: z.string().trim().max(240).optional(), status: z.enum(["active", "hidden", "archived"]).default("active"), data: z.record(z.string(), z.unknown()) }).parse(request.body);
     await validateItem(params.tenantId, params.collectionId, input.data);
     const result = await query(`
@@ -294,6 +302,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const input = z.object({ title: z.string().trim().max(240).nullable().optional(), status: z.enum(["active", "hidden", "archived"]).optional(), data: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
     const current = await query<{ data_jsonb: Record<string, unknown> }>("SELECT data_jsonb FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted'", [params.itemId, params.collectionId, params.tenantId]);
     if (!current.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
@@ -313,6 +322,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const result = await query("UPDATE collection_items SET status='deleted',updated_at=now() WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 RETURNING id", [params.itemId, params.collectionId, params.tenantId]);
     if (!result.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: collection.business_id, action: "COLLECTION_ITEM_DELETED", resourceType: "collection_item", resourceId: params.itemId, request });
@@ -325,6 +335,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const input = z.object({ channelIds: z.array(z.string().uuid()).max(100) }).parse(request.body);
     await transaction(async (client) => {
       await client.query("DELETE FROM collection_channel_links WHERE collection_id=$1", [params.collectionId]);
