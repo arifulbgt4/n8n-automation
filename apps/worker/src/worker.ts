@@ -1,5 +1,6 @@
 import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
+  bullmqJobId,
   closeQueues,
   decryptSecret,
   env,
@@ -684,7 +685,7 @@ async function scheduleDueFollowups(limit = 100) {
         idempotencyKey: jobId,
         createdAt: new Date().toISOString(),
         payload: { followupId: row.id },
-      }, { jobId });
+      }, { jobId: bullmqJobId(jobId) });
     } catch (error) {
       await query("UPDATE followup_jobs SET status='scheduled',updated_at=now() WHERE id=$1 AND status='queued'", [row.id]).catch(() => undefined);
       throw error;

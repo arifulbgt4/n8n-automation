@@ -62,14 +62,18 @@ export type JobEnvelope<T extends Record<string, unknown> = Record<string, unkno
   payload: T;
 };
 
+export function bullmqJobId(jobId: string): string {
+  return `j_${Buffer.from(jobId, "utf8").toString("base64url")}`;
+}
+
 export async function enqueue<T extends Record<string, unknown>>(
   name: QueueName,
   envelope: JobEnvelope<T>,
   options: JobsOptions = {},
 ): Promise<void> {
   await queue(name).add(envelope.jobType, envelope, {
-    jobId: envelope.jobId,
     ...options,
+    jobId: bullmqJobId(envelope.jobId),
   });
 }
 

@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { closeQueues, enqueue, queue, QUEUES, redis, redisKey } from "../dist/index.js";
+import { bullmqJobId, closeQueues, enqueue, queue, QUEUES, redis, redisKey } from "../dist/index.js";
 
 test("Redis namespace and BullMQ job IDs are tenant-safe and idempotent",async(t)=>{
   const suffix=`core-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
   const q=queue(QUEUES.analytics);
   const jobId=`test:${suffix}`;
   t.after(async()=>{
-    const job=await q.getJob(jobId).catch(()=>null);
+    const job=await q.getJob(bullmqJobId(jobId)).catch(()=>null);
     if(job)await job.remove().catch(()=>undefined);
     await redis().del(redisKey("test",suffix)).catch(()=>undefined);
     await closeQueues();
@@ -28,9 +28,9 @@ test("Redis namespace and BullMQ job IDs are tenant-safe and idempotent",async(t
   };
   await enqueue(QUEUES.analytics,envelope);
   await enqueue(QUEUES.analytics,envelope);
-  const stored=await q.getJob(jobId);
+  const stored=await q.getJob(bullmqJobId(jobId));
   assert.ok(stored);
-  assert.equal(stored.id,jobId);
+  assert.equal(stored.id,bullmqJobId(jobId));
   assert.equal(stored.data.idempotencyKey,jobId);
   assert.equal(stored.data.payload.value,1);
 });
