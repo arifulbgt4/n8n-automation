@@ -23,8 +23,9 @@
     "build:api": "npm run build:core && npm run build -w @n8n-automation/api",
     "build:worker": "npm run build:core && npm run build -w @n8n-automation/worker",
     "build:apps": "npm run build -w customer-panel && npm run build -w super-admin-panel",
-    "ci": "npm run typecheck && npm run test && npm run build",
-    "admin:create": "node scripts/create-super-admin.mjs"
+    "ci": "npm run validate:n8n && npm run typecheck && npm run test && npm run build",
+    "admin:create": "node scripts/create-super-admin.mjs",
+    "validate:n8n": "node scripts/validate-n8n-bundle.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
