@@ -121,7 +121,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
       const vectors: Array<{ content: string; vector: number[]; usage: unknown }> = [];
       for (const content of chunks) {
         const embedded = await embedding(model,{model:model.model,parameters:model.parameters ?? {}},content);
-        if (embedded.vector.length !== 1536) throw new ApiError(400,"EMBEDDING_DIMENSION_MISMATCH",`Expected 1536 embedding dimensions but provider returned ${embedded.vector.length}.`);
+        if (embedded.vector.length !== env().EMBEDDING_DIMENSIONS) throw new ApiError(400,"EMBEDDING_DIMENSION_MISMATCH",`Expected ${env().EMBEDDING_DIMENSIONS} embedding dimensions but provider returned ${embedded.vector.length}.`);
         vectors.push({ content, vector: embedded.vector, usage: embedded.usage });
       }
       await transaction(async (client) => {
@@ -147,7 +147,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
     const input=z.object({tenantId:z.string().uuid(),businessId:z.string().uuid(),agentProfileId:z.string().uuid().nullable().optional(),query:z.string().min(1).max(10000),limit:z.number().int().min(1).max(30).default(8)}).parse(request.body);
     const model=await resolveTaskModel(input.tenantId,input.businessId,input.agentProfileId ?? null,"EMBEDDINGS",null);
     const embedded=await embedding(model,{model:model.model,parameters:model.parameters ?? {}},input.query);
-    if(embedded.vector.length!==1536) throw new ApiError(400,"EMBEDDING_DIMENSION_MISMATCH","Embedding dimension does not match the configured vector schema.");
+    if(embedded.vector.length!==env().EMBEDDING_DIMENSIONS) throw new ApiError(400,"EMBEDDING_DIMENSION_MISMATCH","Embedding dimension does not match the configured vector schema.");
     const result=await query(`
       SELECT kc.id,kc.source_id,kc.content,kc.metadata,ks.title,ks.type,1-(kc.embedding <=> $4::vector) AS similarity
       FROM knowledge_chunks kc JOIN knowledge_sources ks ON ks.id=kc.source_id
