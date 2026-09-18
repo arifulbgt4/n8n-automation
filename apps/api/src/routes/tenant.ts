@@ -65,7 +65,7 @@ export async function tenantRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/members/:userId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), userId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireBusinessAccess(request, params.tenantId, params.businessId, ["OWNER", "ADMIN"]);
+    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       role: z.enum(tenantRoles).optional(),
