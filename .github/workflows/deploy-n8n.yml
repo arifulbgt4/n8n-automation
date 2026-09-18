@@ -1,0 +1,51 @@
+name: Deploy n8n bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment label
+        required: true
+        default: development
+        type: string
+      activate:
+        description: Activate required workflows after import/update
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      N8N_API_URL: ${{ secrets.N8N_API_URL }}
+      N8N_API_KEY: ${{ secrets.N8N_API_KEY }}
+      N8N_DEPLOY_ENV: ${{ inputs.environment }}
+      SAAS_API_INTERNAL_URL: ${{ secrets.SAAS_API_INTERNAL_URL }}
+      INTERNAL_SERVICE_AUTH_SECRET: ${{ secrets.INTERNAL_SERVICE_AUTH_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate workflow artifacts
+        run: node scripts/validate-n8n-bundle.mjs
+
+      - name: Verify deployment secrets
+        run: |
+          test -n "$N8N_API_URL"
+          test -n "$N8N_API_KEY"
+
+      - name: Deploy inactive bundle
+        if: ${{ !inputs.activate }}
+        run: node scripts/n8n-deploy.mjs --apply --environment="${{ inputs.environment }}"
+
+      - name: Deploy and activate required workflows
+        if: ${{ inputs.activate }}
+        run: node scripts/n8n-deploy.mjs --apply --activate --deactivate-conflicts --environment="${{ inputs.environment }}"
