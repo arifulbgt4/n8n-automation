@@ -8,6 +8,7 @@ const schema = z.object({
   REDIS_URL: z.string().min(1),
   QUEUE_PREFIX: z.string().default("n8nauto:development"),
   APP_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/, "APP_ENCRYPTION_KEY must be 32 bytes encoded as 64 hex characters"),
+  APP_ENCRYPTION_KEY_PREVIOUS: z.string().optional().default("").transform((value) => value.split(",").map((key) => key.trim()).filter(Boolean)),
   SESSION_COOKIE_NAME: z.string().default("n8nauto_session"),
   SESSION_TTL_DAYS: z.coerce.number().int().positive().max(365).default(30),
   CSRF_HEADER_NAME: z.string().default("x-csrf-token"),
