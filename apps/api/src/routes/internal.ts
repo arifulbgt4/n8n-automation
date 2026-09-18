@@ -176,7 +176,7 @@ async function multimodalContext(context: any) {
   return result;
 }
 
-async function resolveModel(tenantId: string, businessId: string, agentId: string | null, channelId: string, taskKey: string) {
+async function resolveModels(tenantId: string, businessId: string, agentId: string | null, channelId: string, taskKey: string) {
   const result = await query<any>(`
     SELECT m.id,m.model,m.parameters,p.provider,p.encrypted_api_key,p.base_url,p.id AS provider_connection_id
     FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id
@@ -185,10 +185,30 @@ async function resolveModel(tenantId: string, businessId: string, agentId: strin
       AND (m.business_id=$2 OR m.business_id IS NULL)
       AND (m.agent_profile_id=$3 OR m.agent_profile_id IS NULL)
       AND (m.channel_account_id=$4 OR m.channel_account_id IS NULL)
-    ORDER BY (m.channel_account_id IS NOT NULL) DESC,(m.agent_profile_id IS NOT NULL) DESC,(m.business_id IS NOT NULL) DESC,m.created_at DESC
-    LIMIT 1
+    ORDER BY
+      (m.channel_account_id IS NOT NULL) DESC,
+      (m.agent_profile_id IS NOT NULL) DESC,
+      (m.business_id IS NOT NULL) DESC,
+      COALESCE((m.parameters->>'fallbackOrder')::int, 1000),
+      m.created_at DESC
+    LIMIT 5
   `, [tenantId, businessId, agentId, channelId, taskKey]);
-  return result.rows[0] ?? null;
+  return result.rows;
+}
+
+async function resolveModel(tenantId: string, businessId: string, agentId: string | null, channelId: string, taskKey: string) {
+  return (await resolveModels(tenantId,businessId,agentId,channelId,taskKey))[0] ?? null;
+}
+
+async function estimateAiCost(provider:string,model:string,usage:any):Promise<number|null>{
+  const registry=await query<any>("SELECT pricing_json FROM ai_model_registry WHERE provider=$1 AND model=$2 AND active=true",[provider,model]).catch(()=>({rows:[] as any[]}));
+  const pricing=registry.rows[0]?.pricing_json;
+  if(!pricing)return null;
+  const inputRate=Number(pricing.inputPerMillion ?? pricing.input_per_million ?? 0);
+  const outputRate=Number(pricing.outputPerMillion ?? pricing.output_per_million ?? 0);
+  if(!Number.isFinite(inputRate)||!Number.isFinite(outputRate))return null;
+  const input=Number(usage?.inputTokens ?? 0);const output=Number(usage?.outputTokens ?? 0);
+  return (input/1_000_000)*inputRate+(output/1_000_000)*outputRate;
 }
 
 export async function internalRoutes(app: FastifyInstance) {
@@ -218,8 +238,8 @@ export async function internalRoutes(app: FastifyInstance) {
     const turnText = [originalTurnText, multimodal.transcript, multimodal.imageAnalysis].filter(Boolean).join("\n\n");
     const items = await findRelevantItems(row.tenant_id, row.business_id, row.agent_profile_id, turnText);
     const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText);
-    const model = await resolveModel(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, "DEFAULT_CHAT");
-    if (!model) throw new ApiError(409, "AI_MODEL_MISSING", "No DEFAULT_CHAT model is configured for this agent.");
+    const modelCandidates = await resolveModels(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, "DEFAULT_CHAT");
+    if (!modelCandidates.length) throw new ApiError(409, "AI_MODEL_MISSING", "No DEFAULT_CHAT model is configured for this agent.");
     const system = [
       row.assembled_prompt || "You are a helpful business assistant.",
       "\n## Runtime rules\nUse only current provided business facts. If facts are missing, say they are unavailable. Never invent prices, stock, booking availability, or policy. Only request/perform capabilities listed below.",
@@ -236,7 +256,18 @@ export async function internalRoutes(app: FastifyInstance) {
       content: message.text_content,
     }));
     history.push({ role: "user", content: originalTurnText || multimodal.transcript || multimodal.imageAnalysis || "[The user sent media without text.]" });
-    const result = await chat(model, { model: model.model, parameters: model.parameters ?? {} }, { system, messages: history });
+    let result:any=null;let model:any=null;let lastModelError:unknown=null;
+    for (const candidate of modelCandidates) {
+      try {
+        result = await chat(candidate,{model:candidate.model,parameters:candidate.parameters??{}},{system,messages:history});
+        model=candidate;break;
+      } catch (error) {
+        lastModelError=error;
+        const status=Number((error as any)?.status||0);
+        if(status>=400 && status<500 && ![408,409,429].includes(status)) break;
+      }
+    }
+    if(!result||!model) throw lastModelError instanceof Error ? lastModelError : new ApiError(502,"AI_PROVIDER_UNAVAILABLE","No configured AI fallback model could produce a response.");
     let parsed: any;
     try {
       const clean = result.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -250,8 +281,9 @@ export async function internalRoutes(app: FastifyInstance) {
     const messages = rawMessages.filter((message: any) => message.type !== "media" || mediaCount++ < imageLimit).slice(0, 10);
     const actions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 5) : [];
     if (!messages.length && !parsed.handoff) messages.push({ type: "text", text: "I’m unable to answer that right now. A team member can help if needed." });
-    await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,correlation_id,idempotency_key,metadata)
-      VALUES ($1,$2,$3,$4,'ai_call',1,'call',$5,$6,'DEFAULT_CHAT',$7,$8,$9::jsonb) ON CONFLICT DO NOTHING`, [row.tenant_id, row.business_id, row.channel_account_id, row.conversation_id, model.provider, model.model, requestId(request), `ai:${input.turnId}:${row.active_prompt_version_id}`, JSON.stringify(result.usage)]);
+    const estimatedCost=await estimateAiCost(model.provider,model.model,result.usage);
+    await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,estimated_cost,correlation_id,idempotency_key,metadata)
+      VALUES ($1,$2,$3,$4,'ai_call',1,'call',$5,$6,'DEFAULT_CHAT',$7,$8,$9,$10::jsonb) ON CONFLICT DO NOTHING`, [row.tenant_id,row.business_id,row.channel_account_id,row.conversation_id,model.provider,model.model,estimatedCost,requestId(request),`ai:${input.turnId}:${row.active_prompt_version_id}`,JSON.stringify(result.usage)]);
     for (const [index, extra] of multimodal.usage.entries()) {
       await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,correlation_id,idempotency_key,metadata)
         VALUES ($1,$2,$3,$4,'ai_call',1,'call',$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT DO NOTHING`,
