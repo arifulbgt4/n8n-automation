@@ -92,14 +92,19 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
       }
     }
     const pending = await query<any>(`
-      SELECT id,created_at FROM messages
-      WHERE conversation_id=$1 AND direction='INBOUND' AND turn_id IS NULL AND sender_type='CONTACT'
-      ORDER BY created_at ASC LIMIT $2
+      SELECT m.id,m.created_at,
+        COALESCE(octet_length(m.text_content),0)
+        + COALESCE((SELECT SUM(ma.size_bytes) FROM message_media mm JOIN media_assets ma ON ma.id=mm.media_asset_id WHERE mm.message_id=m.id),0) AS approx_bytes
+      FROM messages m
+      WHERE m.conversation_id=$1 AND m.direction='INBOUND' AND m.turn_id IS NULL AND m.sender_type='CONTACT'
+      ORDER BY m.created_at ASC LIMIT $2
     `, [conversationId, config.AGGREGATION_MAX_MESSAGES]);
     if (!pending.rows.length) return;
     const latest = pending.rows[pending.rows.length - 1];
     const ageMs = Date.now() - new Date(latest.created_at).getTime();
-    if (ageMs < config.AGGREGATION_WINDOW_MS - 100) {
+    const pendingBytes=pending.rows.reduce((sum:number,row:any)=>sum+Number(row.approx_bytes||0),0);
+    const limitReached=pending.rows.length>=config.AGGREGATION_MAX_MESSAGES || pendingBytes>=config.AGGREGATION_MAX_BYTES;
+    if (!limitReached && ageMs < config.AGGREGATION_WINDOW_MS - 100) {
       const delay = config.AGGREGATION_WINDOW_MS - ageMs;
       await job.moveToDelayed(Date.now() + delay, job.token!);
       return;
@@ -107,16 +112,26 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
     const turn = await transaction(async (client) => {
       const locked = await client.query<any>("SELECT id,mode,status FROM conversations WHERE id=$1 FOR UPDATE", [conversationId]);
       if (!locked.rows[0] || locked.rows[0].mode !== "AI" || locked.rows[0].status !== "open") return null;
-      const messages = await client.query<{ id: string }>(`
-        SELECT id FROM messages WHERE conversation_id=$1 AND direction='INBOUND' AND turn_id IS NULL AND sender_type='CONTACT'
-        ORDER BY created_at ASC LIMIT $2 FOR UPDATE
+      const messages = await client.query<{ id: string; approx_bytes:string }>(`
+        SELECT m.id,
+          (COALESCE(octet_length(m.text_content),0)
+          + COALESCE((SELECT SUM(ma.size_bytes) FROM message_media mm JOIN media_assets ma ON ma.id=mm.media_asset_id WHERE mm.message_id=m.id),0))::text AS approx_bytes
+        FROM messages m WHERE m.conversation_id=$1 AND m.direction='INBOUND' AND m.turn_id IS NULL AND m.sender_type='CONTACT'
+        ORDER BY m.created_at ASC LIMIT $2 FOR UPDATE OF m
       `, [conversationId, config.AGGREGATION_MAX_MESSAGES]);
       if (!messages.rows.length) return null;
+      let totalBytes=0;
+      const selectedMessages:typeof messages.rows=[];
+      for(const row of messages.rows){
+        const bytes=Number(row.approx_bytes||0);
+        if(selectedMessages.length>0 && totalBytes+bytes>config.AGGREGATION_MAX_BYTES)break;
+        selectedMessages.push(row);totalBytes+=bytes;
+      }
       const created = await client.query<{ id: string }>(`
         INSERT INTO conversation_turns(tenant_id,conversation_id,speaker,status,metadata)
         VALUES ($1,$2,'CONTACT','ready',$3::jsonb) RETURNING id
-      `, [tenantId, conversationId, JSON.stringify({ correlationId, messageCount: messages.rows.length })]);
-      const ids = messages.rows.map((row) => row.id);
+      `, [tenantId, conversationId, JSON.stringify({ correlationId, messageCount: selectedMessages.length, approximateBytes:totalBytes })]);
+      const ids = selectedMessages.map((row) => row.id);
       await client.query("UPDATE messages SET turn_id=$2,updated_at=now() WHERE id=ANY($1::uuid[])", [ids, created.rows[0].id]);
       await client.query("UPDATE conversations SET last_turn_at=now(),updated_at=now() WHERE id=$1", [conversationId]);
       await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key)
