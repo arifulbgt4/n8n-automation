@@ -185,19 +185,27 @@ export async function aiRoutes(app: FastifyInstance) {
       behaviorSettings: z.record(z.string(), z.unknown()).default({}),
       channelIds: z.array(z.string().uuid()).max(50).default([]),
       collectionIds: z.array(z.string().uuid()).max(50).default([]),
-      initialPrompt: z.record(z.string(), z.unknown()).default({ core_role: "You are a helpful business assistant. Use current business data and never invent unavailable facts." }),
+      templateKey: z.string().regex(/^[a-z0-9_-]+$/).max(100).optional(),
+      initialPrompt: z.record(z.string(), z.unknown()).optional(),
     }).parse(request.body);
     const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
     if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
+    const template = input.templateKey
+      ? await query<any>("SELECT key,capabilities,sections_json FROM prompt_templates WHERE key=$1 AND active=true",[input.templateKey])
+      : { rows: [] as any[] };
+    if (input.templateKey && !template.rows[0]) throw new ApiError(400,"AGENT_TEMPLATE_NOT_FOUND","Selected agent template is unavailable.");
+    const defaultPrompt={ core_role: "You are a helpful business assistant. Use current business data and never invent unavailable facts." };
+    const initialPrompt=input.initialPrompt ?? template.rows[0]?.sections_json ?? defaultPrompt;
+    const capabilities=[...new Set([...(template.rows[0]?.capabilities ?? []),...input.capabilities])];
     const agent = await transaction(async (client) => {
       const created = await client.query(`
         INSERT INTO agent_profiles(tenant_id,business_id,name,description,capabilities,behavior_settings)
         VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING *
-      `, [tenantId, input.businessId, input.name, input.description ?? null, input.capabilities, JSON.stringify(input.behaviorSettings)]);
+      `, [tenantId, input.businessId, input.name, input.description ?? null, capabilities, JSON.stringify(input.behaviorSettings)]);
       const prompt = await client.query(`
         INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,sections_json,assembled_prompt,created_by,published_by,published_at)
-        VALUES ($1,$2,1,'manual','active',$3::jsonb,$4,$5,$5,now()) RETURNING id
-      `, [tenantId, created.rows[0].id, JSON.stringify(input.initialPrompt), Object.values(input.initialPrompt).map(String).join("\n\n"), principal.userId]);
+        VALUES ($1,$2,1,$3,'active',$4::jsonb,$5,$6,$6,now()) RETURNING id
+      `, [tenantId, created.rows[0].id, input.templateKey ? "template" : "manual", JSON.stringify(initialPrompt), Object.entries(initialPrompt).map(([key,value])=>`## ${key.replace(/_/g," ")}\n${typeof value==="string"?value:JSON.stringify(value,null,2)}`).join("\n\n"), principal.userId]);
       await client.query("UPDATE agent_profiles SET active_prompt_version_id=$2 WHERE id=$1", [created.rows[0].id, prompt.rows[0].id]);
       for (const channelId of input.channelIds) {
         const channel = await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [channelId, tenantId, input.businessId]);
@@ -211,7 +219,7 @@ export async function aiRoutes(app: FastifyInstance) {
       }
       return created.rows[0];
     });
-    await audit({ actorUserId: principal.userId, tenantId, businessId: input.businessId, action: "AGENT_CREATED", resourceType: "agent_profile", resourceId: agent.id, safeDiff: { name: input.name, capabilities: input.capabilities }, request });
+    await audit({ actorUserId: principal.userId, tenantId, businessId: input.businessId, action: "AGENT_CREATED", resourceType: "agent_profile", resourceId: agent.id, safeDiff: { name: input.name, capabilities, templateKey: input.templateKey ?? null }, request });
     reply.code(201).send({ agent });
   });
 
