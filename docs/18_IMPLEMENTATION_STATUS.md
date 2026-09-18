@@ -27,6 +27,10 @@ Repository CI provisions isolated PostgreSQL + pgvector and Redis services, appl
 
 Integration coverage includes tenant isolation, CSRF rejection, authentication abuse throttling, Meta webhook HMAC rejection/acceptance, inbound webhook idempotency, Redis namespace behavior and BullMQ job-ID idempotency.
 
+## Current repository verification
+
+The full-platform branch passes isolated PostgreSQL/pgvector migrations, n8n workflow validation, TypeScript typechecking, automated tests, and all application/package builds. The latest stabilization also fixed PostgreSQL signup-audit parameter typing and BullMQ custom job-ID encoding while preserving application idempotency keys.
+
 ## Production/environment activation gates
 
 The following are intentionally not source-code tasks and cannot be completed from the repository alone:

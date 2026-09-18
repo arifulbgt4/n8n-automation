@@ -4,7 +4,7 @@ This repository is the target SaaS application for a multi-tenant, configurable 
 
 ## Current status
 
-The repository is intentionally in a **documentation-first planning phase**. The existing `customer-panel` and `super-admin-panel` are application shells. No runtime implementation should begin until the architecture, data model, security boundaries, integration contracts, and implementation phases in `docs/` are accepted.
+The repository is in the **full-platform implementation / production-readiness phase**. Repository-owned runtime code is implemented across the Fastify API, BullMQ worker, PostgreSQL/pgvector migrations, Redis coordination, Customer Panel, Super Admin Panel, AI/training/RAG, messaging/media, business actions, billing-ready models, n8n workflow bundle, deployment tooling, security controls, observability, retention, and operational recovery. Remaining open roadmap items are environment-owned production activation or explicitly conditional features; see `docs/18_IMPLEMENTATION_STATUS.md`.
 
 ## Existing infrastructure assumption
 
@@ -34,7 +34,7 @@ Infrastructure-specific repository locations, admin-panel URLs, hostnames, ports
 
 ## n8n workflow delivery
 
-This repository will keep sanitized, version-controlled n8n workflow JSON exports as deployment artifacts. The existing n8n instance is not installed or managed here. Workflow artifacts are imported into that instance, configured with environment-specific credentials/settings, tested while inactive, and then activated according to the workflow deployment specification.
+This repository keeps sanitized, version-controlled n8n workflow JSON exports as deployment artifacts, with manifest validation and deployment tooling. The existing n8n instance is not installed or managed here. Production activation still requires the exact deployed n8n version, environment-specific credentials/settings, inactive import verification, and controlled cutover.
 
 ## Documentation
 
@@ -42,6 +42,6 @@ Start with [`docs/README.md`](docs/README.md) and [`docs/00_MASTER_PLAN.md`](doc
 
 The documentation covers system architecture, database/domain design, authentication and multi-tenancy, both web applications, dynamic business data, messaging/media, AI agents and training, n8n workflow artifacts, Redis/queues/storage, analytics and limits, security, API/event contracts, deployment, testing, migration, and the complete implementation roadmap.
 
-## Documentation-first rule
+## Implementation rule
 
-Until the planning phase is closed, changes should be limited to documentation unless an implementation task is explicitly approved. Future implementation must treat the specs in `docs/` as the contract and update the specs whenever a design decision changes.
+Runtime implementation is authorized. Treat the specs in `docs/` as the contract, keep code/tests/workflow artifacts/documentation aligned, and only mark a roadmap item complete when repository evidence exists or the external production verification has actually occurred.
