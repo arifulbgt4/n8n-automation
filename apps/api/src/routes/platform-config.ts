@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { query, transaction } from "@n8n-automation/core";
+import { query } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requirePlatformAdmin, requireTenant } from "../lib.js";
 
 async function validatePolicyScope(tenantId:string,businessId:string,agentProfileId?:string|null,channelAccountId?:string|null){
