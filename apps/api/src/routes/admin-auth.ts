@@ -84,4 +84,26 @@ export async function adminAuthRoutes(app: FastifyInstance) {
     await audit({ actorUserId: principal.userId, actorType: "platform_admin", action: "ADMIN_RECOVERY_CODES_ROTATED", resourceType: "user", resourceId: principal.userId, request });
     reply.send({ recoveryCodes: codes });
   });
+  app.post("/v1/admin/mfa/reauth", async (request, reply) => {
+    const principal = await requirePlatformAdmin(request);
+    requireCsrf(request);
+    const input = z.object({ code: z.string().min(6).max(30) }).parse(request.body);
+    const admin = await query<any>("SELECT mfa_secret_encrypted,recovery_code_hashes FROM platform_admins WHERE user_id=$1 AND active=true AND mfa_enabled=true",[principal.userId]);
+    const row=admin.rows[0];
+    if(!row?.mfa_secret_encrypted) throw new ApiError(400,"MFA_NOT_ENABLED","MFA is not enabled.");
+    let valid=verifyTotp(decryptSecret(row.mfa_secret_encrypted),input.code);
+    let recoveryHash:string|null=null;
+    if(!valid){
+      recoveryHash=sha256(input.code.toUpperCase().trim());
+      valid=Array.isArray(row.recovery_code_hashes)&&row.recovery_code_hashes.includes(recoveryHash);
+    }
+    if(!valid) throw new ApiError(401,"MFA_CODE_INVALID","MFA code is invalid.");
+    await transaction(async(client)=>{
+      await client.query("UPDATE sessions SET mfa_verified_at=now(),last_seen_at=now() WHERE id=$1",[principal.sessionId]);
+      if(recoveryHash) await client.query("UPDATE platform_admins SET recovery_code_hashes=array_remove(recovery_code_hashes,$2),updated_at=now() WHERE user_id=$1",[principal.userId,recoveryHash]);
+    });
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"ADMIN_REAUTHENTICATED",resourceType:"session",resourceId:principal.sessionId,request});
+    reply.send({ok:true,mfaVerifiedAt:new Date().toISOString()});
+  });
+
 }
