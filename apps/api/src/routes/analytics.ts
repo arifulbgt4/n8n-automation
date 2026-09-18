@@ -61,7 +61,8 @@ export async function analyticsRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/analytics/timeseries", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({
       from: z.string().datetime().default(defaultFrom()),
       to: z.string().datetime().default(() => new Date().toISOString()),
