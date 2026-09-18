@@ -3,6 +3,7 @@ import { z } from "zod";
 import { env, query, transaction } from "@n8n-automation/core";
 import { chat, embedding } from "../ai-provider.js";
 import { ApiError } from "../lib.js";
+import { assertMonthlyAiCostBudget } from "../limits.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -11,15 +12,16 @@ function requireInternal(request: FastifyRequest) {
 
 async function resolveTaskModel(tenantId: string, businessId: string, agentId: string | null, taskKey: string, explicitConfigId?: string | null) {
   const result = explicitConfigId
-    ? await query<any>(`SELECT m.*,p.provider,p.encrypted_api_key,p.base_url FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id WHERE m.id=$1 AND m.tenant_id=$2 AND m.active=true AND p.status='active'`, [explicitConfigId, tenantId])
+    ? await query<any>(`SELECT m.*,p.provider,p.encrypted_api_key,p.base_url,p.ownership_mode FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id WHERE m.id=$1 AND m.tenant_id=$2 AND m.active=true AND p.status='active'`, [explicitConfigId, tenantId])
     : await query<any>(`
-      SELECT m.*,p.provider,p.encrypted_api_key,p.base_url
+      SELECT m.*,p.provider,p.encrypted_api_key,p.base_url,p.ownership_mode
       FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id
       WHERE m.tenant_id=$1 AND m.active=true AND p.status='active' AND m.task_key=$4
         AND (m.business_id=$2 OR m.business_id IS NULL) AND (m.agent_profile_id=$3 OR m.agent_profile_id IS NULL)
       ORDER BY (m.agent_profile_id IS NOT NULL) DESC,(m.business_id IS NOT NULL) DESC,m.created_at DESC LIMIT 1
     `, [tenantId, businessId, agentId, taskKey]);
   if (!result.rows[0]) throw new ApiError(409, "AI_MODEL_MISSING", `No active ${taskKey} model configuration is available.`);
+  await assertMonthlyAiCostBudget(tenantId,result.rows[0].ownership_mode);
   return result.rows[0];
 }
 
