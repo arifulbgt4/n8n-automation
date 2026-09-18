@@ -61,12 +61,19 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
       ORDER BY created_at
     `, [row.tenant_id, row.agent_profile_id, exampleIds]);
     if (!examples.rows.length) throw new ApiError(400, "TRAINING_EXAMPLES_REQUIRED", "No approved training examples were found.");
-    const schemas = await query(`
-      SELECT c.id,c.name,c.key,c.purpose,
+    const schemas = await query<any>(`
+      SELECT c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at,
         COALESCE(jsonb_agg(jsonb_build_object('key',f.key,'label',f.label,'type',f.type,'required',f.required,'aiVisible',f.ai_visible) ORDER BY f.display_order) FILTER(WHERE f.id IS NOT NULL),'[]'::jsonb) AS fields
       FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id LEFT JOIN collection_fields f ON f.collection_id=c.id
-      WHERE acl.agent_profile_id=$1 GROUP BY c.id,c.name,c.key,c.purpose ORDER BY c.name
+      WHERE acl.agent_profile_id=$1 GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at ORDER BY c.name
     `, [row.agent_profile_id]);
+    const capturedVersions=Array.isArray(row.input_snapshot?.collectionVersions)?row.input_snapshot.collectionVersions:[];
+    for(const captured of capturedVersions){
+      const current=schemas.rows.find((schema:any)=>schema.id===captured.id);
+      if(!current || Number(current.schema_version)!==Number(captured.schemaVersion)){
+        throw new ApiError(409,"TRAINING_INPUT_STALE","A linked collection schema changed after the training job was created. Start a new training job.",{collectionId:captured.id,capturedVersion:captured.schemaVersion,currentVersion:current?.schema_version??null});
+      }
+    }
     const model = await resolveTaskModel(row.tenant_id, row.business_id, row.agent_profile_id, "PROMPT_SYNTHESIS", row.model_config_id);
     const system = `You are a prompt engineer for a multi-tenant business automation platform. Synthesize a production agent prompt from approved demonstrations. Preserve safety and grounding rules. Do not copy mutable product/service facts into the prompt. Return strict JSON with keys sections (object) and evaluation (object). The sections object should include core_role, tone_language, grounding, capabilities, business_process, human_handoff, restrictions, and custom_instructions.`;
     const result = await chat(model, { model: model.model, parameters: { ...model.parameters, temperature: 0.15 } }, {
