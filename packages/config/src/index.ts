@@ -16,7 +16,17 @@ const envSchema = z.object({
   AUTH_BASE_URL: z.string().url(),
   AUTH_SECRET: z.string().min(32),
   CUSTOMER_PANEL_ORIGIN: z.string().url(),
-  SUPER_ADMIN_PANEL_ORIGIN: z.string().url()
+  SUPER_ADMIN_PANEL_ORIGIN: z.string().url(),
+  CREDENTIAL_ENCRYPTION_KEY_BASE64: z.string().min(1).refine(
+    (value) => {
+      try {
+        return Buffer.from(value, "base64").length === 32;
+      } catch {
+        return false;
+      }
+    },
+    "CREDENTIAL_ENCRYPTION_KEY_BASE64 must decode to exactly 32 bytes"
+  )
 });
 
 export type AppConfig = Readonly<{
@@ -30,6 +40,7 @@ export type AppConfig = Readonly<{
   media: Readonly<{ baseUrl: string; apiKey: string }>;
   internalServiceAuthSecret: string;
   n8nWorkflowBundleVersion: string;
+  credentialEncryptionKey: Buffer;
   auth: Readonly<{
     baseUrl: string;
     secret: string;
@@ -61,6 +72,7 @@ export function loadConfig(input: NodeJS.ProcessEnv = process.env): AppConfig {
     }),
     internalServiceAuthSecret: env.INTERNAL_SERVICE_AUTH_SECRET,
     n8nWorkflowBundleVersion: env.N8N_WORKFLOW_BUNDLE_VERSION,
+    credentialEncryptionKey: Buffer.from(env.CREDENTIAL_ENCRYPTION_KEY_BASE64, "base64"),
     auth: Object.freeze({
       baseUrl: env.AUTH_BASE_URL.replace(/\/$/, ""),
       secret: env.AUTH_SECRET,

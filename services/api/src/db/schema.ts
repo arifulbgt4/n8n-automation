@@ -158,6 +158,86 @@ export const platformAdmins = pgTable(
   (table) => [uniqueIndex("platform_admins_user_uidx").on(table.userId)]
 );
 
+
+export const businesses = pgTable(
+  "businesses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 180 }).notNull(),
+    businessTypeHint: varchar("business_type_hint", { length: 80 }),
+    timezone: varchar("timezone", { length: 80 }).notNull().default("UTC"),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    locale: varchar("locale", { length: 32 }).notNull().default("en"),
+    status: varchar("status", { length: 24 }).notNull().default("ACTIVE"),
+    settings: jsonb("settings").notNull().default({}),
+    createdAt,
+    updatedAt
+  },
+  (table) => [
+    index("businesses_tenant_status_idx").on(table.tenantId, table.status)
+  ]
+);
+
+export const channelAccounts = pgTable(
+  "channel_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    businessId: uuid("business_id").notNull().references(() => businesses.id, { onDelete: "cascade" }),
+    platform: varchar("platform", { length: 24 }).notNull(),
+    name: varchar("name", { length: 180 }).notNull(),
+    externalAccountId: varchar("external_account_id", { length: 255 }).notNull(),
+    externalPublicId: varchar("external_public_id", { length: 255 }),
+    apiVersion: varchar("api_version", { length: 40 }),
+    connectionStatus: varchar("connection_status", { length: 32 }).notNull().default("PENDING"),
+    active: boolean("active").notNull().default(false),
+    settings: jsonb("settings").notNull().default({}),
+    lastHealthStatus: varchar("last_health_status", { length: 32 }),
+    lastHealthCheckedAt: timestamp("last_health_checked_at", { withTimezone: true }),
+    lastWebhookAt: timestamp("last_webhook_at", { withTimezone: true }),
+    lastOutboundAt: timestamp("last_outbound_at", { withTimezone: true }),
+    lastErrorCode: varchar("last_error_code", { length: 120 }),
+    createdAt,
+    updatedAt
+  },
+  (table) => [
+    uniqueIndex("channel_accounts_platform_external_uidx").on(
+      table.platform,
+      table.externalAccountId
+    ),
+    index("channel_accounts_tenant_business_idx").on(table.tenantId, table.businessId),
+    index("channel_accounts_status_idx").on(table.connectionStatus, table.active)
+  ]
+);
+
+export const channelCredentials = pgTable(
+  "channel_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    channelAccountId: uuid("channel_account_id")
+      .notNull()
+      .references(() => channelAccounts.id, { onDelete: "cascade" }),
+    credentialType: varchar("credential_type", { length: 80 }).notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: varchar("iv", { length: 32 }).notNull(),
+    authTag: varchar("auth_tag", { length: 32 }).notNull(),
+    keyVersion: varchar("key_version", { length: 32 }).notNull().default("v1"),
+    rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt,
+    updatedAt
+  },
+  (table) => [
+    uniqueIndex("channel_credentials_account_type_uidx").on(
+      table.channelAccountId,
+      table.credentialType
+    ),
+    index("channel_credentials_tenant_idx").on(table.tenantId)
+  ]
+);
+
 export const outboxEvents = pgTable(
   "outbox_events",
   {
