@@ -29,3 +29,23 @@ Deactivate the new bundle before reactivating an older bundle. Never leave two w
 ## Ownership
 
 The JSON files and manifest in this directory are the source-of-record for SaaS n8n automation. Production-only editor changes must be exported back into Git before they are considered part of the application.
+
+
+## Automated import/update
+
+The repository includes `scripts/n8n-deploy.mjs` and a manual GitHub Action named **Deploy n8n bundle**.
+
+Required secrets/environment values:
+
+- `N8N_API_URL` — n8n instance base URL, with or without `/api/v1`.
+- `N8N_API_KEY` — n8n Public API key.
+- `SAAS_API_INTERNAL_URL` — optional SaaS API base URL used to record deployed workflow IDs.
+- `INTERNAL_SERVICE_AUTH_SECRET` — required with `SAAS_API_INTERNAL_URL`.
+
+Commands:
+
+- `npm run n8n:plan` — repository-only dry run; no n8n connection is needed.
+- `npm run n8n:deploy` — create/update workflows, leave them inactive.
+- `npm run n8n:deploy:activate` — create/update and activate manifest entries marked required.
+
+The deployment CLI matches workflows by exact version-controlled name and refuses ambiguous duplicates. Activation is a separate explicit step.
