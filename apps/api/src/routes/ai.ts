@@ -11,7 +11,7 @@ import {
   sha256,
   transaction,
 } from "@n8n-automation/core";
-import { chat, testConnection, type AiConnection, type AiModelConfig } from "../ai-provider.js";
+import { assertSafeAiBaseUrl, chat, testConnection, type AiConnection, type AiModelConfig } from "../ai-provider.js";
 import { ApiError, audit, requireAuth, requireCsrf, requireTenant, requestId } from "../lib.js";
 
 const providerSchema = z.enum(["openai", "anthropic", "gemini", "openai_compatible"]);
@@ -57,6 +57,10 @@ export async function aiRoutes(app: FastifyInstance) {
       ownershipMode: z.enum(["BYOK", "PLATFORM"]).default("BYOK"),
     }).parse(request.body);
     if (input.provider === "openai_compatible" && !input.baseUrl) throw new ApiError(400, "BASE_URL_REQUIRED", "Base URL is required for OpenAI-compatible providers.");
+    if (input.baseUrl) {
+      try { input.baseUrl = assertSafeAiBaseUrl(input.baseUrl); }
+      catch (error) { throw new ApiError(400,"BASE_URL_UNSAFE",error instanceof Error ? error.message : "Unsafe base URL."); }
+    }
     if (input.businessId) {
       const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
       if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
