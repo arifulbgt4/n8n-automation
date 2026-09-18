@@ -115,7 +115,7 @@ export async function conversationRoutes(app: FastifyInstance) {
         idempotencyKey: jobId,
         createdAt: new Date().toISOString(),
         payload: { logicalResponseId, priority: "HUMAN", senderType: "HUMAN", actorUserId: principal.userId, message },
-      });
+      }, { priority: 1 });
     }
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: cv.business_id, action: "HUMAN_REPLY_QUEUED", resourceType: "conversation", resourceId: params.conversationId, safeDiff: { text: Boolean(input.text), mediaCount: input.assetIds.length }, request });
     reply.code(202).send({ ok: true, logicalResponseId });
