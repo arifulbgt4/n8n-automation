@@ -1,12 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { enqueue, query, QUEUES } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireCsrf, requireTenant, requestId } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
 
 export async function knowledgeRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/knowledge", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({ businessId: z.string().uuid().optional(), agentId: z.string().uuid().optional(), status: z.string().max(40).optional() }).parse(request.query);
     const result = await query(`
       SELECT ks.*,
@@ -16,8 +17,9 @@ export async function knowledgeRoutes(app: FastifyInstance) {
         AND ($2::uuid IS NULL OR ks.business_id=$2)
         AND ($3::uuid IS NULL OR ks.agent_profile_id=$3)
         AND ($4::text IS NULL OR ks.status=$4)
+        AND ($5::uuid[] IS NULL OR ks.business_id=ANY($5::uuid[]))
       ORDER BY ks.updated_at DESC
-    `, [tenantId, q.businessId ?? null, q.agentId ?? null, q.status ?? null]);
+    `, [tenantId, q.businessId ?? null, q.agentId ?? null, q.status ?? null, scope]);
     reply.send({ sources: result.rows });
   });
 
@@ -35,6 +37,7 @@ export async function knowledgeRoutes(app: FastifyInstance) {
       mediaAssetId: z.string().uuid().nullable().optional(),
       metadata: z.record(z.string(), z.unknown()).default({}),
     }).parse(request.body);
+    await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER","ADMIN","STAFF"]);
     const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
     if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     if (input.agentProfileId) {
@@ -68,6 +71,7 @@ export async function knowledgeRoutes(app: FastifyInstance) {
     const input = z.object({ title: z.string().trim().min(1).max(240).optional(), content: z.string().min(1).max(2_000_000).optional(), status: z.enum(["pending", "indexing", "ready", "error", "archived"]).optional(), metadata: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
     const current = await query<any>("SELECT * FROM knowledge_sources WHERE id=$1 AND tenant_id=$2", [params.sourceId, params.tenantId]);
     if (!current.rows[0]) throw new ApiError(404, "KNOWLEDGE_NOT_FOUND", "Knowledge source not found.");
+    await requireBusinessAccess(request, params.tenantId, current.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     const contentChanged = input.content !== undefined && input.content !== current.rows[0].content;
     const result = await query(`
       UPDATE knowledge_sources SET title=COALESCE($3,title),content=COALESCE($4,content),status=CASE WHEN $5::boolean THEN 'pending' ELSE COALESCE($6,status) END,
