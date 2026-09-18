@@ -156,7 +156,7 @@ export async function mediaRoutes(app: FastifyInstance) {
     const storageFile = body.file ?? body;
     if (!storageFile.id || !storageFile.mime_type) throw new ApiError(502, "MEDIA_RESPONSE_INVALID", "Media storage returned an invalid response.");
 
-    const checksum = checksum;
+    const checksum = storageFile.checksum_sha256 ?? sha256(bytes);
     const duplicate = await query<any>(`
       SELECT * FROM media_assets
       WHERE tenant_id=$1 AND content_hash=$2 AND processing_status='ready'
