@@ -138,7 +138,7 @@ export async function adminRoutes(app: FastifyInstance) {
       query("SELECT status,count(*)::int AS count,min(due_at) AS oldest_due FROM followup_jobs GROUP BY status ORDER BY status"),
     ]);
     reply.send({
-      expectedBundleVersion: config.N8N_WORKFLOW_BUNDLE_VERSION,
+      expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
       heartbeats: heartbeats.rows,
       outbox: outbox.rows,
       followups: followups.rows,
