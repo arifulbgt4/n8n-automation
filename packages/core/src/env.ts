@@ -25,6 +25,8 @@ const schema = z.object({
   N8N_HEALTH_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
   N8N_WORKFLOW_BUNDLE_VERSION: z.string().default("1.0.0"),
   META_GRAPH_API_VERSION: z.string().default("v23.0"),
+  META_APP_ID: z.string().optional(),
+  META_OAUTH_REDIRECT_URI: z.string().url().optional().or(z.literal("")),
   META_VERIFY_TOKEN: z.string().optional(),
   META_APP_SECRET: z.string().optional(),
   AGGREGATION_WINDOW_MS: z.coerce.number().int().min(500).max(30000).default(4500),
