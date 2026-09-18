@@ -90,6 +90,63 @@ export async function adminRoutes(app: FastifyInstance) {
     reply.send({ queues: stats });
   });
 
+  app.get("/v1/admin/queues/:queueName/jobs", async (request, reply) => {
+    await requirePlatformAdmin(request);
+    const params=z.object({queueName:z.string().min(1)}).parse(request.params);
+    if(!(Object.values(QUEUES) as string[]).includes(params.queueName)) throw new ApiError(404,"QUEUE_NOT_FOUND","Queue not found.");
+    const input=z.object({
+      state:z.enum(["waiting","active","delayed","failed","completed","paused"]).default("failed"),
+      limit:z.coerce.number().int().min(1).max(200).default(50),
+    }).parse(request.query);
+    const q=queue(params.queueName as (typeof QUEUES)[keyof typeof QUEUES]);
+    const jobs=await q.getJobs([input.state],0,input.limit-1,false);
+    reply.send({jobs:jobs.map((job)=>({
+      id:job.id,name:job.name,data:job.data,attemptsMade:job.attemptsMade,failedReason:job.failedReason,
+      timestamp:job.timestamp,processedOn:job.processedOn,finishedOn:job.finishedOn,opts:{attempts:job.opts.attempts,delay:job.opts.delay,priority:job.opts.priority}
+    }))});
+  });
+
+  app.post("/v1/admin/queues/:queueName/jobs/:jobId/retry", async (request, reply) => {
+    const principal=await requirePlatformAdmin(request);
+    requireCsrf(request);
+    const params=z.object({queueName:z.string().min(1),jobId:z.string().min(1).max(300)}).parse(request.params);
+    if(!(Object.values(QUEUES) as string[]).includes(params.queueName)) throw new ApiError(404,"QUEUE_NOT_FOUND","Queue not found.");
+    const q=queue(params.queueName as (typeof QUEUES)[keyof typeof QUEUES]);
+    const job=await q.getJob(params.jobId);
+    if(!job) throw new ApiError(404,"JOB_NOT_FOUND","Queue job not found.");
+    const state=await job.getState();
+    if(state!=="failed") throw new ApiError(409,"JOB_NOT_RETRYABLE",`Only failed jobs can be retried; current state is ${state}.`);
+    await job.retry("failed");
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"QUEUE_JOB_RETRIED",resourceType:"queue_job",resourceId:params.jobId,safeDiff:{queue:params.queueName},request});
+    reply.send({ok:true});
+  });
+
+  app.delete("/v1/admin/queues/:queueName/jobs/:jobId", async (request, reply) => {
+    const principal=await requirePlatformAdmin(request);
+    requireCsrf(request);
+    const params=z.object({queueName:z.string().min(1),jobId:z.string().min(1).max(300)}).parse(request.params);
+    if(!(Object.values(QUEUES) as string[]).includes(params.queueName)) throw new ApiError(404,"QUEUE_NOT_FOUND","Queue not found.");
+    const q=queue(params.queueName as (typeof QUEUES)[keyof typeof QUEUES]);
+    const job=await q.getJob(params.jobId);
+    if(!job) throw new ApiError(404,"JOB_NOT_FOUND","Queue job not found.");
+    const state=await job.getState();
+    if(state==="active") throw new ApiError(409,"ACTIVE_JOB_REMOVE_FORBIDDEN","An active job cannot be removed.");
+    await job.remove();
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"QUEUE_JOB_REMOVED",resourceType:"queue_job",resourceId:params.jobId,safeDiff:{queue:params.queueName,state},request});
+    reply.send({ok:true});
+  });
+
+  app.post("/v1/admin/queues/:queueName/:operation", async (request, reply) => {
+    const principal=await requirePlatformAdmin(request);
+    requireCsrf(request);
+    const params=z.object({queueName:z.string().min(1),operation:z.enum(["pause","resume"])}).parse(request.params);
+    if(!(Object.values(QUEUES) as string[]).includes(params.queueName)) throw new ApiError(404,"QUEUE_NOT_FOUND","Queue not found.");
+    const q=queue(params.queueName as (typeof QUEUES)[keyof typeof QUEUES]);
+    if(params.operation==="pause") await q.pause(); else await q.resume();
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",action:`QUEUE_${params.operation.toUpperCase()}`,resourceType:"queue",resourceId:params.queueName,request});
+    reply.send({ok:true});
+  });
+
   app.get("/v1/admin/health", async (request, reply) => {
     await requirePlatformAdmin(request);
     const health: Record<string, unknown> = {};
