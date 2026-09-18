@@ -18,6 +18,7 @@ import { knowledgeRoutes } from "./routes/knowledge.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import { internalRoutes } from "./routes/internal.js";
+import { orchestrationRoutes } from "./routes/orchestration.js";
 import { internalAiJobRoutes } from "./routes/internal-ai-jobs.js";
 import { adminRoutes } from "./routes/admin.js";
 
@@ -94,6 +95,7 @@ await knowledgeRoutes(app);
 await analyticsRoutes(app);
 await webhookRoutes(app);
 await internalRoutes(app);
+await orchestrationRoutes(app);
 await internalAiJobRoutes(app);
 await adminRoutes(app);
 
