@@ -13,7 +13,7 @@ test("Redis namespace and BullMQ job IDs are tenant-safe and idempotent",async(t
     await closeQueues();
   });
 
-  assert.match(redisKey("test",suffix),/^n8nauto:ci:/);
+  assert.equal(redisKey("test",suffix),`${process.env.QUEUE_PREFIX || "n8nauto:development"}:test:${suffix}`);
   await redis().set(redisKey("test",suffix),"1","EX",30);
   assert.equal(await redis().get(redisKey("test",suffix)),"1");
 
