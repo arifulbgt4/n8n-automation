@@ -81,6 +81,83 @@ export const authVerifications = pgTable(
   (table) => [index("verifications_identifier_idx").on(table.identifier)]
 );
 
+export const tenants = pgTable(
+  "tenants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: varchar("name", { length: 160 }).notNull(),
+    slug: varchar("slug", { length: 180 }).notNull(),
+    status: varchar("status", { length: 24 }).notNull().default("ACTIVE"),
+    createdAt,
+    updatedAt
+  },
+  (table) => [uniqueIndex("tenants_slug_uidx").on(table.slug)]
+);
+
+export const tenantMemberships = pgTable(
+  "tenant_memberships",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => authUsers.id, { onDelete: "cascade" }),
+    role: varchar("role", { length: 24 }).notNull(),
+    status: varchar("status", { length: 24 }).notNull().default("ACTIVE"),
+    createdAt,
+    updatedAt
+  },
+  (table) => [
+    uniqueIndex("tenant_memberships_tenant_user_uidx").on(table.tenantId, table.userId),
+    index("tenant_memberships_user_idx").on(table.userId)
+  ]
+);
+
+export const tenantInvitations = pgTable(
+  "tenant_invitations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    email: varchar("email", { length: 320 }).notNull(),
+    role: varchar("role", { length: 24 }).notNull(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    status: varchar("status", { length: 24 }).notNull().default("PENDING"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    invitedByUserId: uuid("invited_by_user_id").notNull().references(() => authUsers.id, { onDelete: "cascade" }),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    createdAt,
+    updatedAt
+  },
+  (table) => [
+    uniqueIndex("tenant_invitations_token_hash_uidx").on(table.tokenHash),
+    index("tenant_invitations_tenant_email_idx").on(table.tenantId, table.email)
+  ]
+);
+
+export const businessMembershipRestrictions = pgTable(
+  "business_membership_restrictions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    membershipId: uuid("membership_id").notNull().references(() => tenantMemberships.id, { onDelete: "cascade" }),
+    businessId: uuid("business_id").notNull(),
+    createdAt
+  },
+  (table) => [
+    uniqueIndex("business_membership_restrictions_uidx").on(table.membershipId, table.businessId)
+  ]
+);
+
+export const platformAdmins = pgTable(
+  "platform_admins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => authUsers.id, { onDelete: "cascade" }),
+    role: varchar("role", { length: 32 }).notNull(),
+    status: varchar("status", { length: 24 }).notNull().default("ACTIVE"),
+    createdAt,
+    updatedAt
+  },
+  (table) => [uniqueIndex("platform_admins_user_uidx").on(table.userId)]
+);
+
 export const outboxEvents = pgTable(
   "outbox_events",
   {

@@ -7,6 +7,7 @@ import { createRedis } from "./infra/redis.js";
 import { createInternalServiceGuard } from "./security/internal-auth.js";
 import { createAuth } from "./auth/auth.js";
 import { registerAuthRoutes } from "./auth/routes.js";
+import { registerTenantRoutes } from "./tenancy/routes.js";
 
 export async function buildApp(config: AppConfig) {
   const app = Fastify({
@@ -41,6 +42,7 @@ export async function buildApp(config: AppConfig) {
 
   const auth = createAuth(config, db, redis);
   await registerAuthRoutes(app, auth);
+  await registerTenantRoutes(app, auth, db);
 
   app.get("/health/live", async () => ({
     ok: true,
