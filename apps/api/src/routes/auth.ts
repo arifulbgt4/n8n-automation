@@ -4,6 +4,8 @@ import {
   hashPassword,
   query,
   randomToken,
+  redis,
+  redisKey,
   sha256,
   transaction,
   verifyPassword,
@@ -20,6 +22,13 @@ import {
   slugify,
 } from "../lib.js";
 
+async function authRateLimit(key: string, limit: number, ttlSeconds: number) {
+  const redisKeyValue = redisKey("auth",key);
+  const count = await redis().incr(redisKeyValue);
+  if (count === 1) await redis().expire(redisKeyValue,ttlSeconds);
+  if (count > limit) throw new ApiError(429,"AUTH_RATE_LIMITED","Too many authentication attempts. Try again later.",{retryAfterSeconds:await redis().ttl(redisKeyValue)});
+}
+
 const passwordSchema = z.string().min(10).max(200).refine(
   (value) => /[A-Za-z]/.test(value) && /\d/.test(value),
   "Password must contain at least one letter and one number",
@@ -27,12 +36,14 @@ const passwordSchema = z.string().min(10).max(200).refine(
 
 export async function authRoutes(app: FastifyInstance) {
   app.post("/v1/auth/signup", async (request, reply) => {
+    await authRateLimit(`signup:ip:${request.ip}`,10,3600);
     const input = z.object({
       email: z.string().email().transform((v) => v.trim().toLowerCase()),
       password: passwordSchema,
       name: z.string().trim().min(1).max(120),
       organizationName: z.string().trim().min(1).max(160),
     }).parse(request.body);
+    await authRateLimit(`signup:email:${sha256(input.email)}`,5,3600);
 
     const token = randomToken(32);
     const passwordHash = await hashPassword(input.password);
@@ -79,10 +90,13 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post("/v1/auth/signin", async (request, reply) => {
+    await authRateLimit(`signin:ip:${request.ip}`,40,900);
     const input = z.object({
       email: z.string().email().transform((v) => v.trim().toLowerCase()),
       password: z.string().min(1).max(200),
     }).parse(request.body);
+    const emailLimitKey=`signin:email:${sha256(input.email)}`;
+    await authRateLimit(emailLimitKey,12,900);
     const result = await query<{
       id: string;
       email: string;
@@ -106,6 +120,7 @@ export async function authRoutes(app: FastifyInstance) {
     if (!user || !valid || user.status !== "active") {
       throw new ApiError(401, "INVALID_CREDENTIALS", "Email or password is incorrect.");
     }
+    await redis().del(redisKey("auth",emailLimitKey)).catch(()=>undefined);
     await query("UPDATE users SET last_login_at=now(), updated_at=now() WHERE id=$1", [user.id]);
 
     if (user.admin_active && user.mfa_required && user.mfa_enabled) {
@@ -185,7 +200,9 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post("/v1/auth/request-password-reset", async (request, reply) => {
+    await authRateLimit(`reset:ip:${request.ip}`,20,3600);
     const input = z.object({ email: z.string().email().transform((v) => v.trim().toLowerCase()) }).parse(request.body);
+    await authRateLimit(`reset:email:${sha256(input.email)}`,5,3600);
     const user = await query<{ id: string }>("SELECT id FROM users WHERE email=$1 AND status='active'", [input.email]);
     if (user.rows[0]) {
       const token = randomToken(32);
@@ -216,4 +233,21 @@ export async function authRoutes(app: FastifyInstance) {
     clearSessionCookie(reply);
     reply.send({ ok: true });
   });
+  app.post("/v1/auth/change-password", async (request, reply) => {
+    const principal=await requireAuth(request);
+    requireCsrf(request);
+    const input=z.object({currentPassword:z.string().min(1).max(200),newPassword:passwordSchema}).parse(request.body);
+    const user=await query<{password_hash:string}>("SELECT password_hash FROM users WHERE id=$1",[principal.userId]);
+    if(!user.rows[0] || !(await verifyPassword(input.currentPassword,user.rows[0].password_hash))) {
+      throw new ApiError(403,"CURRENT_PASSWORD_INVALID","Current password is incorrect.");
+    }
+    const passwordHash=await hashPassword(input.newPassword);
+    await transaction(async(client)=>{
+      await client.query("UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1",[principal.userId,passwordHash]);
+      await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND id<>$2 AND revoked_at IS NULL",[principal.userId,principal.sessionId]);
+    });
+    await audit({actorUserId:principal.userId,action:"PASSWORD_CHANGED",resourceType:"user",resourceId:principal.userId,request});
+    reply.send({ok:true});
+  });
+
 }
