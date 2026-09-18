@@ -36,6 +36,20 @@ Infrastructure-specific repository locations, admin-panel URLs, hostnames, ports
 
 This repository keeps sanitized, version-controlled n8n workflow JSON exports as deployment artifacts, with manifest validation and deployment tooling. The existing n8n instance is not installed or managed here. Production activation still requires the exact deployed n8n version, environment-specific credentials/settings, inactive import verification, and controlled cutover.
 
+## Local development
+
+See [docs/20_LOCAL_DEVELOPMENT.md](docs/20_LOCAL_DEVELOPMENT.md) for complete local setup, environment configuration, PostgreSQL/Redis, migrations, service startup, optional integrations, testing, reset procedures, and troubleshooting.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the developer contribution workflow, architecture rules, migration/API/queue/UI/n8n standards, security requirements, testing expectations, and pull-request checklist.
+
+Default local URLs:
+
+- Customer Panel: http://localhost:3000
+- Super Admin Panel: http://localhost:3001
+- API: http://localhost:4000
+- API liveness: http://localhost:4000/healthz
+- API readiness: http://localhost:4000/readyz
+
 ## Documentation
 
 Start with [`docs/README.md`](docs/README.md) and [`docs/00_MASTER_PLAN.md`](docs/00_MASTER_PLAN.md).

@@ -24,6 +24,9 @@ This directory is the implementation contract for the n8n Automation SaaS.
 18. [`17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md`](17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md) — explicit rules for consuming the already-running PostgreSQL/Redis/n8n/Media services and deploying n8n JSON workflow bundles.
 19. [`18_IMPLEMENTATION_STATUS.md`](18_IMPLEMENTATION_STATUS.md) — implemented repository state, automated verification, and production/environment activation gates.
 20. [`19_OPERATIONAL_RUNBOOK.md`](19_OPERATIONAL_RUNBOOK.md) — incident diagnosis, queue/provider recovery, n8n rollback, Redis-loss recovery, backup objectives, and restore exercise.
+21. [`20_LOCAL_DEVELOPMENT.md`](20_LOCAL_DEVELOPMENT.md) — complete local environment setup, startup workflow, migrations, integrations, CI parity, reset procedures, and troubleshooting.
+
+Contributor workflow and engineering standards are documented in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## Canonical decisions
 

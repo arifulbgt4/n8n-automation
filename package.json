@@ -12,7 +12,7 @@
     "dev:api": "npm run dev -w @n8n-automation/api",
     "dev:worker": "npm run dev -w @n8n-automation/worker",
     "dev:customer": "npm run dev -w customer-panel",
-    "dev:admin": "npm run dev -w super-admin-panel",
+    "dev:admin": "npm run dev -w super-admin-panel -- --port 3001",
     "build": "npm run build:core && npm run build -w @n8n-automation/api && npm run build -w @n8n-automation/worker && npm run build:apps",
     "typecheck": "npm run build:core && npm run typecheck -w @n8n-automation/api && npm run typecheck -w @n8n-automation/worker && npm run typecheck -w customer-panel && npm run typecheck -w super-admin-panel",
     "test": "npm run build:core && npm run test -w @n8n-automation/api && npm run test -w @n8n-automation/worker && npm run test -w @n8n-automation/core",
