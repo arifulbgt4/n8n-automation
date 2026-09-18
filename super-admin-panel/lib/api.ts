@@ -1,0 +1,12 @@
+export const API_URL=(process.env.NEXT_PUBLIC_API_URL||"http://localhost:4000").replace(/\/$/,"");
+const CSRF_KEY="n8nauto.admin.csrf";
+export function csrf(){if(typeof window==="undefined")return null;return localStorage.getItem(CSRF_KEY)||decodeURIComponent(document.cookie.split("; ").find((x)=>x.startsWith("n8nauto_csrf="))?.split("=")[1]||"")||null}
+export function setCsrf(v:string|null){if(typeof window==="undefined")return;v?localStorage.setItem(CSRF_KEY,v):localStorage.removeItem(CSRF_KEY)}
+export class ApiError extends Error{constructor(public status:number,public code:string,message:string,public details?:unknown){super(message)}}
+export async function api<T=any>(path:string,init:RequestInit={}):Promise<T>{const h=new Headers(init.headers);if(init.body&&!(typeof FormData!=="undefined"&&init.body instanceof FormData)&&!h.has("content-type"))h.set("content-type","application/json");if(init.method&&!['GET','HEAD','OPTIONS'].includes(init.method.toUpperCase())){const token=csrf();if(token)h.set("x-csrf-token",token)}const r=await fetch(`${API_URL}${path}`,{...init,headers:h,credentials:"include",cache:"no-store"});const d=await r.json().catch(()=>({}));if(!r.ok){const e=d?.error||{};throw new ApiError(r.status,e.code||"REQUEST_FAILED",e.message||`Request failed ${r.status}`,e.details)}return d as T}
+export async function signIn(email:string,password:string){const r=await api<any>("/v1/auth/signin",{method:"POST",body:JSON.stringify({email,password})});if(r.csrfToken)setCsrf(r.csrfToken);return r}
+export async function verifyMfa(challengeToken:string,code:string){const r=await api<any>("/v1/admin/auth/mfa",{method:"POST",body:JSON.stringify({challengeToken,code})});if(r.csrfToken)setCsrf(r.csrfToken);return r}
+export async function signOut(){try{await api("/v1/auth/signout",{method:"POST"})}finally{setCsrf(null)}}
+export function qs(v:Record<string,unknown>){const p=new URLSearchParams();Object.entries(v).forEach(([k,x])=>{if(x!==undefined&&x!==null&&x!=="")p.set(k,String(x))});return p.size?`?${p}`:""}
+
+export async function reauthAdmin(code:string){return api<any>("/v1/admin/mfa/reauth",{method:"POST",body:JSON.stringify({code})})}

@@ -1,25 +1,37 @@
 {
-  "name": "n8n-automation",
-  "version": "0.1.0",
+  "name": "n8n-automation-saas",
+  "version": "1.0.0",
   "private": true,
   "workspaces": [
+    "apps/*",
+    "packages/*",
     "customer-panel",
-    "super-admin-panel",
-    "services/*",
-    "packages/*"
+    "super-admin-panel"
   ],
   "scripts": {
-    "build": "npm run build -w @n8nauto/config && npm run build -w @n8nauto/contracts && npm run build -w @n8nauto/api && npm run build -w @n8nauto/worker && npm run build -w customer-panel && npm run build -w super-admin-panel",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "validate:docs": "node scripts/validate-docs.mjs",
-    "validate:workflows": "node scripts/validate-workflows.mjs",
-    "ci": "npm run validate:docs && npm run validate:workflows && npm run lint && npm run typecheck && npm test && npm run build",
-    "prelint": "npm run build -w @n8nauto/config && npm run build -w @n8nauto/contracts",
-    "pretypecheck": "npm run build -w @n8nauto/config && npm run build -w @n8nauto/contracts"
+    "dev:api": "npm run dev -w @n8n-automation/api",
+    "dev:worker": "npm run dev -w @n8n-automation/worker",
+    "dev:customer": "npm run dev -w customer-panel",
+    "dev:admin": "npm run dev -w super-admin-panel",
+    "build": "npm run build:core && npm run build -w @n8n-automation/api && npm run build -w @n8n-automation/worker && npm run build:apps",
+    "typecheck": "npm run build:core && npm run typecheck -w @n8n-automation/api && npm run typecheck -w @n8n-automation/worker && npm run typecheck -w customer-panel && npm run typecheck -w super-admin-panel",
+    "test": "npm run build:core && npm run test -w @n8n-automation/api && npm run test -w @n8n-automation/worker && npm run test -w @n8n-automation/core",
+    "lint": "npm run lint -ws --if-present",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:status": "node scripts/migrate.mjs --status",
+    "build:core": "npm run build -w @n8n-automation/core",
+    "build:api": "npm run build:core && npm run build -w @n8n-automation/api",
+    "build:worker": "npm run build:core && npm run build -w @n8n-automation/worker",
+    "build:apps": "npm run build -w customer-panel && npm run build -w super-admin-panel",
+    "ci": "npm run validate:n8n && npm run typecheck && npm run test && npm run build",
+    "admin:create": "node scripts/create-super-admin.mjs",
+    "validate:n8n": "node scripts/validate-n8n-bundle.mjs",
+    "n8n:plan": "node scripts/n8n-deploy.mjs",
+    "n8n:deploy": "node scripts/n8n-deploy.mjs --apply",
+    "n8n:deploy:activate": "node scripts/n8n-deploy.mjs --apply --activate",
+    "secrets:rotate": "npm run build:core && node scripts/rotate-secrets.mjs"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.0.0"
   }
 }

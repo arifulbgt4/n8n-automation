@@ -28,20 +28,16 @@ Every tenant-owned table must have a clear path to `tenant_id`. Where practical,
 
 ## 3. Core identity and tenancy tables
 
-### Authentication identity tables
-
-Authentication is implemented with Better Auth using the Drizzle adapter.
-
-`users` stores the application identity fields required by the auth adapter:
+### `users`
 
 - `id` UUID
 - `email` normalized unique
-- `email_verified` boolean
+- `password_hash` or external auth subject
+- `email_verified_at`
+- `status` (`active`, `invited`, `suspended`, `disabled`)
 - `name`
-- optional profile image
+- `last_login_at`
 - `created_at`, `updated_at`
-
-Credential/password material belongs to the auth `accounts` table rather than a custom `users.password_hash` column. Durable browser sessions are stored in `sessions`; short-lived verification/reset records use `verifications`. Account lifecycle/suspension metadata may be extended without moving credential material back into the user row.
 
 ### `tenants`
 

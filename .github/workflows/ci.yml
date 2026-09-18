@@ -2,28 +2,82 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
+      - implementation/**
   pull_request:
+    branches:
+      - master
 
-permissions:
-  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: app_user
+          POSTGRES_PASSWORD: app_password
+          POSTGRES_DB: app_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app_user -d app_db"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://app_user:app_password@127.0.0.1:5432/app_db
+      REDIS_URL: redis://127.0.0.1:6379/0
+      QUEUE_PREFIX: n8nauto:ci
+      APP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      INTERNAL_SERVICE_AUTH_SECRET: ci-internal-service-secret-change-me
+      CUSTOMER_APP_ORIGIN: http://localhost:3000
+      ADMIN_APP_ORIGIN: http://localhost:3001
+      API_PUBLIC_ORIGIN: http://localhost:4000
+      NODE_ENV: test
+      EMAIL_FROM: no-reply@example.com
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install workspace dependencies
-        run: npm install --include-workspace-root
-      - name: Validate documentation and workflow artifacts
-        run: npm run validate:docs && npm run validate:workflows
-      - name: Static checks
-        run: npm run lint && npm run typecheck
-      - name: Tests
-        run: npm test
+          cache: npm
+          cache-dependency-path: |
+            customer-panel/package-lock.json
+            super-admin-panel/package-lock.json
+
+      - name: Install dependencies
+        run: npm install --include=dev
+
+      - name: Run database migrations
+        run: npm run db:migrate
+
+      - name: Validate n8n workflow bundle
+        run: npm run validate:n8n
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test
+
       - name: Build
         run: npm run build

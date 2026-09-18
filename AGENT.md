@@ -1,8 +1,8 @@
 # Repository implementation rules
 
-This repository is in active implementation against the contracts in `docs/`.
+This repository is currently documentation-first.
 
-## Mandatory implementation rules
+## Mandatory planning rules
 
 1. Read `docs/README.md`, `docs/00_MASTER_PLAN.md`, and `docs/17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md` before implementation work.
 2. Treat PostgreSQL `app_db` as the SaaS source of truth. Never mirror SaaS business data into the n8n internal database.
@@ -34,4 +34,4 @@ New workflow bundles are imported/configured/tested while inactive and activated
 
 ## Change discipline
 
-Runtime/source-code implementation is authorized. Keep code, migrations, workflow artifacts, tests, and documentation aligned. Do not mark roadmap items complete until the corresponding implementation and appropriate verification exist.
+During the planning phase, do not modify runtime/source-code files unless the user explicitly authorizes implementation. Documentation changes are allowed and expected.

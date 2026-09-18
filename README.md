@@ -4,7 +4,7 @@ This repository is the target SaaS application for a multi-tenant, configurable 
 
 ## Current status
 
-The repository is in **active implementation**. Architecture and integration contracts are version-controlled in `docs/`; the runtime foundation now includes a TypeScript workspace, Fastify API, PostgreSQL/Drizzle migrations, Redis integration, worker scaffolding, Better Auth authentication, tenancy/RBAC foundations, health checks, and CI. The Customer Panel and Super Admin Panel remain early application shells and are implemented phase-by-phase against the documented contracts.
+The repository is in the **full-platform implementation / production-readiness phase**. Repository-owned runtime code is implemented across the Fastify API, BullMQ worker, PostgreSQL/pgvector migrations, Redis coordination, Customer Panel, Super Admin Panel, AI/training/RAG, messaging/media, business actions, billing-ready models, n8n workflow bundle, deployment tooling, security controls, observability, retention, and operational recovery. Remaining open roadmap items are environment-owned production activation or explicitly conditional features; see `docs/18_IMPLEMENTATION_STATUS.md`.
 
 ## Existing infrastructure assumption
 
@@ -34,7 +34,7 @@ Infrastructure-specific repository locations, admin-panel URLs, hostnames, ports
 
 ## n8n workflow delivery
 
-This repository will keep sanitized, version-controlled n8n workflow JSON exports as deployment artifacts. The existing n8n instance is not installed or managed here. Workflow artifacts are imported into that instance, configured with environment-specific credentials/settings, tested while inactive, and then activated according to the workflow deployment specification.
+This repository keeps sanitized, version-controlled n8n workflow JSON exports as deployment artifacts, with manifest validation and deployment tooling. The existing n8n instance is not installed or managed here. Production activation still requires the exact deployed n8n version, environment-specific credentials/settings, inactive import verification, and controlled cutover.
 
 ## Documentation
 
@@ -44,4 +44,4 @@ The documentation covers system architecture, database/domain design, authentica
 
 ## Implementation rule
 
-Runtime implementation is authorized. Treat the specs in `docs/` as the contract, update documentation in the same change set when implementation decisions change, and only mark roadmap tasks complete after code/tests exist and CI passes.
+Runtime implementation is authorized. Treat the specs in `docs/` as the contract, keep code/tests/workflow artifacts/documentation aligned, and only mark a roadmap item complete when repository evidence exists or the external production verification has actually occurred.

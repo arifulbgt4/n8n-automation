@@ -1,0 +1,79 @@
+{
+  "name": "SaaS - 02 Training Orchestrator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "saas-training",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "22222222-2222-4222-8222-222222222221",
+      "name": "Training Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -300,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SAAS_API_INTERNAL_URL + '/v1/internal/training/synthesize'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{JSON.stringify({trainingJobId: ($json.body || $json).trainingJobId})}}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Synthesize Prompt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Training Webhook": {
+      "main": [
+        [
+          {
+            "node": "Synthesize Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Dhaka"
+  },
+  "versionId": "22222222-2222-4222-8222-222222222229",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

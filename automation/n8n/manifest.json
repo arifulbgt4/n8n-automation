@@ -1,0 +1,43 @@
+{
+  "bundleVersion": "1.0.0",
+  "apiContractVersion": "1",
+  "minimumN8nVersion": "1.100.0",
+  "workflows": [
+    {
+      "key": "turn",
+      "file": "workflows/01_turn_orchestrator.json",
+      "required": true,
+      "trigger": "webhook"
+    },
+    {
+      "key": "training",
+      "file": "workflows/02_training_orchestrator.json",
+      "required": false,
+      "trigger": "webhook"
+    },
+    {
+      "key": "followups",
+      "file": "workflows/03_followup_scheduler.json",
+      "required": true,
+      "trigger": "schedule"
+    },
+    {
+      "key": "maintenance",
+      "file": "workflows/04_maintenance.json",
+      "required": true,
+      "trigger": "schedule"
+    },
+    {
+      "key": "heartbeat",
+      "file": "workflows/05_runtime_heartbeat.json",
+      "required": true,
+      "trigger": "schedule"
+    },
+    {
+      "key": "health",
+      "file": "workflows/06_health_endpoint.json",
+      "required": true,
+      "trigger": "webhook"
+    }
+  ]
+}
