@@ -77,3 +77,20 @@ export async function assertChannelOverrideWithinPlan(tenantId: string, key: str
     throw new ApiError(400, "LIMIT_ABOVE_PLAN", `Requested ${key} exceeds the tenant plan ceiling.`, { key, requested: value, ceiling });
   }
 }
+
+
+export async function assertMonthlyAiCostBudget(tenantId: string, ownershipMode: string | null | undefined): Promise<void> {
+  if (String(ownershipMode || "").toUpperCase() !== "PLATFORM") return;
+  const limit = await tenantLimit(tenantId,"platformAiBudgetUsd");
+  if (limit === null || !Number.isFinite(limit)) return;
+  const result = await query<{ cost: string }>(`
+    SELECT COALESCE(sum(estimated_cost),0)::text AS cost
+    FROM usage_events
+    WHERE tenant_id=$1 AND event_type IN ('ai_call','training_job','embedding')
+      AND occurred_at>=date_trunc('month',now())
+  `, [tenantId]);
+  const used = Number(result.rows[0]?.cost ?? 0);
+  if (used >= limit) {
+    throw new ApiError(402, "AI_BUDGET_REACHED", "The platform-paid AI monthly budget has been reached.", { key:"platformAiBudgetUsd", limit, used });
+  }
+}
