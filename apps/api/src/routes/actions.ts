@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env, query, transaction } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireCsrf, requireTenant } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant } from "../lib.js";
 
 async function internalOrTenant(request: FastifyRequest, tenantId: string, roles: Array<"OWNER" | "ADMIN" | "STAFF" | "VIEWER"> = ["OWNER","ADMIN","STAFF"]) {
   const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -37,15 +37,17 @@ async function ensureBusiness(tenantId: string, businessId: string) {
 export async function actionRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/orders", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({ businessId: z.string().uuid().optional(), channelId: z.string().uuid().optional(), status: z.string().max(60).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).default(0) }).parse(request.query);
     const result = await query(`
       SELECT o.*,ca.platform,ca.name AS channel_name,
         COALESCE((SELECT jsonb_agg(oi ORDER BY oi.created_at) FROM order_items oi WHERE oi.order_id=o.id),'[]'::jsonb) AS items
       FROM orders o LEFT JOIN channel_accounts ca ON ca.id=o.channel_account_id
       WHERE o.tenant_id=$1 AND ($2::uuid IS NULL OR o.business_id=$2) AND ($3::uuid IS NULL OR o.channel_account_id=$3) AND ($4::text IS NULL OR o.status=$4)
-      ORDER BY o.created_at DESC LIMIT $5 OFFSET $6
-    `, [tenantId, q.businessId ?? null, q.channelId ?? null, q.status ?? null, q.limit, q.offset]);
+        AND ($5::uuid[] IS NULL OR o.business_id=ANY($5::uuid[]))
+      ORDER BY o.created_at DESC LIMIT $6 OFFSET $7
+    `, [tenantId, q.businessId ?? null, q.channelId ?? null, q.status ?? null, scope, q.limit, q.offset]);
     reply.send({ orders: result.rows, limit: q.limit, offset: q.offset });
   });
 
@@ -64,6 +66,7 @@ export async function actionRoutes(app: FastifyInstance) {
       source: z.enum(["ai", "human", "api", "panel"]).default(auth.internal ? "ai" : "panel"),
       items: z.array(z.object({ collectionItemId: z.string().uuid().nullable().optional(), title: z.string().min(1).max(300), sku: z.string().max(120).nullable().optional(), quantity: z.number().positive(), unitPrice: z.number().nonnegative(), attributes: z.record(z.string(), z.unknown()).default({}) })).min(1).max(100),
     }).parse(request.body);
+    if (!auth.internal) await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER","ADMIN","STAFF"]);
     const business = await ensureBusiness(tenantId, input.businessId);
     const idem = request.headers["idempotency-key"] as string | undefined;
     const result = await idempotent(tenantId, "create_order", idem, async () => {
@@ -100,6 +103,9 @@ export async function actionRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/orders/:orderId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), orderId: z.string().uuid() }).parse(request.params);
     const auth = await internalOrTenant(request, params.tenantId);
+    const targetOrder = await query<{ business_id: string }>("SELECT business_id FROM orders WHERE id=$1 AND tenant_id=$2", [params.orderId,params.tenantId]);
+    if (!targetOrder.rows[0]) throw new ApiError(404,"ORDER_NOT_FOUND","Order not found.");
+    if (!auth.internal) await requireBusinessAccess(request, params.tenantId, targetOrder.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     const input = z.object({ status: z.string().min(1).max(60), delivery: z.record(z.string(), z.unknown()).optional(), payment: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
     const result = await query(`UPDATE orders SET status=$3,delivery_metadata=CASE WHEN $4::jsonb IS NULL THEN delivery_metadata ELSE delivery_metadata||$4::jsonb END,payment_metadata=CASE WHEN $5::jsonb IS NULL THEN payment_metadata ELSE payment_metadata||$5::jsonb END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`, [params.orderId, params.tenantId, input.status, input.delivery ? JSON.stringify(input.delivery) : null, input.payment ? JSON.stringify(input.payment) : null]);
     if (!result.rows[0]) throw new ApiError(404, "ORDER_NOT_FOUND", "Order not found.");
@@ -109,9 +115,10 @@ export async function actionRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/bookings", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({ businessId: z.string().uuid().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(request.query);
-    const result = await query(`SELECT bk.*,ca.platform,ca.name AS channel_name FROM bookings bk LEFT JOIN channel_accounts ca ON ca.id=bk.channel_account_id WHERE bk.tenant_id=$1 AND ($2::uuid IS NULL OR bk.business_id=$2) AND ($3::timestamptz IS NULL OR bk.starts_at >= $3) AND ($4::timestamptz IS NULL OR bk.starts_at <= $4) ORDER BY bk.starts_at DESC LIMIT $5`, [tenantId, q.businessId ?? null, q.from ?? null, q.to ?? null, q.limit]);
+    const result = await query(`SELECT bk.*,ca.platform,ca.name AS channel_name FROM bookings bk LEFT JOIN channel_accounts ca ON ca.id=bk.channel_account_id WHERE bk.tenant_id=$1 AND ($2::uuid IS NULL OR bk.business_id=$2) AND ($3::timestamptz IS NULL OR bk.starts_at >= $3) AND ($4::timestamptz IS NULL OR bk.starts_at <= $4) AND ($5::uuid[] IS NULL OR bk.business_id=ANY($5::uuid[])) ORDER BY bk.starts_at DESC LIMIT $6`, [tenantId, q.businessId ?? null, q.from ?? null, q.to ?? null, scope, q.limit]);
     reply.send({ bookings: result.rows });
   });
 
@@ -133,6 +140,9 @@ export async function actionRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/bookings/:bookingId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), bookingId: z.string().uuid() }).parse(request.params);
     const auth = await internalOrTenant(request, params.tenantId);
+    const targetBooking = await query<{ business_id: string }>("SELECT business_id FROM bookings WHERE id=$1 AND tenant_id=$2", [params.bookingId,params.tenantId]);
+    if (!targetBooking.rows[0]) throw new ApiError(404,"BOOKING_NOT_FOUND","Booking not found.");
+    if (!auth.internal) await requireBusinessAccess(request, params.tenantId, targetBooking.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     const input = z.object({ status: z.string().max(60).optional(), startsAt: z.string().datetime().optional(), endsAt: z.string().datetime().nullable().optional(), metadata: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
     const row = await query(`UPDATE bookings SET status=COALESCE($3,status),starts_at=COALESCE($4,starts_at),ends_at=CASE WHEN $5::boolean THEN $6::timestamptz ELSE ends_at END,metadata=CASE WHEN $7::jsonb IS NULL THEN metadata ELSE metadata||$7::jsonb END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`, [params.bookingId, params.tenantId, input.status ?? null, input.startsAt ?? null, Object.prototype.hasOwnProperty.call(input, "endsAt"), input.endsAt ?? null, input.metadata ? JSON.stringify(input.metadata) : null]);
     if (!row.rows[0]) throw new ApiError(404, "BOOKING_NOT_FOUND", "Booking not found.");
@@ -142,9 +152,10 @@ export async function actionRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/leads", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({ businessId: z.string().uuid().optional(), stage: z.string().max(60).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(request.query);
-    const result = await query("SELECT * FROM leads WHERE tenant_id=$1 AND ($2::uuid IS NULL OR business_id=$2) AND ($3::text IS NULL OR stage=$3) ORDER BY created_at DESC LIMIT $4", [tenantId, q.businessId ?? null, q.stage ?? null, q.limit]);
+    const result = await query("SELECT * FROM leads WHERE tenant_id=$1 AND ($2::uuid IS NULL OR business_id=$2) AND ($3::text IS NULL OR stage=$3) AND ($4::uuid[] IS NULL OR business_id=ANY($4::uuid[])) ORDER BY created_at DESC LIMIT $5", [tenantId, q.businessId ?? null, q.stage ?? null, scope, q.limit]);
     reply.send({ leads: result.rows });
   });
 
