@@ -156,7 +156,9 @@ export async function conversationRoutes(app: FastifyInstance) {
   app.delete("/v1/tenants/:tenantId/conversations/:conversationId/followups/:followupId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid(), followupId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER","ADMIN","STAFF"]);
+    const target = await query<{ business_id: string }>("SELECT business_id FROM followup_jobs WHERE id=$1 AND tenant_id=$2 AND conversation_id=$3 AND status IN ('scheduled','queued')", [params.followupId,params.tenantId,params.conversationId]);
+    if (!target.rows[0]) throw new ApiError(404,"FOLLOWUP_NOT_FOUND","Active follow-up not found.");
+    await requireBusinessAccess(request, params.tenantId, target.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const row = await query<any>("UPDATE followup_jobs SET status='cancelled',updated_at=now() WHERE id=$1 AND tenant_id=$2 AND conversation_id=$3 AND status IN ('scheduled','queued') RETURNING business_id", [params.followupId,params.tenantId,params.conversationId]);
     if (!row.rows[0]) throw new ApiError(404,"FOLLOWUP_NOT_FOUND","Active follow-up not found.");
