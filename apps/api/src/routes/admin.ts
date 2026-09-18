@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { env, query, queue, QUEUES, redis } from "@n8n-automation/core";
+import { env, query, queue, QUEUES, redis, redisKey } from "@n8n-automation/core";
 import { ApiError, audit, requireCsrf, requirePlatformAdmin, requireRecentPlatformAdmin } from "../lib.js";
 
 export async function adminRoutes(app: FastifyInstance) {
