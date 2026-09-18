@@ -27,6 +27,29 @@ async function internalJson(path: string, body: unknown) {
   return json as any;
 }
 
+async function schedulePolicyFollowup(input:{tenantId:string;businessId:string;channelAccountId:string;conversationId:string;agentProfileId?:string|null;turnId:string}) {
+  const policy=await query<any>(`
+    SELECT * FROM followup_policies
+    WHERE tenant_id=$1 AND business_id=$2 AND active=true
+      AND (agent_profile_id IS NULL OR agent_profile_id=$3)
+      AND (channel_account_id IS NULL OR channel_account_id=$4)
+    ORDER BY (channel_account_id IS NOT NULL) DESC,(agent_profile_id IS NOT NULL) DESC,updated_at DESC
+    LIMIT 1
+  `,[input.tenantId,input.businessId,input.agentProfileId??null,input.channelAccountId]);
+  const row=policy.rows[0];
+  if(!row?.message_template)return null;
+  const key=`policy:${row.id}:turn:${input.turnId}`;
+  const created=await query<any>(`
+    INSERT INTO followup_jobs(tenant_id,business_id,channel_account_id,conversation_id,agent_profile_id,due_at,policy_snapshot,idempotency_key)
+    VALUES ($1,$2,$3,$4,$5,now()+($6 || ' minutes')::interval,$7::jsonb,$8)
+    ON CONFLICT(idempotency_key) DO NOTHING
+    RETURNING *
+  `,[input.tenantId,input.businessId,input.channelAccountId,input.conversationId,input.agentProfileId??null,String(row.delay_minutes),JSON.stringify({
+    policyId:row.id,policyName:row.name,message:row.message_template,maxWindowHours:Number(row.max_window_hours),rules:row.rules_json??{}
+  }),key]);
+  return created.rows[0]??null;
+}
+
 async function processTurn(turnId: string) {
   try {
     const ai = await internalJson("/v1/internal/ai/respond", { turnId });
@@ -67,6 +90,12 @@ async function processTurn(turnId: string) {
         priority: "CUSTOMER_ACTIVE",
         logicalResponseId: `turn-${turnId}`,
       });
+      if (!(ai.actions ?? []).some((action:any)=>action.tool==="schedule_followup")) {
+        await schedulePolicyFollowup({
+          tenantId:ai.tenantId,businessId:ai.businessId,channelAccountId:ai.channelAccountId,
+          conversationId:ai.conversationId,agentProfileId:ai.agentProfileId,turnId
+        });
+      }
     }
 
     await internalJson(`/v1/internal/turns/${turnId}/complete`, { status: "processed", metadata: { actionCount: actionResults.length } });
@@ -124,6 +153,16 @@ export async function orchestrationRoutes(app: FastifyInstance) {
     const { turnId } = z.object({ turnId: z.string().uuid() }).parse(request.body);
     const result = await processTurn(turnId);
     reply.send(result);
+  });
+
+  app.post("/v1/internal/orchestration/followups/policy", async (request, reply) => {
+    requireInternal(request);
+    const input=z.object({
+      tenantId:z.string().uuid(),businessId:z.string().uuid(),channelAccountId:z.string().uuid(),
+      conversationId:z.string().uuid(),agentProfileId:z.string().uuid().nullable().optional(),turnId:z.string().uuid()
+    }).parse(request.body);
+    const followup=await schedulePolicyFollowup(input);
+    reply.send({ok:true,followup});
   });
 
   app.post("/v1/internal/orchestration/followups/sweep", async (request, reply) => {
