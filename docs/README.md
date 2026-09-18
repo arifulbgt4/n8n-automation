@@ -22,6 +22,8 @@ This directory is the implementation contract for the n8n Automation SaaS.
 16. [`15_TESTING_ACCEPTANCE.md`](15_TESTING_ACCEPTANCE.md) — functional, integration, load, security, recovery, and acceptance requirements.
 17. [`16_LEGACY_MIGRATION.md`](16_LEGACY_MIGRATION.md) — behavioral migration from the earlier spreadsheet-driven prototype.
 18. [`17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md`](17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md) — explicit rules for consuming the already-running PostgreSQL/Redis/n8n/Media services and deploying n8n JSON workflow bundles.
+19. [`18_IMPLEMENTATION_STATUS.md`](18_IMPLEMENTATION_STATUS.md) — implemented repository state, automated verification, and production/environment activation gates.
+20. [`19_OPERATIONAL_RUNBOOK.md`](19_OPERATIONAL_RUNBOOK.md) — incident diagnosis, queue/provider recovery, n8n rollback, Redis-loss recovery, backup objectives, and restore exercise.
 
 ## Canonical decisions
 
