@@ -190,14 +190,18 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get("/v1/admin/automation", async (request, reply) => {
     await requirePlatformAdmin(request);
-    const [heartbeats,outbox,followups] = await Promise.all([
+    const [heartbeats,outbox,followups,deployments,workers] = await Promise.all([
       query("SELECT * FROM automation_runtime_heartbeats ORDER BY last_seen_at DESC"),
       query("SELECT status,count(*)::int AS count,min(created_at) AS oldest FROM outbox_events GROUP BY status ORDER BY status"),
       query("SELECT status,count(*)::int AS count,min(due_at) AS oldest_due FROM followup_jobs GROUP BY status ORDER BY status"),
+      query("SELECT * FROM automation_deployments ORDER BY deployed_at DESC LIMIT 200"),
+      query("SELECT * FROM worker_heartbeats ORDER BY last_seen_at DESC"),
     ]);
     reply.send({
       expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
       heartbeats: heartbeats.rows,
+      deployments: deployments.rows,
+      workers: workers.rows,
       outbox: outbox.rows,
       followups: followups.rows,
     });
