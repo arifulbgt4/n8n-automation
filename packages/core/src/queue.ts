@@ -1,4 +1,4 @@
-import IORedis from "ioredis";
+import { Redis } from "ioredis";
 import { Queue, type JobsOptions } from "bullmq";
 import { env } from "./env.js";
 
@@ -16,12 +16,12 @@ export const QUEUES = {
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
 
-let redisConnection: IORedis | undefined;
+let redisConnection: Redis | undefined;
 const queues = new Map<QueueName, Queue>();
 
-export function redis(): IORedis {
+export function redis(): Redis {
   if (!redisConnection) {
-    redisConnection = new IORedis(env().REDIS_URL, {
+    redisConnection = new Redis(env().REDIS_URL, {
       maxRetriesPerRequest: null,
       enableReadyCheck: true,
       lazyConnect: false,
