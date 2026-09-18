@@ -70,6 +70,9 @@ jobs:
       - name: Run database migrations
         run: npm run db:migrate
 
+      - name: Validate n8n workflow bundle
+        run: npm run validate:n8n
+
       - name: Typecheck
         run: npm run typecheck
 
