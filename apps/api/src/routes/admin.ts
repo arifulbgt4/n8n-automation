@@ -6,14 +6,29 @@ import { ApiError, audit, requireCsrf, requirePlatformAdmin, requireRecentPlatfo
 export async function adminRoutes(app: FastifyInstance) {
   app.get("/v1/admin/dashboard", async (request, reply) => {
     const principal = await requirePlatformAdmin(request);
-    const [tenants, channels, conversations, usage, outcomes] = await Promise.all([
+    const [tenants, channels, conversations, usage, outcomes, deliveryErrors, costStats] = await Promise.all([
       query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE status='active')::int AS active,count(*) FILTER(WHERE status='suspended')::int AS suspended FROM tenants`),
       query(`SELECT platform,count(*)::int AS total,count(*) FILTER(WHERE connection_status='connected' AND active=true)::int AS connected,count(*) FILTER(WHERE connection_status<>'connected' OR active=false)::int AS unhealthy FROM channel_accounts GROUP BY platform ORDER BY platform`),
       query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE status='open')::int AS open,count(*) FILTER(WHERE mode='HUMAN' AND status='open')::int AS human FROM conversations`),
       query(`SELECT event_type,SUM(quantity)::numeric AS quantity,SUM(COALESCE(estimated_cost,0))::numeric AS estimated_cost FROM usage_events WHERE occurred_at>=now()-interval '24 hours' GROUP BY event_type`),
       query(`SELECT (SELECT count(*)::int FROM orders WHERE created_at>=now()-interval '24 hours') AS orders,(SELECT count(*)::int FROM bookings WHERE created_at>=now()-interval '24 hours') AS bookings,(SELECT count(*)::int FROM leads WHERE created_at>=now()-interval '24 hours') AS leads`),
+      query(`SELECT ca.platform,count(*)::int AS failures
+             FROM messages m JOIN channel_accounts ca ON ca.id=m.channel_account_id
+             WHERE m.direction='OUTBOUND' AND m.delivery_status IN ('failed','dead_letter') AND m.created_at>=now()-interval '24 hours'
+             GROUP BY ca.platform ORDER BY ca.platform`),
+      query(`SELECT
+        COALESCE(SUM(estimated_cost) FILTER(WHERE occurred_at>=now()-interval '24 hours' AND event_type='ai_call'),0)::numeric AS current_24h,
+        COALESCE(SUM(estimated_cost) FILTER(WHERE occurred_at>=now()-interval '8 days' AND occurred_at<now()-interval '24 hours' AND event_type='ai_call'),0)::numeric/7 AS previous_daily_avg
+        FROM usage_events`),
     ]);
-    reply.send({ actor: principal.userId, tenants: tenants.rows[0], channels: channels.rows, conversations: conversations.rows[0], usage24h: usage.rows, outcomes24h: outcomes.rows[0] });
+    const currentCost=Number(costStats.rows[0]?.current_24h??0);
+    const previousAvg=Number(costStats.rows[0]?.previous_daily_avg??0);
+    const ratio=previousAvg>0?currentCost/previousAvg:null;
+    reply.send({
+      actor: principal.userId, tenants: tenants.rows[0], channels: channels.rows, conversations: conversations.rows[0],
+      usage24h: usage.rows, outcomes24h: outcomes.rows[0], deliveryErrors24h:deliveryErrors.rows,
+      costAnomaly:{current24h:currentCost,previousDailyAverage:previousAvg,ratio,alert:currentCost>=1 && previousAvg>0 && currentCost>previousAvg*2}
+    });
   });
 
   app.get("/v1/admin/tenants", async (request, reply) => {
@@ -152,12 +167,14 @@ export async function adminRoutes(app: FastifyInstance) {
     await requirePlatformAdmin(request);
     const health: Record<string, unknown> = {};
     const started = Date.now();
-    try { await query("SELECT 1"); health.postgres = { ok: true }; } catch (error) { health.postgres = { ok: false, error: error instanceof Error ? error.message : "error" }; }
-    try { const pong = await redis().ping(); health.redis = { ok: pong === "PONG" }; } catch (error) { health.redis = { ok: false, error: error instanceof Error ? error.message : "error" }; }
+    const pgStarted=Date.now();
+    try { await query("SELECT 1"); health.postgres = { ok: true, latencyMs:Date.now()-pgStarted }; } catch (error) { health.postgres = { ok: false, latencyMs:Date.now()-pgStarted, error: error instanceof Error ? error.message : "error" }; }
+    const redisStarted=Date.now();
+    try { const pong = await redis().ping(); health.redis = { ok: pong === "PONG", latencyMs:Date.now()-redisStarted }; } catch (error) { health.redis = { ok: false, latencyMs:Date.now()-redisStarted, error: error instanceof Error ? error.message : "error" }; }
     const config = env();
     if (config.MEDIA_BASE_URL) {
       const mediaBaseUrl = config.MEDIA_BASE_URL;
-      try { const response = await fetch(`${mediaBaseUrl.replace(/\/$/,"")}/healthz`); health.media = { ok: response.ok, status: response.status }; } catch (error) { health.media = { ok: false, error: error instanceof Error ? error.message : "error" }; }
+      try { const mediaStarted=Date.now(); const response = await fetch(`${mediaBaseUrl.replace(/\/$/,"")}/healthz`); health.media = { ok: response.ok, status: response.status, latencyMs:Date.now()-mediaStarted }; } catch (error) { health.media = { ok: false, error: error instanceof Error ? error.message : "error" }; }
     } else health.media = { ok: false, status: "not_configured" };
     const heartbeat = await query<any>("SELECT * FROM automation_runtime_heartbeats ORDER BY last_seen_at DESC LIMIT 1").catch(() => ({ rows: [] as any[] }));
     const heartbeatRow = heartbeat.rows[0];
@@ -165,10 +182,12 @@ export async function adminRoutes(app: FastifyInstance) {
     if (config.N8N_HEALTH_WEBHOOK_URL) {
       const healthWebhookUrl = config.N8N_HEALTH_WEBHOOK_URL;
       try {
+        const n8nStarted=Date.now();
         const response = await fetch(healthWebhookUrl, { headers: { authorization: `Bearer ${config.INTERNAL_SERVICE_AUTH_SECRET}` } });
         health.n8n = {
           ok: response.ok && (!heartbeatRow || heartbeatFresh),
           status: response.status,
+          latencyMs:Date.now()-n8nStarted,
           expectedBundleVersion: config.N8N_WORKFLOW_BUNDLE_VERSION,
           reportedBundleVersion: heartbeatRow?.bundle_version ?? null,
           lastHeartbeatAt: heartbeatRow?.last_seen_at ?? null,
@@ -186,6 +205,39 @@ export async function adminRoutes(app: FastifyInstance) {
       };
     }
     reply.send({ health, elapsedMs: Date.now()-started });
+  });
+
+  app.get("/v1/admin/metrics", async (request, reply) => {
+    await requirePlatformAdmin(request);
+    const q=z.object({minutes:z.coerce.number().int().min(1).max(1440).default(60)}).parse(request.query);
+    const now=new Date();
+    const keys:string[]=[];
+    for(let i=q.minutes-1;i>=0;i--){
+      const d=new Date(now.getTime()-i*60_000);
+      keys.push(redisKey("metrics","api",d.toISOString().slice(0,16)));
+    }
+    const buckets=await Promise.all(keys.map(async(key)=>{
+      const raw=await redis().hgetall(key);
+      const requests=Number(raw.requests||0);
+      const totalLatency=Number(raw.latency_ms_total||0);
+      return {
+        bucket:key.split(":").slice(-1)[0],
+        requests,
+        averageLatencyMs:requests?totalLatency/requests:0,
+        status2xx:Number(raw.status_2xx||0),
+        status4xx:Number(raw.status_4xx||0),
+        status5xx:Number(raw.status_5xx||0),
+      };
+    }));
+    const aggregate=buckets.reduce((acc,b)=>({
+      requests:acc.requests+b.requests,
+      status2xx:acc.status2xx+b.status2xx,status4xx:acc.status4xx+b.status4xx,status5xx:acc.status5xx+b.status5xx,
+      latencyWeighted:acc.latencyWeighted+b.averageLatencyMs*b.requests,
+    }),{requests:0,status2xx:0,status4xx:0,status5xx:0,latencyWeighted:0});
+    reply.send({buckets,summary:{
+      requests:aggregate.requests,status2xx:aggregate.status2xx,status4xx:aggregate.status4xx,status5xx:aggregate.status5xx,
+      averageLatencyMs:aggregate.requests?aggregate.latencyWeighted/aggregate.requests:0
+    }});
   });
 
   app.get("/v1/admin/automation", async (request, reply) => {
