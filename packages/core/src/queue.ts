@@ -12,6 +12,7 @@ export const QUEUES = {
   followups: "followup-jobs",
   analytics: "analytics-rollup",
   maintenance: "maintenance",
+  bulk: "bulk-jobs",
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
