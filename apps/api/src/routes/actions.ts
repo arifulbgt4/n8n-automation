@@ -172,4 +172,72 @@ export async function actionRoutes(app: FastifyInstance) {
     await audit({ actorUserId: auth.userId, actorType: auth.internal ? "service" : "user", tenantId, businessId: input.businessId, action: "LEAD_CREATED", resourceType: "lead", resourceId: (result as any).lead.id, request });
     reply.code(201).send(result);
   });
+
+  app.get("/v1/tenants/:tenantId/quotes", async (request, reply) => {
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const context=await requireTenant(request,tenantId);
+    const scope=context.membershipRole==="OWNER"?null:context.businessScope??null;
+    const q=z.object({businessId:z.string().uuid().optional(),status:z.string().max(60).optional(),limit:z.coerce.number().int().min(1).max(200).default(100)}).parse(request.query);
+    const result=await query("SELECT * FROM quote_requests WHERE tenant_id=$1 AND ($2::uuid IS NULL OR business_id=$2) AND ($3::text IS NULL OR status=$3) AND ($4::uuid[] IS NULL OR business_id=ANY($4::uuid[])) ORDER BY created_at DESC LIMIT $5",[tenantId,q.businessId??null,q.status??null,scope,q.limit]);
+    reply.send({quotes:result.rows});
+  });
+
+  app.post("/v1/tenants/:tenantId/quotes", async (request, reply) => {
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const auth=await internalOrTenant(request,tenantId);
+    const input=z.object({businessId:z.string().uuid(),channelAccountId:z.string().uuid().nullable().optional(),conversationId:z.string().uuid().nullable().optional(),contactId:z.string().uuid().nullable().optional(),request:z.record(z.string(),z.unknown()).default({})}).parse(request.body);
+    if(!auth.internal) await requireBusinessAccess(request,tenantId,input.businessId,["OWNER","ADMIN","STAFF"]);
+    await ensureBusiness(tenantId,input.businessId);
+    const idem=request.headers["idempotency-key"] as string|undefined;
+    const result=await idempotent(tenantId,"create_quote",idem,async()=> {
+      const row=await query<any>("INSERT INTO quote_requests(tenant_id,business_id,channel_account_id,conversation_id,contact_id,request_json) VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,JSON.stringify(input.request)]);
+      return {quote:row.rows[0]};
+    });
+    reply.code(201).send(result);
+  });
+
+  app.patch("/v1/tenants/:tenantId/quotes/:quoteId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),quoteId:z.string().uuid()}).parse(request.params);
+    const auth=await internalOrTenant(request,params.tenantId);
+    const target=await query<{business_id:string}>("SELECT business_id FROM quote_requests WHERE id=$1 AND tenant_id=$2",[params.quoteId,params.tenantId]);
+    if(!target.rows[0]) throw new ApiError(404,"QUOTE_NOT_FOUND","Quote request not found.");
+    if(!auth.internal) await requireBusinessAccess(request,params.tenantId,target.rows[0].business_id,["OWNER","ADMIN","STAFF"]);
+    const input=z.object({status:z.string().max(60).optional(),quote:z.record(z.string(),z.unknown()).optional(),assignedUserId:z.string().uuid().nullable().optional()}).parse(request.body);
+    const row=await query<any>("UPDATE quote_requests SET status=COALESCE($3,status),quote_json=CASE WHEN $4::jsonb IS NULL THEN quote_json ELSE $4::jsonb END,assigned_user_id=CASE WHEN $5::boolean THEN $6::uuid ELSE assigned_user_id END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *",[params.quoteId,params.tenantId,input.status??null,input.quote?JSON.stringify(input.quote):null,Object.prototype.hasOwnProperty.call(input,"assignedUserId"),input.assignedUserId??null]);
+    reply.send({quote:row.rows[0]});
+  });
+
+  app.get("/v1/tenants/:tenantId/support-cases", async (request, reply) => {
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const context=await requireTenant(request,tenantId);
+    const scope=context.membershipRole==="OWNER"?null:context.businessScope??null;
+    const q=z.object({businessId:z.string().uuid().optional(),status:z.string().max(60).optional(),priority:z.string().max(60).optional(),limit:z.coerce.number().int().min(1).max(200).default(100)}).parse(request.query);
+    const result=await query("SELECT * FROM support_cases WHERE tenant_id=$1 AND ($2::uuid IS NULL OR business_id=$2) AND ($3::text IS NULL OR status=$3) AND ($4::text IS NULL OR priority=$4) AND ($5::uuid[] IS NULL OR business_id=ANY($5::uuid[])) ORDER BY created_at DESC LIMIT $6",[tenantId,q.businessId??null,q.status??null,q.priority??null,scope,q.limit]);
+    reply.send({cases:result.rows});
+  });
+
+  app.post("/v1/tenants/:tenantId/support-cases", async (request, reply) => {
+    const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+    const auth=await internalOrTenant(request,tenantId);
+    const input=z.object({businessId:z.string().uuid(),channelAccountId:z.string().uuid().nullable().optional(),conversationId:z.string().uuid().nullable().optional(),contactId:z.string().uuid().nullable().optional(),subject:z.string().max(300).nullable().optional(),description:z.string().max(20000).nullable().optional(),priority:z.enum(["low","normal","high","urgent"]).default("normal"),metadata:z.record(z.string(),z.unknown()).default({})}).parse(request.body);
+    if(!auth.internal) await requireBusinessAccess(request,tenantId,input.businessId,["OWNER","ADMIN","STAFF"]);
+    await ensureBusiness(tenantId,input.businessId);
+    const idem=request.headers["idempotency-key"] as string|undefined;
+    const result=await idempotent(tenantId,"create_support_case",idem,async()=> {
+      const row=await query<any>("INSERT INTO support_cases(tenant_id,business_id,channel_account_id,conversation_id,contact_id,subject,description,priority,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,input.subject??null,input.description??null,input.priority,JSON.stringify(input.metadata)]);
+      return {case:row.rows[0]};
+    });
+    reply.code(201).send(result);
+  });
+
+  app.patch("/v1/tenants/:tenantId/support-cases/:caseId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),caseId:z.string().uuid()}).parse(request.params);
+    const auth=await internalOrTenant(request,params.tenantId);
+    const target=await query<{business_id:string}>("SELECT business_id FROM support_cases WHERE id=$1 AND tenant_id=$2",[params.caseId,params.tenantId]);
+    if(!target.rows[0]) throw new ApiError(404,"SUPPORT_CASE_NOT_FOUND","Support case not found.");
+    if(!auth.internal) await requireBusinessAccess(request,params.tenantId,target.rows[0].business_id,["OWNER","ADMIN","STAFF"]);
+    const input=z.object({status:z.string().max(60).optional(),priority:z.enum(["low","normal","high","urgent"]).optional(),assignedUserId:z.string().uuid().nullable().optional()}).parse(request.body);
+    const row=await query<any>("UPDATE support_cases SET status=COALESCE($3,status),priority=COALESCE($4,priority),assigned_user_id=CASE WHEN $5::boolean THEN $6::uuid ELSE assigned_user_id END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *",[params.caseId,params.tenantId,input.status??null,input.priority??null,Object.prototype.hasOwnProperty.call(input,"assignedUserId"),input.assignedUserId??null]);
+    reply.send({case:row.rows[0]});
+  });
 }
