@@ -16,15 +16,15 @@ export type AuditEventInput = Readonly<{
 
 export async function writeAuditEvent(db: Database, event: AuditEventInput) {
   await db.insert(auditEvents).values({
-    tenantId: event.tenantId,
-    actorUserId: event.actorUserId,
     actorType: event.actorType,
     action: event.action,
-    resourceType: event.resourceType,
-    resourceId: event.resourceId,
     correlationId: event.correlationId,
-    ipAddress: event.ipAddress,
-    userAgent: event.userAgent,
-    metadata: event.metadata ?? {}
+    metadata: event.metadata ?? {},
+    ...(event.tenantId ? { tenantId: event.tenantId } : {}),
+    ...(event.actorUserId ? { actorUserId: event.actorUserId } : {}),
+    ...(event.resourceType ? { resourceType: event.resourceType } : {}),
+    ...(event.resourceId ? { resourceId: event.resourceId } : {}),
+    ...(event.ipAddress ? { ipAddress: event.ipAddress } : {}),
+    ...(event.userAgent ? { userAgent: event.userAgent } : {})
   });
 }

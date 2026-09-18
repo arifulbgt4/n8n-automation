@@ -13,11 +13,11 @@ export async function enqueueOutboxEvent(db: Database, event: OutboxEventInput) 
   const [created] = await db
     .insert(outboxEvents)
     .values({
-      tenantId: event.tenantId,
       aggregateType: event.aggregateType,
-      aggregateId: event.aggregateId,
       eventType: event.eventType,
-      payload: event.payload
+      payload: event.payload,
+      ...(event.tenantId ? { tenantId: event.tenantId } : {}),
+      ...(event.aggregateId ? { aggregateId: event.aggregateId } : {})
     })
     .returning({ id: outboxEvents.id });
 

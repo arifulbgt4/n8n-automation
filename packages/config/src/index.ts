@@ -8,15 +8,15 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
-  REDIS_KEY_PREFIX: z
-    .string()
-    .min(1)
-    .regex(/^[a-zA-Z0-9:_-]+$/)
-    .default("n8nauto"),
+  REDIS_KEY_PREFIX: z.string().min(1).regex(/^[a-zA-Z0-9:_-]+$/).default("n8nauto"),
   MEDIA_BASE_URL: z.string().url(),
   MEDIA_API_KEY: z.string().min(1),
   INTERNAL_SERVICE_AUTH_SECRET: z.string().min(32),
-  N8N_WORKFLOW_BUNDLE_VERSION: z.string().min(1).default("0.1.0")
+  N8N_WORKFLOW_BUNDLE_VERSION: z.string().min(1).default("0.1.0"),
+  AUTH_BASE_URL: z.string().url(),
+  AUTH_SECRET: z.string().min(32),
+  CUSTOMER_PANEL_ORIGIN: z.string().url(),
+  SUPER_ADMIN_PANEL_ORIGIN: z.string().url()
 });
 
 export type AppConfig = Readonly<{
@@ -30,6 +30,11 @@ export type AppConfig = Readonly<{
   media: Readonly<{ baseUrl: string; apiKey: string }>;
   internalServiceAuthSecret: string;
   n8nWorkflowBundleVersion: string;
+  auth: Readonly<{
+    baseUrl: string;
+    secret: string;
+    trustedOrigins: readonly string[];
+  }>;
 }>;
 
 export function loadConfig(input: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -55,7 +60,15 @@ export function loadConfig(input: NodeJS.ProcessEnv = process.env): AppConfig {
       apiKey: env.MEDIA_API_KEY
     }),
     internalServiceAuthSecret: env.INTERNAL_SERVICE_AUTH_SECRET,
-    n8nWorkflowBundleVersion: env.N8N_WORKFLOW_BUNDLE_VERSION
+    n8nWorkflowBundleVersion: env.N8N_WORKFLOW_BUNDLE_VERSION,
+    auth: Object.freeze({
+      baseUrl: env.AUTH_BASE_URL.replace(/\/$/, ""),
+      secret: env.AUTH_SECRET,
+      trustedOrigins: Object.freeze([
+        env.CUSTOMER_PANEL_ORIGIN.replace(/\/$/, ""),
+        env.SUPER_ADMIN_PANEL_ORIGIN.replace(/\/$/, "")
+      ])
+    })
   });
 }
 
