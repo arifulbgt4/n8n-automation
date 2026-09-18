@@ -74,8 +74,15 @@ export async function authRoutes(app: FastifyInstance) {
       `, [user.rows[0].id, sha256(token)]);
       await client.query(`
         INSERT INTO audit_logs(actor_user_id,tenant_id,action,resource_type,resource_id,safe_diff,ip,user_agent)
-        VALUES ($1,$2,'AUTH_SIGNUP','user',$1,$3,$4,$5)
-      `, [user.rows[0].id, tenant.rows[0].id, { email: input.email }, request.ip, request.headers["user-agent"] ?? null]);
+        VALUES ($1,$2,'AUTH_SIGNUP','user',$6,$3,$4,$5)
+      `, [
+        user.rows[0].id,
+        tenant.rows[0].id,
+        { email: input.email },
+        request.ip,
+        request.headers["user-agent"] ?? null,
+        user.rows[0].id,
+      ]);
       return { userId: user.rows[0].id, tenantId: tenant.rows[0].id };
     });
 
