@@ -793,6 +793,62 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
   }
 }
 
+async function applyRetentionPolicies(){
+  const policies=await query<any>(`SELECT rp.*,t.status AS tenant_status,t.updated_at AS tenant_updated_at FROM retention_policies rp JOIN tenants t ON t.id=rp.tenant_id`);
+  const summary:any[]=[];
+  for(const policy of policies.rows){
+    const tenantId=policy.tenant_id;
+    const counts:{[key:string]:number}={};
+    if(policy.conversation_days){
+      const result=await query(`DELETE FROM conversations WHERE tenant_id=$1 AND status IN ('closed','archived') AND updated_at<now()-($2||' days')::interval`,[tenantId,String(policy.conversation_days)]);
+      counts.conversations=result.rowCount??0;
+    }
+    if(policy.training_days){
+      const examples=await query(`DELETE FROM training_examples WHERE tenant_id=$1 AND created_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
+      const sessions=await query(`DELETE FROM training_sessions WHERE tenant_id=$1 AND updated_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
+      counts.training=(examples.rowCount??0)+(sessions.rowCount??0);
+    }
+    if(policy.audit_days){
+      const audits=await query(`DELETE FROM audit_logs WHERE tenant_id=$1 AND created_at<now()-($2||' days')::interval`,[tenantId,String(policy.audit_days)]);
+      counts.audit=audits.rowCount??0;
+    }
+    if(policy.media_days){
+      const stale=await query<any>(`
+        SELECT m.id,m.storage_file_id FROM media_assets m
+        WHERE m.tenant_id=$1 AND m.processing_status='ready'
+          AND m.created_at<now()-($2||' days')::interval
+          AND NOT EXISTS(SELECT 1 FROM collection_item_media x WHERE x.media_asset_id=m.id)
+          AND NOT EXISTS(SELECT 1 FROM message_media x WHERE x.media_asset_id=m.id)
+          AND NOT EXISTS(SELECT 1 FROM tenant_data_requests x WHERE x.result_media_asset_id=m.id)
+        LIMIT 500
+      `,[tenantId,String(policy.media_days)]);
+      let deleted=0;
+      if(stale.rows.length){
+        const credential=await tenantMediaCredential(tenantId).catch(()=>null);
+        for(const asset of stale.rows){
+          let removed=true;
+          if(config.MEDIA_BASE_URL&&credential){
+            const response=await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}}).catch(()=>null);
+            removed=Boolean(response&&(response.ok||response.status===404));
+          }
+          if(removed){await query("UPDATE media_assets SET processing_status='deleted',updated_at=now() WHERE id=$1",[asset.id]);deleted++;}
+        }
+      }
+      counts.media=deleted;
+    }
+    if(policy.hard_delete_after_days&&policy.tenant_status==="deleted"){
+      const result=await query(`DELETE FROM tenants WHERE id=$1 AND updated_at<now()-($2||' days')::interval`,[tenantId,String(policy.hard_delete_after_days)]);
+      counts.tenant=result.rowCount??0;
+    }
+    if(Object.values(counts).some((value)=>value>0)){
+      await query(`INSERT INTO audit_logs(actor_type,tenant_id,action,resource_type,resource_id,safe_diff)
+        VALUES ('system',$1,'RETENTION_APPLIED','retention_policy',$1,$2::jsonb)`,[tenantId,JSON.stringify(counts)]).catch(()=>undefined);
+    }
+    summary.push({tenantId,...counts});
+  }
+  return summary;
+}
+
 function makeWorker(name: string, handler: (job: Job<any>) => Promise<any>, concurrency = config.WORKER_CONCURRENCY) {
   const worker = new Worker(name, handler, { connection: redis(), prefix: config.QUEUE_PREFIX, concurrency });
   worker.on("completed", (job) => log("job_completed", { queue: name, jobId: job.id, jobName: job.name }));
@@ -820,6 +876,7 @@ makeWorker(QUEUES.maintenance, async (job) => {
   if(job.name==="ANALYTICS_ROLLUP") return analyticsRollup();
   if(job.name==="CLEAN_EXPIRED_SESSIONS") return query("DELETE FROM sessions WHERE expires_at<now() OR revoked_at<now()-interval '30 days'");
   if(job.name==="CLEAN_IDEMPOTENCY") return query("DELETE FROM idempotency_keys WHERE expires_at IS NOT NULL AND expires_at<now()");
+  if(job.name==="APPLY_RETENTION") return applyRetentionPolicies();
 },1);
 makeWorker(QUEUES.bulk, bulkJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/4)));
 
