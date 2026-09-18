@@ -39,7 +39,7 @@ export function queue(name: QueueName): Queue {
     prefix: env().QUEUE_PREFIX,
     defaultJobOptions: {
       attempts: 5,
-      backoff: { type: "exponential", delay: 1_000 },
+      backoff: { type: "exponential", delay: 1_000, jitter: 0.25 },
       removeOnComplete: { age: 24 * 60 * 60, count: 10_000 },
       removeOnFail: { age: 14 * 24 * 60 * 60, count: 25_000 },
     },
