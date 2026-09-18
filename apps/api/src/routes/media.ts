@@ -25,7 +25,8 @@ async function mediaAccount(tenantId: string) {
 async function resolveMediaCredential(tenantId: string): Promise<string> {
   const account = await mediaAccount(tenantId);
   if (account?.encrypted_api_key) return decryptSecret(account.encrypted_api_key);
-  if (env().MEDIA_API_KEY) return env().MEDIA_API_KEY;
+  const mediaApiKey = env().MEDIA_API_KEY;
+  if (mediaApiKey) return mediaApiKey;
   throw new ApiError(503, "MEDIA_NOT_CONFIGURED", "Media storage is not configured for this tenant.");
 }
 
@@ -148,7 +149,8 @@ export async function mediaRoutes(app: FastifyInstance) {
     const bytes = await file.toBuffer();
     await assertMediaStorageLimit(tenantId, bytes.length);
     const form = new FormData();
-    form.set("file", new Blob([bytes], { type: file.mimetype }), file.filename);
+    const uploadBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    form.set("file", new Blob([uploadBuffer], { type: file.mimetype }), file.filename);
     form.set("visibility", visibility);
     const response = await mediaFetch(tenantId, "/api/v1/files", { method: "POST", body: form });
     const body = await response.json().catch(() => ({})) as Record<string, any>;
