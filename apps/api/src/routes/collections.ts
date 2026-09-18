@@ -52,8 +52,8 @@ function validateFieldValue(field: FieldRow, value: unknown) {
     }
     case "multi_select": {
       if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) invalid();
-      const allowed = Array.isArray(field.options_json?.values) ? field.options_json.values : null;
-      if (allowed && value.some((item) => !allowed.includes(item))) invalid();
+      const allowed = Array.isArray(field.options_json?.values) ? field.options_json.values as unknown[] : null;
+      if (allowed && Array.isArray(value) && value.some((item: unknown) => !allowed.includes(item))) invalid();
       break;
     }
     case "media": if (!Array.isArray(value) && typeof value !== "string") invalid(); break;
