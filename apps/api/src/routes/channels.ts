@@ -6,6 +6,9 @@ import {
   env,
   maskSecret,
   query,
+  randomToken,
+  redis,
+  redisKey,
   sha256,
   transaction,
 } from "@n8n-automation/core";
@@ -59,7 +62,142 @@ async function testMetaChannel(channel: { id: string; platform: string; external
   }
 }
 
+async function metaOAuthConfig() {
+  const config = env();
+  if (!config.META_APP_ID || !config.META_APP_SECRET || !config.META_OAUTH_REDIRECT_URI) {
+    throw new ApiError(503,"META_OAUTH_NOT_CONFIGURED","Meta OAuth is not configured for this environment.");
+  }
+  return config;
+}
+
+type MetaDiscovery = {
+  tenantId: string;
+  businessId: string;
+  userId: string;
+  requestedPlatform: "facebook" | "instagram";
+  pages: Array<{ id: string; name: string; accessToken: string; instagram?: { id: string; username?: string } | null }>;
+};
+
 export async function channelRoutes(app: FastifyInstance) {
+  app.get("/v1/tenants/:tenantId/channels/meta/oauth/start", async (request, reply) => {
+    const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
+    const q = z.object({ businessId: z.string().uuid(), platform: z.enum(["facebook","instagram"]) }).parse(request.query);
+    const principal = await requireAuth(request);
+    await requireBusinessAccess(request, tenantId, q.businessId, ["OWNER","ADMIN"]);
+    const config = await metaOAuthConfig();
+    const state = randomToken(28);
+    await redis().set(redisKey("meta-oauth","state",state), JSON.stringify({
+      tenantId,businessId:q.businessId,userId:principal.userId,requestedPlatform:q.platform,createdAt:new Date().toISOString(),
+    }), "EX", 600);
+    const scope = q.platform === "instagram"
+      ? ["pages_show_list","pages_read_engagement","instagram_basic","instagram_manage_messages","pages_manage_metadata"]
+      : ["pages_show_list","pages_read_engagement","pages_messaging","pages_manage_metadata"];
+    const url = new URL(`https://www.facebook.com/${config.META_GRAPH_API_VERSION}/dialog/oauth`);
+    url.searchParams.set("client_id", config.META_APP_ID!);
+    url.searchParams.set("redirect_uri", config.META_OAUTH_REDIRECT_URI!);
+    url.searchParams.set("state", state);
+    url.searchParams.set("scope", scope.join(","));
+    reply.send({ authorizationUrl: url.toString(), expiresInSeconds: 600 });
+  });
+
+  app.get("/v1/channels/meta/oauth/callback", async (request, reply) => {
+    const q = z.object({ code: z.string().min(1).optional(), state: z.string().min(20), error: z.string().optional(), error_description: z.string().optional() }).parse(request.query);
+    const config = await metaOAuthConfig();
+    const key = redisKey("meta-oauth","state",q.state);
+    const raw = await redis().get(key);
+    await redis().del(key);
+    if (!raw) throw new ApiError(400,"META_OAUTH_STATE_INVALID","Meta OAuth state is invalid or expired.");
+    const state = JSON.parse(raw) as { tenantId: string; businessId: string; userId: string; requestedPlatform: "facebook"|"instagram" };
+    if (q.error || !q.code) {
+      const failed = new URL("/channels", config.CUSTOMER_APP_ORIGIN);
+      failed.searchParams.set("metaError", q.error_description || q.error || "oauth_cancelled");
+      return reply.redirect(failed.toString());
+    }
+
+    const tokenUrl = new URL(`https://graph.facebook.com/${config.META_GRAPH_API_VERSION}/oauth/access_token`);
+    tokenUrl.searchParams.set("client_id", config.META_APP_ID!);
+    tokenUrl.searchParams.set("client_secret", config.META_APP_SECRET!);
+    tokenUrl.searchParams.set("redirect_uri", config.META_OAUTH_REDIRECT_URI!);
+    tokenUrl.searchParams.set("code", q.code);
+    const tokenResponse = await fetch(tokenUrl);
+    const tokenBody = await tokenResponse.json().catch(() => ({})) as any;
+    if (!tokenResponse.ok || !tokenBody.access_token) throw new ApiError(502,"META_OAUTH_EXCHANGE_FAILED",tokenBody?.error?.message || "Meta token exchange failed.");
+
+    let userToken = String(tokenBody.access_token);
+    const longUrl = new URL(`https://graph.facebook.com/${config.META_GRAPH_API_VERSION}/oauth/access_token`);
+    longUrl.searchParams.set("grant_type","fb_exchange_token");
+    longUrl.searchParams.set("client_id",config.META_APP_ID!);
+    longUrl.searchParams.set("client_secret",config.META_APP_SECRET!);
+    longUrl.searchParams.set("fb_exchange_token",userToken);
+    const longResponse = await fetch(longUrl);
+    if (longResponse.ok) {
+      const body = await longResponse.json().catch(() => ({})) as any;
+      if (body.access_token) userToken = String(body.access_token);
+    }
+
+    const pagesUrl = new URL(`https://graph.facebook.com/${config.META_GRAPH_API_VERSION}/me/accounts`);
+    pagesUrl.searchParams.set("fields","id,name,access_token,instagram_business_account{id,username}");
+    pagesUrl.searchParams.set("limit","200");
+    pagesUrl.searchParams.set("access_token",userToken);
+    const pagesResponse = await fetch(pagesUrl);
+    const pagesBody = await pagesResponse.json().catch(() => ({})) as any;
+    if (!pagesResponse.ok) throw new ApiError(502,"META_PAGE_DISCOVERY_FAILED",pagesBody?.error?.message || "Unable to discover Meta Pages.");
+    const pages = (pagesBody.data ?? []).map((page: any) => ({
+      id:String(page.id),name:String(page.name || page.id),accessToken:String(page.access_token || userToken),
+      instagram:page.instagram_business_account ? { id:String(page.instagram_business_account.id), username:page.instagram_business_account.username ? String(page.instagram_business_account.username) : undefined } : null,
+    }));
+    const discoveryId = randomToken(24);
+    const discovery: MetaDiscovery = { tenantId:state.tenantId,businessId:state.businessId,userId:state.userId,requestedPlatform:state.requestedPlatform,pages };
+    await redis().set(redisKey("meta-oauth","discovery",discoveryId), encryptSecret(JSON.stringify(discovery)), "EX", 900);
+    const destination = new URL("/channels", config.CUSTOMER_APP_ORIGIN);
+    destination.searchParams.set("metaConnection",discoveryId);
+    return reply.redirect(destination.toString());
+  });
+
+  app.get("/v1/tenants/:tenantId/channels/meta/oauth/discovery/:discoveryId", async (request, reply) => {
+    const params = z.object({ tenantId:z.string().uuid(),discoveryId:z.string().min(20) }).parse(request.params);
+    const principal = await requireAuth(request);
+    const value = await redis().get(redisKey("meta-oauth","discovery",params.discoveryId));
+    if (!value) throw new ApiError(404,"META_DISCOVERY_NOT_FOUND","Meta connection selection expired.");
+    const discovery = JSON.parse(decryptSecret(value)) as MetaDiscovery;
+    if (discovery.tenantId !== params.tenantId || discovery.userId !== principal.userId) throw new ApiError(404,"META_DISCOVERY_NOT_FOUND","Meta connection selection not found.");
+    await requireBusinessAccess(request, params.tenantId, discovery.businessId, ["OWNER","ADMIN"]);
+    reply.send({
+      requestedPlatform:discovery.requestedPlatform,
+      businessId:discovery.businessId,
+      pages:discovery.pages.map((page)=>({id:page.id,name:page.name,instagram:page.instagram ?? null})),
+    });
+  });
+
+  app.post("/v1/tenants/:tenantId/channels/meta/oauth/discovery/:discoveryId/complete", async (request, reply) => {
+    const params = z.object({ tenantId:z.string().uuid(),discoveryId:z.string().min(20) }).parse(request.params);
+    const principal = await requireAuth(request);
+    requireCsrf(request);
+    const input = z.object({ pageId:z.string().min(1), platform:z.enum(["facebook","instagram"]) }).parse(request.body);
+    const key = redisKey("meta-oauth","discovery",params.discoveryId);
+    const value = await redis().get(key);
+    if (!value) throw new ApiError(404,"META_DISCOVERY_NOT_FOUND","Meta connection selection expired.");
+    const discovery = JSON.parse(decryptSecret(value)) as MetaDiscovery;
+    if (discovery.tenantId !== params.tenantId || discovery.userId !== principal.userId) throw new ApiError(404,"META_DISCOVERY_NOT_FOUND","Meta connection selection not found.");
+    await requireBusinessAccess(request, params.tenantId, discovery.businessId, ["OWNER","ADMIN"]);
+    const page = discovery.pages.find((candidate)=>candidate.id===input.pageId);
+    if (!page) throw new ApiError(400,"META_PAGE_INVALID","Selected Page is not available in this connection.");
+    const externalAccountId = input.platform === "facebook" ? page.id : page.instagram?.id;
+    if (!externalAccountId) throw new ApiError(400,"INSTAGRAM_ACCOUNT_MISSING","Selected Page has no connected Instagram professional account.");
+    const name = input.platform === "facebook" ? page.name : (page.instagram?.username || `${page.name} Instagram`);
+    const duplicate = await query("SELECT id FROM channel_accounts WHERE platform=$1 AND external_account_id=$2",[input.platform,externalAccountId]);
+    if (duplicate.rowCount) throw new ApiError(409,"CHANNEL_ALREADY_CONNECTED","This channel account is already connected.");
+    const created = await query<any>(`
+      INSERT INTO channel_accounts(tenant_id,business_id,platform,name,external_account_id,connection_status,graph_api_version,settings_json)
+      VALUES ($1,$2,$3,$4,$5,'connected',$6,$7::jsonb) RETURNING *
+    `, [params.tenantId,discovery.businessId,input.platform,name,externalAccountId,env().META_GRAPH_API_VERSION,JSON.stringify({connectedVia:"meta_oauth",facebookPageId:page.id})]);
+    await upsertCredential(params.tenantId,created.rows[0].id,"access_token",page.accessToken);
+    if (env().META_APP_SECRET) await upsertCredential(params.tenantId,created.rows[0].id,"app_secret",env().META_APP_SECRET!);
+    await redis().del(key);
+    await audit({ actorUserId:principal.userId,tenantId:params.tenantId,businessId:discovery.businessId,action:"CHANNEL_CONNECTED",resourceType:"channel_account",resourceId:created.rows[0].id,safeDiff:{platform:input.platform,externalAccountId,via:"meta_oauth"},request });
+    reply.code(201).send({ channel:created.rows[0] });
+  });
+
   app.get("/v1/tenants/:tenantId/channels", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const context = await requireTenant(request, params.tenantId);
