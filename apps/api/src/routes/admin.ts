@@ -96,19 +96,22 @@ export async function adminRoutes(app: FastifyInstance) {
     const started = Date.now();
     try { await query("SELECT 1"); health.postgres = { ok: true }; } catch (error) { health.postgres = { ok: false, error: error instanceof Error ? error.message : "error" }; }
     try { const pong = await redis().ping(); health.redis = { ok: pong === "PONG" }; } catch (error) { health.redis = { ok: false, error: error instanceof Error ? error.message : "error" }; }
-    if (env().MEDIA_BASE_URL) {
-      try { const response = await fetch(`${env().MEDIA_BASE_URL.replace(/\/$/,"")}/healthz`); health.media = { ok: response.ok, status: response.status }; } catch (error) { health.media = { ok: false, error: error instanceof Error ? error.message : "error" }; }
+    const config = env();
+    if (config.MEDIA_BASE_URL) {
+      const mediaBaseUrl = config.MEDIA_BASE_URL;
+      try { const response = await fetch(`${mediaBaseUrl.replace(/\/$/,"")}/healthz`); health.media = { ok: response.ok, status: response.status }; } catch (error) { health.media = { ok: false, error: error instanceof Error ? error.message : "error" }; }
     } else health.media = { ok: false, status: "not_configured" };
     const heartbeat = await query<any>("SELECT * FROM automation_runtime_heartbeats ORDER BY last_seen_at DESC LIMIT 1").catch(() => ({ rows: [] as any[] }));
     const heartbeatRow = heartbeat.rows[0];
     const heartbeatFresh = heartbeatRow ? Date.now() - new Date(heartbeatRow.last_seen_at).getTime() < 180_000 : false;
-    if (env().N8N_HEALTH_WEBHOOK_URL) {
+    if (config.N8N_HEALTH_WEBHOOK_URL) {
+      const healthWebhookUrl = config.N8N_HEALTH_WEBHOOK_URL;
       try {
-        const response = await fetch(env().N8N_HEALTH_WEBHOOK_URL, { headers: { authorization: `Bearer ${env().INTERNAL_SERVICE_AUTH_SECRET}` } });
+        const response = await fetch(healthWebhookUrl, { headers: { authorization: `Bearer ${config.INTERNAL_SERVICE_AUTH_SECRET}` } });
         health.n8n = {
           ok: response.ok && (!heartbeatRow || heartbeatFresh),
           status: response.status,
-          expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
+          expectedBundleVersion: config.N8N_WORKFLOW_BUNDLE_VERSION,
           reportedBundleVersion: heartbeatRow?.bundle_version ?? null,
           lastHeartbeatAt: heartbeatRow?.last_seen_at ?? null,
         };
@@ -119,7 +122,7 @@ export async function adminRoutes(app: FastifyInstance) {
       health.n8n = {
         ok: heartbeatFresh,
         status: heartbeatRow ? (heartbeatFresh ? "heartbeat_ok" : "heartbeat_stale") : "not_configured",
-        expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
+        expectedBundleVersion: config.N8N_WORKFLOW_BUNDLE_VERSION,
         reportedBundleVersion: heartbeatRow?.bundle_version ?? null,
         lastHeartbeatAt: heartbeatRow?.last_seen_at ?? null,
       };
@@ -135,7 +138,7 @@ export async function adminRoutes(app: FastifyInstance) {
       query("SELECT status,count(*)::int AS count,min(due_at) AS oldest_due FROM followup_jobs GROUP BY status ORDER BY status"),
     ]);
     reply.send({
-      expectedBundleVersion: env().N8N_WORKFLOW_BUNDLE_VERSION,
+      expectedBundleVersion: config.N8N_WORKFLOW_BUNDLE_VERSION,
       heartbeats: heartbeats.rows,
       outbox: outbox.rows,
       followups: followups.rows,
