@@ -4,7 +4,7 @@ const CSRF_STORAGE_KEY = "n8nauto.csrf";
 
 export function getCsrfToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(CSRF_STORAGE_KEY);
+  return window.localStorage.getItem(CSRF_STORAGE_KEY) || decodeURIComponent(document.cookie.split("; ").find((item) => item.startsWith("n8nauto_csrf="))?.split("=")[1] || "") || null;
 }
 
 export function setCsrfToken(value: string | null): void {
