@@ -8,3 +8,5 @@ export async function signIn(email:string,password:string){const r=await api<any
 export async function verifyMfa(challengeToken:string,code:string){const r=await api<any>("/v1/admin/auth/mfa",{method:"POST",body:JSON.stringify({challengeToken,code})});if(r.csrfToken)setCsrf(r.csrfToken);return r}
 export async function signOut(){try{await api("/v1/auth/signout",{method:"POST"})}finally{setCsrf(null)}}
 export function qs(v:Record<string,unknown>){const p=new URLSearchParams();Object.entries(v).forEach(([k,x])=>{if(x!==undefined&&x!==null&&x!=="")p.set(k,String(x))});return p.size?`?${p}`:""}
+
+export async function reauthAdmin(code:string){return api<any>("/v1/admin/mfa/reauth",{method:"POST",body:JSON.stringify({code})})}
