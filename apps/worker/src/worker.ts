@@ -76,6 +76,19 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
   try {
     const cv = await query<any>("SELECT mode,status,last_message_at,agent_profile_id FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, tenantId]);
     if (!cv.rows[0] || cv.rows[0].status !== "open" || cv.rows[0].mode !== "AI") return;
+    const mediaPending = await query<{ count: string; oldest: Date | null }>(`
+      SELECT count(*)::text AS count,min(created_at) AS oldest
+      FROM messages
+      WHERE conversation_id=$1 AND direction='INBOUND' AND turn_id IS NULL
+        AND metadata->>'mediaIngestStatus'='pending'
+    `, [conversationId]);
+    if (Number(mediaPending.rows[0]?.count ?? 0) > 0) {
+      const oldestAt = mediaPending.rows[0]?.oldest ? new Date(mediaPending.rows[0].oldest).getTime() : Date.now();
+      if (Date.now() - oldestAt < 30_000) {
+        await job.moveToDelayed(Date.now() + 750, job.token!);
+        return;
+      }
+    }
     const pending = await query<any>(`
       SELECT id,created_at FROM messages
       WHERE conversation_id=$1 AND direction='INBOUND' AND turn_id IS NULL AND sender_type='CONTACT'
@@ -165,6 +178,137 @@ async function fetchAssetBytes(tenantId: string, asset: any): Promise<{ bytes: A
   const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}/content`, { headers: { authorization: `Bearer ${credential}` } });
   if (!response.ok) throw new Error(`Media download failed with ${response.status}`);
   return { bytes: await response.arrayBuffer(), mime: response.headers.get("content-type") || asset.mime_type || "application/octet-stream" };
+}
+
+
+async function fetchInboundMedia(messageId: string) {
+  const result = await query<any>(`
+    SELECT m.id,m.tenant_id,m.business_id,m.channel_account_id,m.conversation_id,m.message_type,m.metadata,
+           ca.platform,ca.external_account_id,ca.graph_api_version
+      FROM messages m
+      JOIN channel_accounts ca ON ca.id=m.channel_account_id
+     WHERE m.id=$1 AND m.direction='INBOUND'
+  `, [messageId]);
+  const row = result.rows[0];
+  if (!row) throw new Error("Inbound message for media ingestion was not found");
+  const credentials = await query<{ credential_type: string; encrypted_value: string }>(
+    "SELECT credential_type,encrypted_value FROM channel_credentials WHERE channel_account_id=$1",
+    [row.channel_account_id],
+  );
+  const resolved = Object.fromEntries(credentials.rows.map((item) => [item.credential_type, decryptSecret(item.encrypted_value)]));
+  const accessToken = resolved.access_token;
+  if (!accessToken) throw new Error("Channel access token is missing for inbound media ingestion");
+
+  let sourceUrl = String(row.metadata?.providerMediaUrl || "");
+  let mime = String(row.metadata?.providerMimeType || "");
+  let filename = String(row.metadata?.providerFilename || `inbound-${messageId}`);
+
+  if (row.platform === "whatsapp") {
+    const mediaId = String(row.metadata?.providerMediaId || "");
+    if (!mediaId) throw new Error("WhatsApp inbound media ID is missing");
+    const version = row.graph_api_version || config.META_GRAPH_API_VERSION;
+    const infoResponse = await fetch(`https://graph.facebook.com/${version}/${encodeURIComponent(mediaId)}`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    const info = await infoResponse.json().catch(() => ({}));
+    if (!infoResponse.ok || !(info as any).url) {
+      throw new Error((info as any)?.error?.message || `WhatsApp media lookup failed with ${infoResponse.status}`);
+    }
+    sourceUrl = String((info as any).url);
+    mime = mime || String((info as any).mime_type || "");
+  }
+
+  if (!sourceUrl) throw new Error("Inbound media source URL is missing");
+  const download = await fetch(sourceUrl, { headers: { authorization: `Bearer ${accessToken}` } });
+  if (!download.ok) throw new Error(`Inbound media download failed with ${download.status}`);
+  mime = download.headers.get("content-type") || mime || "application/octet-stream";
+  const disposition = download.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  if (match?.[1]) filename = match[1];
+  return { row, bytes: await download.arrayBuffer(), mime, filename };
+}
+
+async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
+  const messageId = String(job.data.payload.messageId || "");
+  if (!messageId) throw new Error("Media ingestion job is missing messageId");
+  const existingLink = await query("SELECT 1 FROM message_media WHERE message_id=$1 LIMIT 1", [messageId]);
+  if (existingLink.rowCount) {
+    await query("UPDATE messages SET metadata=metadata||'{\"mediaIngestStatus\":\"ready\"}'::jsonb,updated_at=now() WHERE id=$1", [messageId]);
+    return;
+  }
+
+  try {
+    const { row, bytes, mime, filename } = await fetchInboundMedia(messageId);
+    if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
+    const credential = await tenantMediaCredential(row.tenant_id);
+    const form = new FormData();
+    form.set("visibility", "private");
+    form.set("file", new Blob([bytes], { type: mime }), filename);
+    const upload = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+      body: form,
+    });
+    const body = await upload.json().catch(() => ({}));
+    if (!upload.ok) throw new Error((body as any)?.error?.message || (body as any)?.message || `Media Storage upload failed with ${upload.status}`);
+    const file = (body as any).file ?? body;
+    if (!file?.id) throw new Error("Media Storage upload did not return a file ID");
+
+    const assetId = await transaction(async (client) => {
+      if (file.checksum_sha256) {
+        const duplicate = await client.query<{ id: string }>(
+          "SELECT id FROM media_assets WHERE tenant_id=$1 AND content_hash=$2 AND processing_status='ready' ORDER BY created_at LIMIT 1",
+          [row.tenant_id, file.checksum_sha256],
+        );
+        if (duplicate.rows[0]) return duplicate.rows[0].id;
+      }
+      const asset = await client.query<{ id: string }>(`
+        INSERT INTO media_assets(
+          tenant_id,business_id,storage_file_id,storage_user_id,original_name,mime_type,kind,size_bytes,
+          visibility,content_hash,public_url,processing_status,metadata
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'private',$9,$10,'ready',$11::jsonb)
+        RETURNING id
+      `, [
+        row.tenant_id,row.business_id,String(file.id),file.user_id ? String(file.user_id) : null,
+        file.original_name ?? filename,file.mime_type ?? mime,file.kind ?? row.message_type,Number(file.size_bytes ?? bytes.byteLength),
+        file.checksum_sha256 ?? null,file.public_url ?? null,JSON.stringify({ source: "inbound_message", messageId }),
+      ]);
+      return asset.rows[0].id;
+    });
+
+    if (file.checksum_sha256) {
+      const mapped = await query<{ storage_file_id: string }>("SELECT storage_file_id FROM media_assets WHERE id=$1", [assetId]);
+      if (mapped.rows[0] && mapped.rows[0].storage_file_id !== String(file.id)) {
+        await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(String(file.id))}`, {
+          method: "DELETE",
+          headers: { authorization: `Bearer ${credential}` },
+        }).catch(() => undefined);
+      }
+    }
+
+    await transaction(async (client) => {
+      await client.query(
+        "INSERT INTO message_media(message_id,media_asset_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+        [messageId,assetId,row.tenant_id],
+      );
+      await client.query(
+        "UPDATE messages SET metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1",
+        [messageId,JSON.stringify({ mediaIngestStatus: "ready", mediaAssetId: assetId })],
+      );
+      await client.query(`INSERT INTO usage_events(
+        tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata
+      ) VALUES ($1,$2,$3,$4,'media_ingest',1,'media',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`, [
+        row.tenant_id,row.business_id,row.channel_account_id,row.conversation_id,job.data.correlationId,
+        `media-ingest:${messageId}`,JSON.stringify({ messageType: row.message_type }),
+      ]);
+    });
+  } catch (error) {
+    await query(
+      "UPDATE messages SET metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1",
+      [messageId,JSON.stringify({ mediaIngestStatus: "error", mediaIngestError: error instanceof Error ? error.message : "media ingestion failed" })],
+    ).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function loadChannelRuntime(channelId: string, conversationId: string) {
@@ -394,6 +538,7 @@ function makeWorker(name: string, handler: (job: Job<any>) => Promise<any>, conc
 
 makeWorker(QUEUES.inbound, aggregateConversation);
 makeWorker(QUEUES.outbound, outboundMessage, Math.max(2, config.WORKER_CONCURRENCY));
+makeWorker(QUEUES.media, uploadInboundMedia, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/2)));
 makeWorker(QUEUES.training, trainingJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/4)));
 makeWorker(QUEUES.embeddings, embeddingJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/3)));
 makeWorker(QUEUES.followups, followupJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/2)));
