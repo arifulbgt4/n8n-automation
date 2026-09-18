@@ -125,15 +125,17 @@ async function mediaCredential(tenantId: string): Promise<string> {
     const { decryptSecret } = await import("@n8n-automation/core");
     return decryptSecret(result.rows[0].encrypted_api_key);
   }
-  if (env().MEDIA_API_KEY) return env().MEDIA_API_KEY;
+  const config = env();
+  if (config.MEDIA_API_KEY) return config.MEDIA_API_KEY;
   throw new Error("Media credential is not configured");
 }
 
 async function readMedia(tenantId: string, item: any): Promise<BinaryAiInput> {
-  if (!env().MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
+  const mediaBaseUrl = env().MEDIA_BASE_URL;
+  if (!mediaBaseUrl) throw new Error("MEDIA_BASE_URL is not configured");
   if (Number(item.size_bytes ?? 0) > 25 * 1024 * 1024) throw new Error("AI media input exceeds the 25 MiB runtime limit");
   const credential = await mediaCredential(tenantId);
-  const response = await fetch(`${env().MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(item.storage_file_id)}/content`, {
+  const response = await fetch(`${mediaBaseUrl.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(item.storage_file_id)}/content`, {
     headers: { authorization: `Bearer ${credential}` },
   });
   if (!response.ok) throw new Error(`Media fetch failed with ${response.status}`);
