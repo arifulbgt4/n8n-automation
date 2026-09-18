@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { query, transaction } from "@n8n-automation/core";
+import { enqueue, query, QUEUES, randomToken, transaction } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, slugify } from "../lib.js";
 
 const fieldType = z.enum(["text","long_text","integer","decimal","currency","boolean","date","datetime","email","phone","url","single_select","multi_select","media","relation","json"]);
@@ -327,6 +327,86 @@ export async function collectionRoutes(app: FastifyInstance) {
     if (!result.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: collection.business_id, action: "COLLECTION_ITEM_DELETED", resourceType: "collection_item", resourceId: params.itemId, request });
     reply.send({ ok: true });
+  });
+
+  app.post("/v1/tenants/:tenantId/collections/:collectionId/import", async (request, reply) => {
+    const params = z.object({ tenantId:z.string().uuid(),collectionId:z.string().uuid() }).parse(request.params);
+    const principal = await requireAuth(request);
+    await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
+    requireCsrf(request);
+    const collection = await loadCollection(params.tenantId,params.collectionId);
+    await requireBusinessAccess(request,params.tenantId,collection.business_id,["OWNER","ADMIN","STAFF"]);
+    const input = z.object({ items:z.array(z.object({title:z.string().trim().max(240).optional(),data:z.record(z.string(),z.unknown())})).min(1).max(500) }).parse(request.body);
+    for (const item of input.items) await validateItem(params.tenantId,params.collectionId,item.data);
+    const record = await query<any>(`
+      INSERT INTO job_records(tenant_id,business_id,type,input_json,created_by)
+      VALUES ($1,$2,'collection_import',$3::jsonb,$4) RETURNING id,status,created_at
+    `,[params.tenantId,collection.business_id,JSON.stringify({collectionId:params.collectionId,items:input.items}),principal.userId]);
+    const jobId=`bulk:${record.rows[0].id}`;
+    await enqueue(QUEUES.bulk,{jobId,jobType:"COLLECTION_IMPORT",tenantId:params.tenantId,businessId:collection.business_id,correlationId:jobId,idempotencyKey:jobId,createdAt:new Date().toISOString(),payload:{jobRecordId:record.rows[0].id}});
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:collection.business_id,action:"COLLECTION_IMPORT_QUEUED",resourceType:"job_record",resourceId:record.rows[0].id,safeDiff:{collectionId:params.collectionId,count:input.items.length},request});
+    reply.code(202).send({job:record.rows[0]});
+  });
+
+  app.post("/v1/tenants/:tenantId/collections/:collectionId/export", async (request, reply) => {
+    const params = z.object({ tenantId:z.string().uuid(),collectionId:z.string().uuid() }).parse(request.params);
+    const principal=await requireAuth(request);
+    await requireTenant(request,params.tenantId);
+    const collection=await loadCollection(params.tenantId,params.collectionId);
+    await requireBusinessAccess(request,params.tenantId,collection.business_id);
+    requireCsrf(request);
+    const record=await query<any>(`
+      INSERT INTO job_records(tenant_id,business_id,type,input_json,created_by)
+      VALUES ($1,$2,'collection_export',$3::jsonb,$4) RETURNING id,status,created_at
+    `,[params.tenantId,collection.business_id,JSON.stringify({collectionId:params.collectionId}),principal.userId]);
+    const jobId=`bulk:${record.rows[0].id}`;
+    await enqueue(QUEUES.bulk,{jobId,jobType:"COLLECTION_EXPORT",tenantId:params.tenantId,businessId:collection.business_id,correlationId:jobId,idempotencyKey:jobId,createdAt:new Date().toISOString(),payload:{jobRecordId:record.rows[0].id}});
+    reply.code(202).send({job:record.rows[0]});
+  });
+
+  app.get("/v1/tenants/:tenantId/jobs/:jobId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),jobId:z.string().uuid()}).parse(request.params);
+    await requireTenant(request,params.tenantId);
+    const result=await query<any>("SELECT id,business_id,type,status,progress,result_json,error_json,started_at,completed_at,created_at,updated_at FROM job_records WHERE id=$1 AND tenant_id=$2",[params.jobId,params.tenantId]);
+    if(!result.rows[0]) throw new ApiError(404,"JOB_NOT_FOUND","Job not found.");
+    if(result.rows[0].business_id) await requireBusinessAccess(request,params.tenantId,result.rows[0].business_id);
+    reply.send({job:result.rows[0]});
+  });
+
+  app.get("/v1/tenants/:tenantId/collections/:collectionId/items/:itemId/overrides", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),collectionId:z.string().uuid(),itemId:z.string().uuid()}).parse(request.params);
+    await requireTenant(request,params.tenantId);
+    const collection=await loadCollection(params.tenantId,params.collectionId);
+    await requireBusinessAccess(request,params.tenantId,collection.business_id);
+    const result=await query(`
+      SELECT o.*,ca.platform,ca.name AS channel_name
+      FROM collection_item_channel_overrides o JOIN channel_accounts ca ON ca.id=o.channel_account_id
+      WHERE o.tenant_id=$1 AND o.collection_item_id=$2 ORDER BY ca.platform,ca.name
+    `,[params.tenantId,params.itemId]);
+    reply.send({overrides:result.rows});
+  });
+
+  app.put("/v1/tenants/:tenantId/collections/:collectionId/items/:itemId/overrides/:channelId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),collectionId:z.string().uuid(),itemId:z.string().uuid(),channelId:z.string().uuid()}).parse(request.params);
+    const principal=await requireAuth(request);
+    await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
+    requireCsrf(request);
+    const collection=await loadCollection(params.tenantId,params.collectionId);
+    await requireBusinessAccess(request,params.tenantId,collection.business_id,["OWNER","ADMIN","STAFF"]);
+    const [item,channel]=await Promise.all([
+      query("SELECT id FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted'",[params.itemId,params.collectionId,params.tenantId]),
+      query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3",[params.channelId,params.tenantId,collection.business_id])
+    ]);
+    if(!item.rows[0]||!channel.rows[0]) throw new ApiError(400,"OVERRIDE_SCOPE_INVALID","Item or channel is outside this collection/business.");
+    const input=z.object({override:z.record(z.string(),z.unknown())}).parse(request.body);
+    const result=await query<any>(`
+      INSERT INTO collection_item_channel_overrides(tenant_id,collection_item_id,channel_account_id,override_json)
+      VALUES ($1,$2,$3,$4::jsonb)
+      ON CONFLICT(collection_item_id,channel_account_id) DO UPDATE SET override_json=EXCLUDED.override_json,updated_at=now()
+      RETURNING *
+    `,[params.tenantId,params.itemId,params.channelId,JSON.stringify(input.override)]);
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:collection.business_id,action:"COLLECTION_ITEM_CHANNEL_OVERRIDE_UPDATED",resourceType:"collection_item",resourceId:params.itemId,safeDiff:{channelId:params.channelId,keys:Object.keys(input.override)},request});
+    reply.send({override:result.rows[0]});
   });
 
   app.put("/v1/tenants/:tenantId/collections/:collectionId/channels", async (request, reply) => {
