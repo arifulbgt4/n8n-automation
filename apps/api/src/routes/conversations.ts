@@ -115,6 +115,46 @@ export async function conversationRoutes(app: FastifyInstance) {
     reply.code(202).send({ ok: true, logicalResponseId });
   });
 
+  app.get("/v1/tenants/:tenantId/conversations/:conversationId/followups", async (request, reply) => {
+    const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid() }).parse(request.params);
+    await requireTenant(request, params.tenantId);
+    const result = await query("SELECT * FROM followup_jobs WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY due_at DESC LIMIT 100", [params.tenantId,params.conversationId]);
+    reply.send({ followups: result.rows });
+  });
+
+  app.post("/v1/tenants/:tenantId/conversations/:conversationId/followups", async (request, reply) => {
+    const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid() }).parse(request.params);
+    const principal = await requireAuth(request);
+    await requireTenant(request, params.tenantId, ["OWNER","ADMIN","STAFF"]);
+    requireCsrf(request);
+    const input = z.object({
+      delayMinutes: z.number().int().min(1).max(60 * 24 * 30),
+      message: z.string().trim().min(1).max(5000),
+      maxWindowHours: z.number().min(1).max(72).default(23),
+    }).parse(request.body);
+    const cv = await query<any>("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2 AND status='open'", [params.conversationId,params.tenantId]);
+    if (!cv.rows[0]) throw new ApiError(404,"CONVERSATION_NOT_FOUND","Conversation not found.");
+    const idempotencyKey = `manual-followup:${params.conversationId}:${Date.now()}:${randomToken(6)}`;
+    const row = await query<any>(`
+      INSERT INTO followup_jobs(tenant_id,business_id,channel_account_id,conversation_id,agent_profile_id,due_at,policy_snapshot,idempotency_key)
+      VALUES ($1,$2,$3,$4,$5,now()+($6 || ' minutes')::interval,$7::jsonb,$8)
+      RETURNING *
+    `, [params.tenantId,cv.rows[0].business_id,cv.rows[0].channel_account_id,params.conversationId,cv.rows[0].agent_profile_id ?? null,String(input.delayMinutes),JSON.stringify({message:input.message,maxWindowHours:input.maxWindowHours,createdBy:principal.userId}),idempotencyKey]);
+    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: cv.rows[0].business_id, action: "FOLLOWUP_SCHEDULED", resourceType: "followup_job", resourceId: row.rows[0].id, safeDiff: { delayMinutes: input.delayMinutes }, request });
+    reply.code(201).send({ followup: row.rows[0] });
+  });
+
+  app.delete("/v1/tenants/:tenantId/conversations/:conversationId/followups/:followupId", async (request, reply) => {
+    const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid(), followupId: z.string().uuid() }).parse(request.params);
+    const principal = await requireAuth(request);
+    await requireTenant(request, params.tenantId, ["OWNER","ADMIN","STAFF"]);
+    requireCsrf(request);
+    const row = await query<any>("UPDATE followup_jobs SET status='cancelled',updated_at=now() WHERE id=$1 AND tenant_id=$2 AND conversation_id=$3 AND status IN ('scheduled','queued') RETURNING business_id", [params.followupId,params.tenantId,params.conversationId]);
+    if (!row.rows[0]) throw new ApiError(404,"FOLLOWUP_NOT_FOUND","Active follow-up not found.");
+    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: row.rows[0].business_id, action: "FOLLOWUP_CANCELLED", resourceType: "followup_job", resourceId: params.followupId, request });
+    reply.send({ ok: true });
+  });
+
   app.post("/v1/tenants/:tenantId/conversations/:conversationId/close", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
