@@ -7,6 +7,7 @@ import { ApiError, jsonError, requestId } from "./lib.js";
 import { authRoutes } from "./routes/auth.js";
 import { adminAuthRoutes } from "./routes/admin-auth.js";
 import { tenantRoutes } from "./routes/tenant.js";
+import { invitationRoutes } from "./routes/invitations.js";
 import { channelRoutes } from "./routes/channels.js";
 import { collectionRoutes } from "./routes/collections.js";
 import { mediaRoutes } from "./routes/media.js";
@@ -82,6 +83,7 @@ app.get("/readyz", async (_request, reply) => {
 await authRoutes(app);
 await adminAuthRoutes(app);
 await tenantRoutes(app);
+await invitationRoutes(app);
 await channelRoutes(app);
 await collectionRoutes(app);
 await mediaRoutes(app);
