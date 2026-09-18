@@ -31,6 +31,7 @@ const schema = z.object({
   META_APP_SECRET: z.string().optional(),
   AGGREGATION_WINDOW_MS: z.coerce.number().int().min(500).max(30000).default(4500),
   AGGREGATION_MAX_MESSAGES: z.coerce.number().int().min(1).max(100).default(20),
+  AGGREGATION_MAX_BYTES: z.coerce.number().int().min(1024).max(50 * 1024 * 1024).default(4 * 1024 * 1024),
   OUTBOUND_DEFAULT_RATE_PER_MINUTE: z.coerce.number().int().min(1).max(10000).default(30),
   OUTBOUND_DEFAULT_BURST: z.coerce.number().int().min(1).max(1000).default(5),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(500).default(10),
