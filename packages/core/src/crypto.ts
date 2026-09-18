@@ -16,6 +16,15 @@ function encryptionKey(): Buffer {
   return Buffer.from(env().APP_ENCRYPTION_KEY, "hex");
 }
 
+function decryptionKeys(): Buffer[] {
+  const configured = [env().APP_ENCRYPTION_KEY, ...env().APP_ENCRYPTION_KEY_PREVIOUS];
+  const unique=[...new Set(configured)];
+  for (const key of unique) {
+    if (!/^[a-fA-F0-9]{64}$/.test(key)) throw new Error("Every previous encryption key must be 32 bytes encoded as 64 hex characters");
+  }
+  return unique.map((key)=>Buffer.from(key,"hex"));
+}
+
 export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString("base64url");
 }
@@ -37,13 +46,21 @@ export function decryptSecret(payload: string): string {
   if (scheme !== "aesgcm-v1" || !ivB64 || !tagB64 || !dataB64) {
     throw new Error("Unsupported encrypted secret format");
   }
-  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivB64, "base64url"));
-  decipher.setAuthTag(Buffer.from(tagB64, "base64url"));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(dataB64, "base64url")),
-    decipher.final(),
-  ]);
-  return plaintext.toString("utf8");
+  let lastError: unknown;
+  for (const key of decryptionKeys()) {
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivB64, "base64url"));
+      decipher.setAuthTag(Buffer.from(tagB64, "base64url"));
+      const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(dataB64, "base64url")),
+        decipher.final(),
+      ]);
+      return plaintext.toString("utf8");
+    } catch (error) {
+      lastError=error;
+    }
+  }
+  throw new Error(`Unable to decrypt secret with configured encryption keys: ${lastError instanceof Error ? lastError.message : "authentication failed"}`);
 }
 
 export async function hashPassword(password: string): Promise<string> {
