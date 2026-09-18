@@ -90,6 +90,17 @@ async function validateItem(tenantId: string, collectionId: string, data: Record
   for (const field of fields) {
     const value = data[field.key];
     validateFieldValue(field, value);
+    if (field.type === "relation" && value !== undefined && value !== null && value !== "") {
+      const targetCollectionId = typeof field.options_json?.targetCollectionId === "string" ? field.options_json.targetCollectionId : null;
+      if (!targetCollectionId) throw new ApiError(400,"RELATION_TARGET_REQUIRED",`${field.label} is missing a configured target collection.`,{field:field.key});
+      const ids = Array.isArray(value) ? value : [value];
+      if (ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) throw new ApiError(400,"RELATION_INVALID",`${field.label} contains an invalid related item ID.`,{field:field.key});
+      const related = await query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM collection_items WHERE tenant_id=$1 AND collection_id=$2 AND id=ANY($3::uuid[]) AND status<>'deleted'",
+        [tenantId,targetCollectionId,ids],
+      );
+      if (Number(related.rows[0]?.count ?? 0) !== new Set(ids).size) throw new ApiError(400,"RELATION_TARGET_INVALID",`${field.label} references an item outside the configured collection.`,{field:field.key});
+    }
     if (field.unique_within_collection && value !== undefined && value !== null && value !== "") {
       const duplicate = await query(`
         SELECT id FROM collection_items
@@ -127,6 +138,22 @@ const templates: Record<string, Array<z.input<typeof fieldInput>>> = {
     { key: "area", label: "Area", type: "text", filterable: true, displayOrder: 4 },
     { key: "images", label: "Images", type: "media", displayOrder: 5 },
   ],
+  menu: [
+    { key:"name",label:"Menu Item",type:"text",required:true,searchable:true,sortable:true,displayOrder:0 },
+    { key:"category",label:"Category",type:"text",searchable:true,filterable:true,displayOrder:1 },
+    { key:"price",label:"Price",type:"currency",filterable:true,sortable:true,displayOrder:2 },
+    { key:"available",label:"Available",type:"boolean",filterable:true,displayOrder:3 },
+    { key:"description",label:"Description",type:"long_text",searchable:true,displayOrder:4 },
+    { key:"images",label:"Images",type:"media",displayOrder:5 },
+  ],
+  package: [
+    { key:"name",label:"Package Name",type:"text",required:true,searchable:true,sortable:true,displayOrder:0 },
+    { key:"price",label:"Package Price",type:"currency",filterable:true,sortable:true,displayOrder:1 },
+    { key:"duration",label:"Duration",type:"text",filterable:true,displayOrder:2 },
+    { key:"includes",label:"Includes",type:"long_text",searchable:true,displayOrder:3 },
+    { key:"active",label:"Active",type:"boolean",filterable:true,displayOrder:4 },
+    { key:"images",label:"Images",type:"media",displayOrder:5 },
+  ],
   blank: [],
 };
 
@@ -160,7 +187,7 @@ export async function collectionRoutes(app: FastifyInstance) {
       key: z.string().regex(/^[a-z][a-z0-9_]{0,62}$/).optional(),
       purpose: z.string().trim().max(80).optional(),
       transactional: z.boolean().default(false),
-      template: z.enum(["product", "service", "property", "blank"]).default("blank"),
+      template: z.enum(["product", "service", "property", "menu", "package", "blank"]).default("blank"),
       fields: z.array(fieldInput).optional(),
     }).parse(request.body);
     await requireBusinessAccess(request, params.tenantId, input.businessId, ["OWNER","ADMIN","STAFF"]);
@@ -206,7 +233,10 @@ export async function collectionRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
-    const input = fieldInput.parse(request.body);
+    const fieldBody = z.object({ field: fieldInput, expectedSchemaVersion: z.number().int().positive().optional() }).safeParse(request.body);
+    const input = fieldBody.success ? fieldBody.data.field : fieldInput.parse(request.body);
+    const expectedSchemaVersion = fieldBody.success ? fieldBody.data.expectedSchemaVersion : undefined;
+    if (expectedSchemaVersion !== undefined && Number(collection.schema_version) !== expectedSchemaVersion) throw new ApiError(409,"SCHEMA_VERSION_CONFLICT","Collection schema changed. Reload before editing.");
     const result = await transaction(async (client) => {
       const inserted = await client.query(`
         INSERT INTO collection_fields(tenant_id,collection_id,key,label,type,required,unique_within_collection,searchable,filterable,sortable,ai_visible,default_value_json,validation_json,options_json,display_order)
@@ -227,7 +257,10 @@ export async function collectionRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
-    const input = fieldInput.partial().parse(request.body);
+    const rawBody = z.object({ field: fieldInput.partial(), expectedSchemaVersion: z.number().int().positive().optional() }).safeParse(request.body);
+    const input = rawBody.success ? rawBody.data.field : fieldInput.partial().parse(request.body);
+    const expectedSchemaVersion = rawBody.success ? rawBody.data.expectedSchemaVersion : undefined;
+    if (expectedSchemaVersion !== undefined && Number(collection.schema_version) !== expectedSchemaVersion) throw new ApiError(409,"SCHEMA_VERSION_CONFLICT","Collection schema changed. Reload before editing.");
     const current = await query("SELECT * FROM collection_fields WHERE id=$1 AND collection_id=$2", [params.fieldId, params.collectionId]);
     if (!current.rows[0]) throw new ApiError(404, "FIELD_NOT_FOUND", "Field not found.");
     const merged = fieldInput.parse({
@@ -264,7 +297,23 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId);
     const collection = await loadCollection(params.tenantId, params.collectionId);
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
-    const q = z.object({ q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).default(0) }).parse(request.query);
+    const q = z.object({
+      q:z.string().max(200).optional(),
+      filterKey:z.string().regex(/^[a-z][a-z0-9_]{0,62}$/).optional(),
+      filterValue:z.string().max(500).optional(),
+      sortKey:z.string().regex(/^[a-z][a-z0-9_]{0,62}$/).optional(),
+      sortDir:z.enum(["asc","desc"]).default("desc"),
+      limit:z.coerce.number().int().min(1).max(200).default(50),
+      offset:z.coerce.number().int().min(0).default(0)
+    }).parse(request.query);
+    if(q.filterKey){
+      const allowed=await query("SELECT 1 FROM collection_fields WHERE collection_id=$1 AND tenant_id=$2 AND key=$3 AND filterable=true",[params.collectionId,params.tenantId,q.filterKey]);
+      if(!allowed.rows[0]) throw new ApiError(400,"FILTER_NOT_ALLOWED","This field is not filterable.");
+    }
+    if(q.sortKey){
+      const allowed=await query("SELECT 1 FROM collection_fields WHERE collection_id=$1 AND tenant_id=$2 AND key=$3 AND sortable=true",[params.collectionId,params.tenantId,q.sortKey]);
+      if(!allowed.rows[0]) throw new ApiError(400,"SORT_NOT_ALLOWED","This field is not sortable.");
+    }
     const result = await query(`
       SELECT i.*,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',m.id,'url',m.public_url,'mimeType',m.mime_type,'role',cim.role,'order',cim.display_order) ORDER BY cim.display_order)
@@ -273,8 +322,13 @@ export async function collectionRoutes(app: FastifyInstance) {
       FROM collection_items i
       WHERE i.tenant_id=$1 AND i.collection_id=$2 AND i.status<>'deleted'
         AND ($3::text IS NULL OR i.title ILIKE '%'||$3||'%' OR i.data_jsonb::text ILIKE '%'||$3||'%')
-      ORDER BY i.updated_at DESC LIMIT $4 OFFSET $5
-    `, [params.tenantId, params.collectionId, q.q ?? null, q.limit, q.offset]);
+        AND ($4::text IS NULL OR i.data_jsonb->>$4=$5)
+      ORDER BY
+        CASE WHEN $6::text IS NOT NULL AND $7='asc' THEN i.data_jsonb->>$6 END ASC NULLS LAST,
+        CASE WHEN $6::text IS NOT NULL AND $7='desc' THEN i.data_jsonb->>$6 END DESC NULLS LAST,
+        i.updated_at DESC
+      LIMIT $8 OFFSET $9
+    `, [params.tenantId,params.collectionId,q.q??null,q.filterKey??null,q.filterValue??null,q.sortKey??null,q.sortDir,q.limit,q.offset]);
     const count = await query<{ count: string }>("SELECT count(*) FROM collection_items WHERE tenant_id=$1 AND collection_id=$2 AND status<>'deleted'", [params.tenantId, params.collectionId]);
     reply.send({ items: result.rows, total: Number(count.rows[0]?.count ?? 0), limit: q.limit, offset: q.offset });
   });
@@ -286,7 +340,8 @@ export async function collectionRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
-    const input = z.object({ title: z.string().trim().max(240).optional(), status: z.enum(["active", "hidden", "archived"]).default("active"), data: z.record(z.string(), z.unknown()) }).parse(request.body);
+    const input = z.object({ title: z.string().trim().max(240).optional(), status: z.enum(["active", "hidden", "archived"]).default("active"), data: z.record(z.string(), z.unknown()), schemaVersion:z.number().int().positive().optional() }).parse(request.body);
+    if(input.schemaVersion!==undefined && Number(collection.schema_version)!==input.schemaVersion) throw new ApiError(409,"SCHEMA_VERSION_CONFLICT","Collection schema changed. Reload before saving.");
     await validateItem(params.tenantId, params.collectionId, input.data);
     const result = await query(`
       INSERT INTO collection_items(tenant_id,business_id,collection_id,title,status,data_jsonb)
@@ -303,7 +358,8 @@ export async function collectionRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
-    const input = z.object({ title: z.string().trim().max(240).nullable().optional(), status: z.enum(["active", "hidden", "archived"]).optional(), data: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
+    const input = z.object({ title: z.string().trim().max(240).nullable().optional(), status: z.enum(["active", "hidden", "archived"]).optional(), data: z.record(z.string(), z.unknown()).optional(), schemaVersion:z.number().int().positive().optional() }).parse(request.body);
+    if(input.schemaVersion!==undefined && Number(collection.schema_version)!==input.schemaVersion) throw new ApiError(409,"SCHEMA_VERSION_CONFLICT","Collection schema changed. Reload before saving.");
     const current = await query<{ data_jsonb: Record<string, unknown> }>("SELECT data_jsonb FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted'", [params.itemId, params.collectionId, params.tenantId]);
     if (!current.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
     const data = input.data ? { ...current.rows[0].data_jsonb, ...input.data } : current.rows[0].data_jsonb;
