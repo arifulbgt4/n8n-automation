@@ -24,6 +24,7 @@ export type RequestContext = {
   principal: SessionPrincipal;
   tenantId?: string;
   membershipRole?: MembershipRole;
+  businessScope?: string[] | null;
 };
 
 declare module "fastify" {
@@ -110,7 +111,7 @@ export async function requireTenant(
     if (principal.platformAdminMfaRequired && (!principal.platformAdminMfaEnabled || !principal.mfaVerifiedAt)) {
       throw new ApiError(401, "ADMIN_MFA_REQUIRED", "MFA-verified platform-admin session is required for support tenant access.");
     }
-    request.auth = { principal, tenantId, membershipRole: "OWNER" };
+    request.auth = { principal, tenantId, membershipRole: "OWNER", businessScope: null };
     return request.auth;
   }
   const membership = await query<{ role: MembershipRole; status: string; business_scope: string[] | null }>(
@@ -121,8 +122,28 @@ export async function requireTenant(
   if (!row || row.status !== "active" || !allowedRoles.includes(row.role)) {
     throw new ApiError(404, "RESOURCE_NOT_FOUND", "Resource not found.");
   }
-  request.auth = { principal, tenantId, membershipRole: row.role };
+  request.auth = { principal, tenantId, membershipRole: row.role, businessScope: row.business_scope };
   return request.auth;
+}
+
+export async function requireBusinessAccess(
+  request: FastifyRequest,
+  tenantId: string,
+  businessId: string,
+  allowedRoles: MembershipRole[] = ["OWNER", "ADMIN", "STAFF", "VIEWER"],
+): Promise<RequestContext> {
+  const context = request.auth?.tenantId === tenantId
+    ? request.auth
+    : await requireTenant(request, tenantId, allowedRoles);
+  if (!context.membershipRole || !allowedRoles.includes(context.membershipRole)) {
+    throw new ApiError(404, "RESOURCE_NOT_FOUND", "Resource not found.");
+  }
+  if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope) && !context.businessScope.includes(businessId)) {
+    throw new ApiError(404, "RESOURCE_NOT_FOUND", "Resource not found.");
+  }
+  const exists = await query("SELECT 1 FROM businesses WHERE id=$1 AND tenant_id=$2 AND status<>'archived'", [businessId,tenantId]);
+  if (!exists.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
+  return context;
 }
 
 export function requireCsrf(request: FastifyRequest): void {
