@@ -487,6 +487,16 @@ async function trainingJob(job: Job<JobEnvelope<any>>) {
   try {
     const result = await internalFetch("/v1/internal/training/synthesize", { method: "POST", body: JSON.stringify({ trainingJobId }) });
     await query("UPDATE training_jobs SET status='completed',candidate_prompt_version_id=$2,evaluation_json=$3::jsonb,cost_metadata=$4::jsonb,completed_at=now() WHERE id=$1", [trainingJobId,result.candidatePromptVersionId,JSON.stringify(result.evaluation ?? {}),JSON.stringify(result.usage ?? {})]);
+    const agent = await query<any>("SELECT a.*,tj.tenant_id FROM training_jobs tj JOIN agent_profiles a ON a.id=tj.agent_profile_id WHERE tj.id=$1",[trainingJobId]);
+    if(agent.rows[0]?.behavior_settings?.autoPublishTraining === true && result.evaluation?.passed === true) {
+      await transaction(async (client)=>{
+        await client.query("UPDATE prompt_versions SET status='archived' WHERE agent_profile_id=$1 AND status='active' AND id<>$2",[agent.rows[0].id,result.candidatePromptVersionId]);
+        await client.query("UPDATE prompt_versions SET status='active',published_at=now() WHERE id=$1 AND agent_profile_id=$2",[result.candidatePromptVersionId,agent.rows[0].id]);
+        await client.query("UPDATE agent_profiles SET active_prompt_version_id=$2,updated_at=now() WHERE id=$1",[agent.rows[0].id,result.candidatePromptVersionId]);
+        await client.query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload)
+          VALUES ($1,'AGENT_PROMPT_PUBLISHED',$2,'agent_profile',$3,$4::jsonb)`,[agent.rows[0].tenant_id,agent.rows[0].business_id,agent.rows[0].id,JSON.stringify({promptVersionId:result.candidatePromptVersionId,autoPublished:true,trainingJobId})]);
+      });
+    }
   } catch (error) {
     await query("UPDATE training_jobs SET status='failed',error=$2,completed_at=now() WHERE id=$1", [trainingJobId,error instanceof Error ? error.message : "training failed"]);
     throw error;
