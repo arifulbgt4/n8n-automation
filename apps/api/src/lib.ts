@@ -101,6 +101,16 @@ export async function requirePlatformAdmin(request: FastifyRequest, options: { a
   return principal;
 }
 
+export async function requireRecentPlatformAdmin(request: FastifyRequest, maxAgeMinutes = 15): Promise<SessionPrincipal> {
+  const principal = await requirePlatformAdmin(request);
+  if (!principal.mfaVerifiedAt) throw new ApiError(401,"ADMIN_REAUTH_REQUIRED","Recent MFA verification is required for this action.");
+  const verifiedAt = new Date(principal.mfaVerifiedAt).getTime();
+  if (!Number.isFinite(verifiedAt) || Date.now() - verifiedAt > maxAgeMinutes * 60_000) {
+    throw new ApiError(401,"ADMIN_REAUTH_REQUIRED",`Re-enter an MFA code before this sensitive action. Verification remains valid for ${maxAgeMinutes} minutes.`);
+  }
+  return principal;
+}
+
 export async function requireTenant(
   request: FastifyRequest,
   tenantId: string,
