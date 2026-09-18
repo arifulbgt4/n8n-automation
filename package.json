@@ -25,7 +25,10 @@
     "build:apps": "npm run build -w customer-panel && npm run build -w super-admin-panel",
     "ci": "npm run validate:n8n && npm run typecheck && npm run test && npm run build",
     "admin:create": "node scripts/create-super-admin.mjs",
-    "validate:n8n": "node scripts/validate-n8n-bundle.mjs"
+    "validate:n8n": "node scripts/validate-n8n-bundle.mjs",
+    "n8n:plan": "node scripts/n8n-deploy.mjs",
+    "n8n:deploy": "node scripts/n8n-deploy.mjs --apply",
+    "n8n:deploy:activate": "node scripts/n8n-deploy.mjs --apply --activate"
   },
   "engines": {
     "node": ">=22.0.0"
