@@ -9,7 +9,7 @@ import {
   transaction,
   type ResponsePlan,
 } from "@n8n-automation/core";
-import { chat } from "../ai-provider.js";
+import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
 import { ApiError, requestId } from "../lib.js";
 
 function requireInternal(request: FastifyRequest) {
@@ -50,7 +50,15 @@ async function runtimeContext(turnId: string) {
     WHERE acl.agent_profile_id=$1 AND c.status='active'
     GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version ORDER BY max(acl.priority) DESC
   `, [row.agent_profile_id]) : { rows: [] } as any;
-  return { row, messages: messages.rows, recent: recent.rows.reverse(), schemas: schemas.rows };
+  const media = await query<any>(`
+    SELECT mm.message_id,ma.id AS asset_id,ma.storage_file_id,ma.original_name,ma.mime_type,ma.kind,ma.size_bytes,ma.visibility
+    FROM message_media mm
+    JOIN media_assets ma ON ma.id=mm.media_asset_id
+    JOIN messages m ON m.id=mm.message_id
+    WHERE m.turn_id=$1 AND ma.processing_status='ready'
+    ORDER BY m.created_at,mm.display_order
+  `, [turnId]);
+  return { row, messages: messages.rows, recent: recent.rows.reverse(), schemas: schemas.rows, media: media.rows };
 }
 
 async function findRelevantItems(tenantId: string, businessId: string, agentId: string | null, text: string) {
@@ -72,8 +80,30 @@ async function findRelevantItems(tenantId: string, businessId: string, agentId: 
   return result.rows;
 }
 
-async function findKnowledge(tenantId: string, businessId: string, agentId: string | null, text: string) {
+async function findKnowledge(tenantId: string, businessId: string, agentId: string | null, channelId: string, text: string) {
   if (!text.trim()) return [];
+  try {
+    const model = await resolveModel(tenantId, businessId, agentId, channelId, "EMBEDDINGS");
+    if (model) {
+      const embedded = await embedding(model, { model: model.model, parameters: model.parameters ?? {} }, text.slice(0, 8000));
+      if (embedded.vector.length === env().EMBEDDING_DIMENSIONS) {
+        const vector = `[${embedded.vector.join(",")}]`;
+        const result = await query(`
+          SELECT kc.id,kc.source_id,kc.content,kc.metadata,ks.title,ks.type,
+                 1-(kc.embedding <=> $4::vector) AS similarity
+          FROM knowledge_chunks kc
+          JOIN knowledge_sources ks ON ks.id=kc.source_id
+          WHERE kc.tenant_id=$1 AND kc.business_id=$2 AND kc.active=true AND ks.status='ready'
+            AND (ks.agent_profile_id IS NULL OR ks.agent_profile_id=$3)
+          ORDER BY kc.embedding <=> $4::vector
+          LIMIT 8
+        `, [tenantId,businessId,agentId,vector]);
+        return result.rows;
+      }
+    }
+  } catch {
+    // Keyword fallback keeps the conversation available when embedding search is degraded.
+  }
   const result = await query(`
     SELECT ks.id,ks.title,ks.type,left(ks.content,3000) AS content
     FROM knowledge_sources ks
@@ -83,6 +113,64 @@ async function findKnowledge(tenantId: string, businessId: string, agentId: stri
     ORDER BY ks.updated_at DESC LIMIT 8
   `, [tenantId, businessId, agentId, text.slice(0, 200)]);
   return result.rows;
+}
+
+async function mediaCredential(tenantId: string): Promise<string> {
+  const result = await query<{ encrypted_api_key: string | null }>(
+    "SELECT encrypted_api_key FROM tenant_media_accounts WHERE tenant_id=$1 AND status='active'",
+    [tenantId],
+  );
+  if (result.rows[0]?.encrypted_api_key) {
+    const { decryptSecret } = await import("@n8n-automation/core");
+    return decryptSecret(result.rows[0].encrypted_api_key);
+  }
+  if (env().MEDIA_API_KEY) return env().MEDIA_API_KEY;
+  throw new Error("Media credential is not configured");
+}
+
+async function readMedia(tenantId: string, item: any): Promise<BinaryAiInput> {
+  if (!env().MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
+  if (Number(item.size_bytes ?? 0) > 25 * 1024 * 1024) throw new Error("AI media input exceeds the 25 MiB runtime limit");
+  const credential = await mediaCredential(tenantId);
+  const response = await fetch(`${env().MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(item.storage_file_id)}/content`, {
+    headers: { authorization: `Bearer ${credential}` },
+  });
+  if (!response.ok) throw new Error(`Media fetch failed with ${response.status}`);
+  return {
+    bytes: new Uint8Array(await response.arrayBuffer()),
+    mimeType: response.headers.get("content-type") || item.mime_type || "application/octet-stream",
+    filename: item.original_name || undefined,
+  };
+}
+
+async function multimodalContext(context: any) {
+  const row = context.row;
+  const images = (context.media ?? []).filter((item: any) => item.kind === "image" || String(item.mime_type).startsWith("image/")).slice(0, 5);
+  const audio = (context.media ?? []).find((item: any) => item.kind === "audio" || String(item.mime_type).startsWith("audio/"));
+  const result: { imageAnalysis?: string; transcript?: string; usage: unknown[] } = { usage: [] };
+
+  if (images.length) {
+    const model = await resolveModel(row.tenant_id,row.business_id,row.agent_profile_id,row.channel_account_id,"IMAGE_ANALYSIS");
+    if (model) {
+      const binaries: BinaryAiInput[] = [];
+      for (const image of images) binaries.push(await readMedia(row.tenant_id,image));
+      const analysis = await analyzeImages(model,{model:model.model,parameters:model.parameters ?? {}},
+        "Analyze these customer-provided screenshots/images for business matching. Extract visible product/service names, text, SKU, category, colors, sizes, distinguishing attributes, and the user's likely intent. Do not invent price, stock, availability, or policy. Return concise searchable observations.",binaries);
+      result.imageAnalysis = analysis.text;
+      result.usage.push({ task: "IMAGE_ANALYSIS", provider: model.provider, model: model.model, usage: analysis.usage });
+    }
+  }
+
+  if (audio) {
+    const model = await resolveModel(row.tenant_id,row.business_id,row.agent_profile_id,row.channel_account_id,"AUDIO_TRANSCRIPTION");
+    if (model) {
+      const binary = await readMedia(row.tenant_id,audio);
+      const transcript = await transcribeAudio(model,{model:model.model,parameters:model.parameters ?? {}},binary);
+      result.transcript = transcript.text;
+      result.usage.push({ task: "AUDIO_TRANSCRIPTION", provider: model.provider, model: model.model, usage: transcript.usage });
+    }
+  }
+  return result;
 }
 
 async function resolveModel(tenantId: string, businessId: string, agentId: string | null, channelId: string, taskKey: string) {
@@ -110,6 +198,7 @@ export async function internalRoutes(app: FastifyInstance) {
       messages: context.messages,
       recentMessages: context.recent,
       collectionSchemas: context.schemas,
+      media: context.media,
     });
   });
 
@@ -120,9 +209,11 @@ export async function internalRoutes(app: FastifyInstance) {
     const row = context.row;
     if (row.mode !== "AI" || row.conversation_status !== "open") throw new ApiError(409, "CONVERSATION_NOT_AI_ELIGIBLE", "Conversation is not eligible for an AI response.");
     if (!row.agent_profile_id || !row.active_prompt_version_id) throw new ApiError(409, "AGENT_NOT_CONFIGURED", "Conversation has no active AI agent/prompt.");
-    const turnText = context.messages.map((message: any) => message.text_content).filter(Boolean).join("\n");
+    const originalTurnText = context.messages.map((message: any) => message.text_content).filter(Boolean).join("\n");
+    const multimodal = await multimodalContext(context);
+    const turnText = [originalTurnText, multimodal.transcript, multimodal.imageAnalysis].filter(Boolean).join("\n\n");
     const items = await findRelevantItems(row.tenant_id, row.business_id, row.agent_profile_id, turnText);
-    const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, turnText);
+    const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText);
     const model = await resolveModel(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, "DEFAULT_CHAT");
     if (!model) throw new ApiError(409, "AI_MODEL_MISSING", "No DEFAULT_CHAT model is configured for this agent.");
     const system = [
@@ -132,13 +223,15 @@ export async function internalRoutes(app: FastifyInstance) {
       `\nCollection schemas: ${JSON.stringify(context.schemas)}`,
       `\nRelevant current items: ${JSON.stringify(items)}`,
       `\nRelevant knowledge: ${JSON.stringify(knowledge)}`,
+      multimodal.transcript ? `\nAudio transcript: ${multimodal.transcript}` : "",
+      multimodal.imageAnalysis ? `\nImage observations: ${multimodal.imageAnalysis}` : "",
       "\nRespond as strict JSON with keys: messages (array of {type:'text',text:string} or {type:'media',assetId:string}), actions (array of {tool:string,arguments:object}), handoff (boolean), handoffReason (string|null). Keep responses concise and grounded.",
     ].join("\n");
     const history = context.recent.filter((message: any) => message.text_content).map((message: any) => ({
       role: message.sender_type === "CONTACT" || message.sender_type === "TRAINER" ? "user" as const : "assistant" as const,
       content: message.text_content,
     }));
-    history.push({ role: "user", content: turnText || "[The user sent media without text.]" });
+    history.push({ role: "user", content: originalTurnText || multimodal.transcript || multimodal.imageAnalysis || "[The user sent media without text.]" });
     const result = await chat(model, { model: model.model, parameters: model.parameters ?? {} }, { system, messages: history });
     let parsed: any;
     try {
@@ -152,6 +245,11 @@ export async function internalRoutes(app: FastifyInstance) {
     if (!messages.length && !parsed.handoff) messages.push({ type: "text", text: "I’m unable to answer that right now. A team member can help if needed." });
     await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,correlation_id,idempotency_key,metadata)
       VALUES ($1,$2,$3,$4,'ai_call',1,'call',$5,$6,'DEFAULT_CHAT',$7,$8,$9::jsonb) ON CONFLICT DO NOTHING`, [row.tenant_id, row.business_id, row.channel_account_id, row.conversation_id, model.provider, model.model, requestId(request), `ai:${input.turnId}:${row.active_prompt_version_id}`, JSON.stringify(result.usage)]);
+    for (const [index, extra] of multimodal.usage.entries()) {
+      await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,correlation_id,idempotency_key,metadata)
+        VALUES ($1,$2,$3,$4,'ai_call',1,'call',$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT DO NOTHING`,
+        [row.tenant_id,row.business_id,row.channel_account_id,row.conversation_id,(extra as any).provider,(extra as any).model,(extra as any).task,requestId(request),`ai-extra:${input.turnId}:${index}:${(extra as any).task}`,JSON.stringify((extra as any).usage ?? {})]);
+    }
     reply.send({
       turnId: input.turnId,
       tenantId: row.tenant_id,
