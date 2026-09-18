@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { query, transaction } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireCsrf, requireTenant, slugify } from "../lib.js";
+import { assertTenantCountLimit } from "../limits.js";
 
 const tenantRoles = ["OWNER", "ADMIN", "STAFF", "VIEWER"] as const;
 
@@ -102,6 +103,7 @@ export async function tenantRoutes(app: FastifyInstance) {
     const principal = await requireAuth(request);
     await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
+    await assertTenantCountLimit(tenantId, "businesses", "SELECT count(*) FROM businesses WHERE tenant_id=$1 AND status<>'archived'");
     const input = z.object({
       name: z.string().trim().min(1).max(160),
       businessTypeHint: z.string().trim().max(80).optional(),
