@@ -21,7 +21,7 @@ This directory is the implementation contract for the n8n Automation SaaS.
 15. [`14_IMPLEMENTATION_ROADMAP.md`](14_IMPLEMENTATION_ROADMAP.md) — phases, epics, task checklist, dependencies, and delivery order.
 16. [`15_TESTING_ACCEPTANCE.md`](15_TESTING_ACCEPTANCE.md) — functional, integration, load, security, recovery, and acceptance requirements.
 17. [`16_LEGACY_MIGRATION.md`](16_LEGACY_MIGRATION.md) — behavioral migration from the earlier spreadsheet-driven prototype.
-18. [`17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md`](17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md) — explicit rules for consuming the already-running PostgreSQL/Redis/n8n/Media services and deploying n8n JSON workflow bundles.
+18. [`17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md`](17_EXISTING_INFRA_AND_WORKFLOW_DELIVERY.md) — explicit rules for consuming the already-running PostgreSQL/Redis/n8n/Media services and deploying n8n JSON workflow bundles.\n19. [`18_IMPLEMENTATION_DECISIONS.md`](18_IMPLEMENTATION_DECISIONS.md) — selected runtime frameworks/libraries and the remaining n8n version gate.
 
 ## Canonical decisions
 

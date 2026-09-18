@@ -1,0 +1,30 @@
+{
+  "name": "@n8nauto/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run build -w @n8nauto/config && npm run build -w @n8nauto/contracts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "db:migrate": "tsx src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@n8nauto/config": "*",
+    "@n8nauto/contracts": "*",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.12.5",
+    "ioredis": "^5.7.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}

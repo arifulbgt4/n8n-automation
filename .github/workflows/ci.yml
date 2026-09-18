@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install workspace dependencies
+        run: npm install --include-workspace-root
+      - name: Validate documentation and workflow artifacts
+        run: npm run validate:docs && npm run validate:workflows
+      - name: Static checks
+        run: npm run lint && npm run typecheck
+      - name: Tests
+        run: npm test
+      - name: Build
+        run: npm run build

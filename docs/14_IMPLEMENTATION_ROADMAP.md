@@ -19,42 +19,42 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 - [x] Confirm PostgreSQL/Redis/n8n/Media Storage infrastructure is pre-provisioned and external to this repository.
 - [x] Document Media Storage user API capabilities and integration model.
 - [x] Define n8n JSON workflow bundle/import/update/rollback model.
-- [ ] Review and approve all files in `docs/`.
-- [ ] Select backend framework/service layout.
-- [ ] Select ORM/query layer while preserving PostgreSQL contracts.
-- [ ] Select Redis queue library/runtime.
-- [ ] Decide production auth implementation/library while preserving auth contracts.
+- [x] Review and approve all files in `docs/`.
+- [x] Select backend framework/service layout.
+- [x] Select ORM/query layer while preserving PostgreSQL contracts.
+- [x] Select Redis queue library/runtime.
+- [x] Decide production auth implementation/library while preserving auth contracts.
 - [ ] Confirm exact deployed n8n version before implementing automated workflow deployment.
 
 ## Phase 1 — Repository/application foundation
 
 ### Project structure
-- [ ] Establish shared TypeScript packages/types as needed.
-- [ ] Add backend/API service.
-- [ ] Add worker service(s).
-- [ ] Establish environment validation/config package.
-- [ ] Add lint/typecheck/test commands across services.
-- [ ] Add CI for docs/typecheck/tests/build.
+- [x] Establish shared TypeScript packages/types as needed.
+- [x] Add backend/API service.
+- [x] Add worker service(s).
+- [x] Establish environment validation/config package.
+- [x] Add lint/typecheck/test commands across services.
+- [x] Add CI for docs/typecheck/tests/build.
 
 ### Existing infrastructure client integration
-- [ ] Add application PostgreSQL client configuration.
+- [x] Add application PostgreSQL client configuration.
 - [ ] Create/migrate `app_db` using application migrations; do not install PostgreSQL.
 - [ ] Verify separate n8n internal DB remains n8n-owned.
 - [ ] Enable/verify pgvector in `app_db` before vector features are used.
-- [ ] Add Redis client configuration using an application/environment namespace; do not install Redis.
-- [ ] Add Media Storage adapter configuration; do not install Media Storage.
-- [ ] Add internal service-auth configuration for n8n/workers.
-- [ ] Add health/readiness checks for required external services.
-- [ ] Define environment-specific configuration without hard-coded infrastructure URLs.
+- [x] Add Redis client configuration using an application/environment namespace; do not install Redis.
+- [x] Add Media Storage adapter configuration; do not install Media Storage.
+- [x] Add internal service-auth configuration for n8n/workers.
+- [x] Add health/readiness checks for required external services.
+- [x] Define environment-specific configuration without hard-coded infrastructure URLs.
 
 ### Database base
-- [ ] Create migration system.
-- [ ] Add UUID/ID strategy.
-- [ ] Add timestamps/version conventions.
-- [ ] Add tenant-scoped query conventions.
-- [ ] Add outbox/event tables.
-- [ ] Add audit infrastructure.
-- [ ] Add automation deployment metadata table/model.
+- [x] Create migration system.
+- [x] Add UUID/ID strategy.
+- [x] Add timestamps/version conventions.
+- [x] Add tenant-scoped query conventions.
+- [x] Add outbox/event tables.
+- [x] Add audit infrastructure.
+- [x] Add automation deployment metadata table/model.
 
 ## Phase 2 — Authentication, tenancy, and RBAC
 

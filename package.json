@@ -1,0 +1,23 @@
+{
+  "name": "n8n-automation",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "customer-panel",
+    "super-admin-panel",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @n8nauto/config && npm run build -w @n8nauto/contracts && npm run build -w @n8nauto/api && npm run build -w @n8nauto/worker && npm run build -w customer-panel && npm run build -w super-admin-panel",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "validate:docs": "node scripts/validate-docs.mjs",
+    "validate:workflows": "node scripts/validate-workflows.mjs",
+    "ci": "npm run validate:docs && npm run validate:workflows && npm run lint && npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
