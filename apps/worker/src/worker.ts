@@ -153,6 +153,12 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
         await internalFetch("/v1/internal/actions/execute", { method: "POST", body: JSON.stringify({ tenantId: ai.tenantId, businessId: ai.businessId, channelAccountId: ai.channelAccountId, conversationId: ai.conversationId, tool: "handoff_conversation", arguments: { reason: ai.handoffReason }, idempotencyKey: `turn:${turn}:handoff` }) });
       } else if (ai.messages?.length) {
         await internalFetch("/v1/internal/outbound/enqueue", { method: "POST", body: JSON.stringify({ tenantId: ai.tenantId, businessId: ai.businessId, channelAccountId: ai.channelAccountId, conversationId: ai.conversationId, stateVersion: Number(ai.stateVersion), messages: ai.messages, senderType: "AI", priority: "CUSTOMER_ACTIVE", logicalResponseId: `turn-${turn}` }) });
+        if (!(ai.actions ?? []).some((action:any)=>action.tool==="schedule_followup")) {
+          await internalFetch("/v1/internal/orchestration/followups/policy",{method:"POST",body:JSON.stringify({
+            tenantId:ai.tenantId,businessId:ai.businessId,channelAccountId:ai.channelAccountId,
+            conversationId:ai.conversationId,agentProfileId:ai.agentProfileId,turnId:turn
+          })});
+        }
       }
       await internalFetch(`/v1/internal/turns/${turn}/complete`, { method: "POST", body: JSON.stringify({ status: "processed" }) });
     }
