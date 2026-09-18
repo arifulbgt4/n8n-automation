@@ -28,6 +28,26 @@ async function idempotent<T>(tenantId: string, scope: string, key: string | unde
   }
 }
 
+const ORDER_TRANSITIONS:Record<string,string[]>={
+  pending:["confirmed","cancelled"],confirmed:["processing","cancelled"],processing:["shipped","completed","cancelled"],
+  shipped:["completed","returned"],completed:["returned"],cancelled:[],returned:[]
+};
+const BOOKING_TRANSITIONS:Record<string,string[]>={
+  pending:["confirmed","cancelled"],requested:["confirmed","cancelled"],confirmed:["completed","cancelled"],completed:[],cancelled:[]
+};
+function assertTransition(kind:string,current:string,next:string,map:Record<string,string[]>){
+  if(current===next)return;
+  const allowed=map[current]??[];
+  if(!allowed.includes(next))throw new ApiError(409,"INVALID_STATE_TRANSITION",`${kind} cannot move from ${current} to ${next}.`,{current,next,allowed});
+}
+async function assertBookingAvailability(input:{tenantId:string;businessId:string;collectionItemId?:string|null;startsAt:string;endsAt?:string|null;excludeId?:string}){
+  const starts=new Date(input.startsAt);const ends=input.endsAt?new Date(input.endsAt):new Date(starts.getTime()+60*60_000);
+  if(Number.isNaN(starts.getTime())||Number.isNaN(ends.getTime())||ends<=starts)throw new ApiError(400,"BOOKING_TIME_INVALID","Booking end time must be after start time.");
+  if(!input.collectionItemId)return;
+  const conflict=await query("SELECT id FROM bookings WHERE tenant_id=$1 AND business_id=$2 AND collection_item_id=$3 AND status IN ('pending','requested','confirmed') AND ($4::uuid IS NULL OR id<>$4) AND tstzrange(starts_at,COALESCE(ends_at,starts_at+interval '1 hour'),'[)') && tstzrange($5::timestamptz,$6::timestamptz,'[)') LIMIT 1",[input.tenantId,input.businessId,input.collectionItemId,input.excludeId??null,input.startsAt,ends.toISOString()]);
+  if(conflict.rows[0])throw new ApiError(409,"BOOKING_CONFLICT","The selected service/resource already has a booking in this time window.");
+}
+
 async function ensureBusiness(tenantId: string, businessId: string) {
   const business = await query<{ id: string; currency: string }>("SELECT id,currency FROM businesses WHERE id=$1 AND tenant_id=$2 AND status='active'", [businessId, tenantId]);
   if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
@@ -103,10 +123,11 @@ export async function actionRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/orders/:orderId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), orderId: z.string().uuid() }).parse(request.params);
     const auth = await internalOrTenant(request, params.tenantId);
-    const targetOrder = await query<{ business_id: string }>("SELECT business_id FROM orders WHERE id=$1 AND tenant_id=$2", [params.orderId,params.tenantId]);
+    const targetOrder = await query<{ business_id: string; status:string }>("SELECT business_id,status FROM orders WHERE id=$1 AND tenant_id=$2", [params.orderId,params.tenantId]);
     if (!targetOrder.rows[0]) throw new ApiError(404,"ORDER_NOT_FOUND","Order not found.");
     if (!auth.internal) await requireBusinessAccess(request, params.tenantId, targetOrder.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
-    const input = z.object({ status: z.string().min(1).max(60), delivery: z.record(z.string(), z.unknown()).optional(), payment: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
+    const input = z.object({ status: z.enum(["pending","confirmed","processing","shipped","completed","cancelled","returned"]), delivery: z.record(z.string(), z.unknown()).optional(), payment: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
+    assertTransition("Order",targetOrder.rows[0].status,input.status,ORDER_TRANSITIONS);
     const result = await query(`UPDATE orders SET status=$3,delivery_metadata=CASE WHEN $4::jsonb IS NULL THEN delivery_metadata ELSE delivery_metadata||$4::jsonb END,payment_metadata=CASE WHEN $5::jsonb IS NULL THEN payment_metadata ELSE payment_metadata||$5::jsonb END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`, [params.orderId, params.tenantId, input.status, input.delivery ? JSON.stringify(input.delivery) : null, input.payment ? JSON.stringify(input.payment) : null]);
     if (!result.rows[0]) throw new ApiError(404, "ORDER_NOT_FOUND", "Order not found.");
     await audit({ actorUserId: auth.userId, actorType: auth.internal ? "service" : "user", tenantId: params.tenantId, businessId: result.rows[0].business_id, action: "ORDER_UPDATED", resourceType: "order", resourceId: params.orderId, safeDiff: input, request });
@@ -126,7 +147,9 @@ export async function actionRoutes(app: FastifyInstance) {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const auth = await internalOrTenant(request, tenantId);
     const input = z.object({ businessId: z.string().uuid(), channelAccountId: z.string().uuid().nullable().optional(), conversationId: z.string().uuid().nullable().optional(), contactId: z.string().uuid().nullable().optional(), collectionItemId: z.string().uuid().nullable().optional(), startsAt: z.string().datetime(), endsAt: z.string().datetime().nullable().optional(), timezone: z.string().min(1).max(80), customer: z.record(z.string(), z.unknown()).default({}), metadata: z.record(z.string(), z.unknown()).default({}) }).parse(request.body);
+    if(!auth.internal) await requireBusinessAccess(request,tenantId,input.businessId,["OWNER","ADMIN","STAFF"]);
     await ensureBusiness(tenantId, input.businessId);
+    await assertBookingAvailability({tenantId,businessId:input.businessId,collectionItemId:input.collectionItemId,startsAt:input.startsAt,endsAt:input.endsAt});
     const idem = request.headers["idempotency-key"] as string | undefined;
     const result = await idempotent(tenantId, "create_booking", idem, async () => {
       const row = await query<any>(`INSERT INTO bookings(tenant_id,business_id,channel_account_id,conversation_id,contact_id,collection_item_id,starts_at,ends_at,timezone,customer_snapshot,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) RETURNING *`, [tenantId, input.businessId, input.channelAccountId ?? null, input.conversationId ?? null, input.contactId ?? null, input.collectionItemId ?? null, input.startsAt, input.endsAt ?? null, input.timezone, JSON.stringify(input.customer), JSON.stringify(input.metadata)]);
@@ -140,10 +163,19 @@ export async function actionRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/bookings/:bookingId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), bookingId: z.string().uuid() }).parse(request.params);
     const auth = await internalOrTenant(request, params.tenantId);
-    const targetBooking = await query<{ business_id: string }>("SELECT business_id FROM bookings WHERE id=$1 AND tenant_id=$2", [params.bookingId,params.tenantId]);
+    const targetBooking = await query<{ business_id: string; status:string; collection_item_id:string|null; starts_at:Date; ends_at:Date|null }>("SELECT business_id,status,collection_item_id,starts_at,ends_at FROM bookings WHERE id=$1 AND tenant_id=$2", [params.bookingId,params.tenantId]);
     if (!targetBooking.rows[0]) throw new ApiError(404,"BOOKING_NOT_FOUND","Booking not found.");
     if (!auth.internal) await requireBusinessAccess(request, params.tenantId, targetBooking.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
-    const input = z.object({ status: z.string().max(60).optional(), startsAt: z.string().datetime().optional(), endsAt: z.string().datetime().nullable().optional(), metadata: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
+    const input = z.object({ status: z.enum(["pending","requested","confirmed","completed","cancelled"]).optional(), startsAt: z.string().datetime().optional(), endsAt: z.string().datetime().nullable().optional(), metadata: z.record(z.string(), z.unknown()).optional() }).parse(request.body);
+    if(input.status)assertTransition("Booking",targetBooking.rows[0].status,input.status,BOOKING_TRANSITIONS);
+    if(input.startsAt||Object.prototype.hasOwnProperty.call(input,"endsAt")){
+      await assertBookingAvailability({
+        tenantId:params.tenantId,businessId:targetBooking.rows[0].business_id,collectionItemId:targetBooking.rows[0].collection_item_id,
+        startsAt:input.startsAt??targetBooking.rows[0].starts_at.toISOString(),
+        endsAt:Object.prototype.hasOwnProperty.call(input,"endsAt")?input.endsAt:targetBooking.rows[0].ends_at?.toISOString()??null,
+        excludeId:params.bookingId
+      });
+    }
     const row = await query(`UPDATE bookings SET status=COALESCE($3,status),starts_at=COALESCE($4,starts_at),ends_at=CASE WHEN $5::boolean THEN $6::timestamptz ELSE ends_at END,metadata=CASE WHEN $7::jsonb IS NULL THEN metadata ELSE metadata||$7::jsonb END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`, [params.bookingId, params.tenantId, input.status ?? null, input.startsAt ?? null, Object.prototype.hasOwnProperty.call(input, "endsAt"), input.endsAt ?? null, input.metadata ? JSON.stringify(input.metadata) : null]);
     if (!row.rows[0]) throw new ApiError(404, "BOOKING_NOT_FOUND", "Booking not found.");
     await audit({ actorUserId: auth.userId, actorType: auth.internal ? "service" : "user", tenantId: params.tenantId, businessId: row.rows[0].business_id, action: "BOOKING_UPDATED", resourceType: "booking", resourceId: params.bookingId, safeDiff: input, request });
@@ -171,6 +203,24 @@ export async function actionRoutes(app: FastifyInstance) {
     });
     await audit({ actorUserId: auth.userId, actorType: auth.internal ? "service" : "user", tenantId, businessId: input.businessId, action: "LEAD_CREATED", resourceType: "lead", resourceId: (result as any).lead.id, request });
     reply.code(201).send(result);
+  });
+
+  app.patch("/v1/tenants/:tenantId/leads/:leadId", async (request, reply) => {
+    const params=z.object({tenantId:z.string().uuid(),leadId:z.string().uuid()}).parse(request.params);
+    const auth=await internalOrTenant(request,params.tenantId);
+    const current=await query<any>("SELECT * FROM leads WHERE id=$1 AND tenant_id=$2",[params.leadId,params.tenantId]);
+    if(!current.rows[0])throw new ApiError(404,"LEAD_NOT_FOUND","Lead not found.");
+    if(!auth.internal)await requireBusinessAccess(request,params.tenantId,current.rows[0].business_id,["OWNER","ADMIN","STAFF"]);
+    const input=z.object({stage:z.enum(["new","qualified","contacted","proposal","won","lost"]).optional(),assignedUserId:z.string().uuid().nullable().optional(),interest:z.string().max(5000).nullable().optional(),metadata:z.record(z.string(),z.unknown()).optional()}).parse(request.body);
+    if(input.assignedUserId){
+      const member=await query("SELECT 1 FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 AND status='active'",[params.tenantId,input.assignedUserId]);
+      if(!member.rows[0])throw new ApiError(400,"ASSIGNEE_INVALID","Lead assignee must be an active tenant member.");
+    }
+    const row=await query<any>(`UPDATE leads SET stage=COALESCE($3,stage),assigned_user_id=CASE WHEN $4::boolean THEN $5::uuid ELSE assigned_user_id END,
+      interest=CASE WHEN $6::boolean THEN $7 ELSE interest END,metadata=CASE WHEN $8::jsonb IS NULL THEN metadata ELSE metadata||$8::jsonb END,updated_at=now()
+      WHERE id=$1 AND tenant_id=$2 RETURNING *`,[params.leadId,params.tenantId,input.stage??null,Object.prototype.hasOwnProperty.call(input,"assignedUserId"),input.assignedUserId??null,Object.prototype.hasOwnProperty.call(input,"interest"),input.interest??null,input.metadata?JSON.stringify(input.metadata):null]);
+    await audit({actorUserId:auth.userId,actorType:auth.internal?"service":"user",tenantId:params.tenantId,businessId:current.rows[0].business_id,action:"LEAD_UPDATED",resourceType:"lead",resourceId:params.leadId,safeDiff:input,request});
+    reply.send({lead:row.rows[0]});
   });
 
   app.get("/v1/tenants/:tenantId/quotes", async (request, reply) => {
