@@ -58,19 +58,19 @@ This file is the delivery checklist. Runtime coding starts only after the docume
 
 ## Phase 2 — Authentication, tenancy, and RBAC
 
-- [ ] Implement `users`.
-- [ ] Implement signup.
-- [ ] Email verification.
-- [ ] Signin/signout.
-- [ ] Password reset/change.
-- [ ] Session storage/revocation.
-- [ ] Login abuse rate limiting.
-- [ ] Implement `tenants`.
-- [ ] Implement memberships/invitations.
-- [ ] Roles: OWNER/ADMIN/STAFF/VIEWER.
-- [ ] Business-level membership restriction support.
-- [ ] Server-side permission middleware/policies.
-- [ ] Platform admin identities/roles separated from tenant roles.
+- [x] Implement `users`.
+- [x] Implement signup.
+- [x] Email verification.
+- [x] Signin/signout.
+- [x] Password reset/change.
+- [x] Session storage/revocation.
+- [x] Login abuse rate limiting.
+- [x] Implement `tenants`.
+- [x] Implement memberships/invitations.
+- [x] Roles: OWNER/ADMIN/STAFF/VIEWER.
+- [x] Business-level membership restriction support.
+- [x] Server-side permission middleware/policies.
+- [x] Platform admin identities/roles separated from tenant roles.
 - [ ] Super-admin stronger session/MFA policy.
 - [ ] Security event logging.
 - [ ] Tenant-isolation tests.

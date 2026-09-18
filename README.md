@@ -4,7 +4,7 @@ This repository is the target SaaS application for a multi-tenant, configurable 
 
 ## Current status
 
-The repository is intentionally in a **documentation-first planning phase**. The existing `customer-panel` and `super-admin-panel` are application shells. No runtime implementation should begin until the architecture, data model, security boundaries, integration contracts, and implementation phases in `docs/` are accepted.
+The repository is in **active implementation**. Architecture and integration contracts are version-controlled in `docs/`; the runtime foundation now includes a TypeScript workspace, Fastify API, PostgreSQL/Drizzle migrations, Redis integration, worker scaffolding, Better Auth authentication, tenancy/RBAC foundations, health checks, and CI. The Customer Panel and Super Admin Panel remain early application shells and are implemented phase-by-phase against the documented contracts.
 
 ## Existing infrastructure assumption
 
@@ -42,6 +42,6 @@ Start with [`docs/README.md`](docs/README.md) and [`docs/00_MASTER_PLAN.md`](doc
 
 The documentation covers system architecture, database/domain design, authentication and multi-tenancy, both web applications, dynamic business data, messaging/media, AI agents and training, n8n workflow artifacts, Redis/queues/storage, analytics and limits, security, API/event contracts, deployment, testing, migration, and the complete implementation roadmap.
 
-## Documentation-first rule
+## Implementation rule
 
-Until the planning phase is closed, changes should be limited to documentation unless an implementation task is explicitly approved. Future implementation must treat the specs in `docs/` as the contract and update the specs whenever a design decision changes.
+Runtime implementation is authorized. Treat the specs in `docs/` as the contract, update documentation in the same change set when implementation decisions change, and only mark roadmap tasks complete after code/tests exist and CI passes.
