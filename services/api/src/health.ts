@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { AppConfig } from "@n8nauto/config";
 import type { Database } from "./db/client.js";
-import type Redis from "ioredis";
+import type { Redis } from "ioredis";
 import { checkMediaStorage } from "./infra/media-storage.js";
 
 async function timed(check: () => Promise<void>) {

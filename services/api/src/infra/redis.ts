@@ -1,4 +1,4 @@
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import type { AppConfig } from "@n8nauto/config";
 import { redisNamespace } from "@n8nauto/config";
 

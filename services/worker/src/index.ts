@@ -1,4 +1,4 @@
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { loadConfig, redisNamespace } from "@n8nauto/config";
 
 const config = loadConfig();

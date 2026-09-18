@@ -15,7 +15,9 @@
     "test": "npm run test --workspaces --if-present",
     "validate:docs": "node scripts/validate-docs.mjs",
     "validate:workflows": "node scripts/validate-workflows.mjs",
-    "ci": "npm run validate:docs && npm run validate:workflows && npm run lint && npm run typecheck && npm test && npm run build"
+    "ci": "npm run validate:docs && npm run validate:workflows && npm run lint && npm run typecheck && npm test && npm run build",
+    "prelint": "npm run build -w @n8nauto/config && npm run build -w @n8nauto/contracts",
+    "pretypecheck": "npm run build -w @n8nauto/config && npm run build -w @n8nauto/contracts"
   },
   "engines": {
     "node": ">=22"
