@@ -11,7 +11,7 @@ import {
 } from "@n8n-automation/core";
 import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
 import { ApiError, requestId } from "../lib.js";
-import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
+import { assertMonthlyAiCostBudget, assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -178,7 +178,7 @@ async function multimodalContext(context: any) {
 
 async function resolveModels(tenantId: string, businessId: string, agentId: string | null, channelId: string, taskKey: string) {
   const result = await query<any>(`
-    SELECT m.id,m.model,m.parameters,p.provider,p.encrypted_api_key,p.base_url,p.id AS provider_connection_id
+    SELECT m.id,m.model,m.parameters,p.provider,p.encrypted_api_key,p.base_url,p.id AS provider_connection_id,p.ownership_mode
     FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id
     WHERE m.tenant_id=$1 AND m.active=true AND p.status='active'
       AND m.task_key=$5
@@ -240,6 +240,7 @@ export async function internalRoutes(app: FastifyInstance) {
     const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText);
     const modelCandidates = await resolveModels(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, "DEFAULT_CHAT");
     if (!modelCandidates.length) throw new ApiError(409, "AI_MODEL_MISSING", "No DEFAULT_CHAT model is configured for this agent.");
+    await assertMonthlyAiCostBudget(row.tenant_id, modelCandidates[0]?.ownership_mode);
     const system = [
       row.assembled_prompt || "You are a helpful business assistant.",
       "\n## Runtime rules\nUse only current provided business facts. If facts are missing, say they are unavailable. Never invent prices, stock, booking availability, or policy. Only request/perform capabilities listed below.",
