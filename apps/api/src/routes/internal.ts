@@ -345,6 +345,7 @@ export async function internalRoutes(app: FastifyInstance) {
     let i = 0;
     for (const message of input.messages) {
       const jobId = `outbound:${logicalResponseId}:${i++}`;
+      const priorityMap={HUMAN:1,TRANSACTIONAL:2,CUSTOMER_ACTIVE:3,NORMAL:5,FOLLOWUP:8} as const;
       await enqueue(QUEUES.outbound, {
         jobId,
         jobType: "SEND_MESSAGE",
@@ -356,7 +357,7 @@ export async function internalRoutes(app: FastifyInstance) {
         idempotencyKey: jobId,
         createdAt: new Date().toISOString(),
         payload: { logicalResponseId, priority: input.priority, senderType: input.senderType, message },
-      });
+      }, { priority: priorityMap[input.priority] });
     }
     reply.code(202).send({ ok: true, logicalResponseId, queued: input.messages.length });
   });
