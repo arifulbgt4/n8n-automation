@@ -99,9 +99,9 @@ if(!apply){
       staging:"All workflows are created/updated before any activation occurs.",
       activeUpdate:"Changed active canonical workflows are refused to avoid in-place production mutation.",
       activationRollback:"Workflows activated by this command are deactivated if a later activation fails.",
-      conflictRollback:"Conflicting active SaaS webhooks deactivated during cutover are reactivated if activation fails."
+      conflictRollback:"Stale or conflicting active SaaS workflows deactivated during cutover are reactivated if activation fails."
     },
-    next:"Set N8N_API_URL and N8N_API_KEY, then run with --apply. Add --activate only after validation."
+    next:"Set N8N_API_URL and N8N_API_KEY, then run with --apply. Add --activate only after validation. Use --deactivate-conflicts for a reviewed cutover from an older active bundle."
   },null,2));
   process.exit(0);
 }
@@ -147,22 +147,32 @@ try{
       activeFull.push(candidate.nodes?candidate:await getWorkflow(candidate.id));
     }
 
-    const conflicts=[];
+    const webhookConflicts=[];
     for(const target of required){
       for(const signature of target.signatures){
         for(const candidate of activeFull){
           if(webhookSignatures(candidate).includes(signature)){
-            conflicts.push({target,conflict:candidate,signature});
+            webhookConflicts.push({target,conflict:candidate,signature});
           }
         }
       }
     }
-    if(conflicts.length && !deactivateConflicts){
-      throw new Error(`Active n8n trigger conflicts detected: ${conflicts.map((x)=>`${x.signature} -> ${x.conflict.name}#${x.conflict.id}`).join(", ")}. Re-run with --deactivate-conflicts only after reviewing the cutover.`);
+
+    // Any active managed SaaS workflow outside the desired bundle is stale during a bundle cutover.
+    // This is intentionally broader than webhook conflict detection so old follow-up/maintenance/
+    // heartbeat schedules cannot remain active and execute alongside the new bundle.
+    const staleManaged=activeFull;
+    if(staleManaged.length && !deactivateConflicts){
+      const details=staleManaged.map((workflow)=>`${workflow.name}#${workflow.id}`).join(", ");
+      const webhookDetails=webhookConflicts.length
+        ? ` Webhook conflicts: ${webhookConflicts.map((x)=>`${x.signature} -> ${x.conflict.name}#${x.conflict.id}`).join(", ")}.`
+        : "";
+      throw new Error(`Active stale/conflicting SaaS workflows detected: ${details}.${webhookDetails} Re-run with --deactivate-conflicts only after reviewing the cutover.`);
     }
 
-    // Deactivate conflicting webhook owners only after the entire bundle staged successfully.
-    const uniqueConflicts=[...new Map(conflicts.map((x)=>[String(x.conflict.id),x.conflict])).values()];
+    // Deactivate all stale managed workflows only after the entire target bundle staged successfully.
+    // Rollback below restores them if target activation fails.
+    const uniqueConflicts=[...new Map(staleManaged.map((workflow)=>[String(workflow.id),workflow])).values()];
     for(const conflict of uniqueConflicts){
       await n8n(`/workflows/${encodeURIComponent(conflict.id)}/deactivate`,{method:"POST"});
       deactivatedConflicts.push(conflict);
