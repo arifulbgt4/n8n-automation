@@ -24,7 +24,7 @@ The API performs raw-body HMAC signature verification, webhook normalization, ch
 
 This boundary is mandatory because provider signatures are calculated over the original body. n8n does not act as a transparent raw-body proxy for Meta.
 
-After aggregation produces a logical conversation turn, the worker calls the n8n turn entrypoint.
+After aggregation produces a logical conversation turn, the worker calls the authenticated n8n turn entrypoint.
 
 ## 4. Final workflow topology
 
@@ -76,9 +76,13 @@ automation/n8n/
 
 Public n8n entrypoint: `POST /webhook/saas-turn`.
 
-Despite the filename retaining the original planned "Meta gateway" concept, this is **not** the raw Meta callback. It receives a verified/persisted/aggregated turn-ready event from the worker. It acknowledges quickly and forwards the event to the private inbound-conversation workflow.
+Despite the filename retaining the original planned "Meta gateway" concept, this is **not** the raw Meta callback. It receives a verified/persisted/aggregated turn-ready event from the worker. The request must include:
 
-This keeps provider ingress security in the API while preserving a stable n8n orchestration entrypoint for all Facebook, Instagram, and WhatsApp turns.
+```text
+Authorization: Bearer <INTERNAL_SERVICE_AUTH_SECRET>
+```
+
+The workflow rejects callers without the shared bearer secret, acknowledges accepted events quickly, and forwards the event to the private inbound-conversation workflow.
 
 ### 02 Inbound Conversation
 
@@ -115,6 +119,12 @@ Image/audio bytes are fetched server-side from Media Storage by the API, and tas
 ### 05 Training Pipeline
 
 Public/application entrypoint: `POST /webhook/saas-training` with an existing `trainingJobId`.
+
+This endpoint also requires:
+
+```text
+Authorization: Bearer <INTERNAL_SERVICE_AUTH_SECRET>
+```
 
 It invokes `/v1/internal/training/synthesize` to produce a versioned prompt/agent candidate. Generated candidates require the configured application review/test/publish policy. The workflow does not silently replace an active production prompt.
 
@@ -156,13 +166,15 @@ N8N_HEALTH_WEBHOOK_URL=<public n8n>/webhook/saas-health
 N8N_WORKFLOW_BUNDLE_VERSION=2.0.0
 ```
 
+The aggregation worker already supplies the bearer header when calling `N8N_TURN_WEBHOOK_URL`. Any training caller must supply the same shared bearer header.
+
 ## 8. Public and private webhooks
 
 Publicly reachable n8n paths:
 
 ```text
-POST /webhook/saas-turn
-POST /webhook/saas-training
+POST /webhook/saas-turn       # requires shared bearer secret
+POST /webhook/saas-training   # requires shared bearer secret
 GET  /webhook/saas-health
 ```
 
@@ -261,6 +273,7 @@ Then set application `N8N_*_WEBHOOK_URL` values and run the end-to-end checks.
 Before production cutover verify at minimum:
 
 - Meta verification/signature rejection/acceptance on API `/webhooks/meta`.
+- unauthenticated `saas-turn`/`saas-training` requests do not reach downstream processing.
 - duplicate inbound event idempotency.
 - text turn through 01 -> 02 -> 04 -> 03.
 - multi-image/audio turn and media readiness.
