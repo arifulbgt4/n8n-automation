@@ -1,0 +1,124 @@
+{
+  "name": "SaaS - 02 Inbound Conversation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "saas-inbound-conversation",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "12000000-0000-4000-8000-000000000001",
+      "name": "Inbound Turn Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-620, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SAAS_API_INTERNAL_URL + '/v1/internal/runtime/turn/' + ($json.body || $json).turnId}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "12000000-0000-4000-8000-000000000002",
+      "name": "Load Turn Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-340, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_INTERNAL_WEBHOOK_BASE_URL + '/webhook/saas-multimodal'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{JSON.stringify({turnId:$json.turn.id})}}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "12000000-0000-4000-8000-000000000003",
+      "name": "Multimodal Preflight",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-40, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.N8N_INTERNAL_WEBHOOK_BASE_URL + '/webhook/saas-agent-runtime'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{JSON.stringify({turnId:$('Load Turn Context').item.json.turn.id})}}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "12000000-0000-4000-8000-000000000004",
+      "name": "Run Agent Runtime",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Inbound Turn Webhook": {
+      "main": [[{"node": "Load Turn Context", "type": "main", "index": 0}]]
+    },
+    "Load Turn Context": {
+      "main": [[{"node": "Multimodal Preflight", "type": "main", "index": 0}]]
+    },
+    "Multimodal Preflight": {
+      "main": [[{"node": "Run Agent Runtime", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Dhaka"
+  },
+  "versionId": "12000000-0000-4000-8000-000000000099",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
