@@ -125,7 +125,7 @@ docker compose run --rm --no-deps \
   automation-api npm run admin:create
 ```
 
-The password must be at least 12 characters and contain letters and numbers. The command marks the user verified, grants `SUPER_ADMIN`, and requires MFA enrollment.
+The password must be at least 12 characters and contain letters and numbers. The command marks the user verified and grants `SUPER_ADMIN` access. Super Admin authentication is intentionally email + password only; MFA is disabled.
 
 To intentionally reset the password for an existing SaaS Super Admin:
 
@@ -140,7 +140,7 @@ docker compose run --rm --no-deps \
   automation-api npm run admin:create
 ```
 
-Then sign in at `http://localhost:3001` and complete MFA setup/verification.
+Then sign in at `http://localhost:3001` with the configured email and password.
 
 ## 9. n8n routing
 
