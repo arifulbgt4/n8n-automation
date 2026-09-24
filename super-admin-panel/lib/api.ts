@@ -86,13 +86,3 @@ export function qs(values: Record<string, unknown>) {
   });
   return params.size ? `?${params}` : "";
 }
-
-// Legacy exports retained temporarily so older locally cached admin bundles can
-// compile during upgrade. The backend no longer registers or requires MFA.
-export async function verifyMfa(_challengeToken: string, _code: string) {
-  throw new ApiError(410, "MFA_DISABLED", "Super Admin MFA is disabled. Sign in with email and password.");
-}
-
-export async function reauthAdmin(_code: string) {
-  return { ok: true };
-}
