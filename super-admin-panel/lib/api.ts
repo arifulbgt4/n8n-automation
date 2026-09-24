@@ -26,15 +26,6 @@ export class ApiError extends Error {
   }
 }
 
-function redirectToMfaSetup<T>(): Promise<T> {
-  if (typeof window !== "undefined" && window.location.pathname !== "/mfa-setup") {
-    window.location.replace("/mfa-setup");
-  }
-  // Navigation will replace the current application tree. Keeping this promise pending
-  // prevents React from surfacing the expected MFA-setup transition as an unhandled error.
-  return new Promise<T>(() => undefined);
-}
-
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (
@@ -60,9 +51,6 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 
   if (!response.ok) {
     const error = data?.error || {};
-    if (error.code === "ADMIN_MFA_SETUP_REQUIRED") {
-      return redirectToMfaSetup<T>();
-    }
     throw new ApiError(
       response.status,
       error.code || "REQUEST_FAILED",
@@ -80,35 +68,7 @@ export async function signIn(email: string, password: string) {
     body: JSON.stringify({ email, password }),
   });
   if (result.csrfToken) setCsrf(result.csrfToken);
-  if (result.mfaSetupRequired) return redirectToMfaSetup<any>();
   return result;
-}
-
-export async function verifyMfa(challengeToken: string, code: string) {
-  const result = await api<any>("/v1/admin/auth/mfa", {
-    method: "POST",
-    body: JSON.stringify({ challengeToken, code }),
-  });
-  if (result.csrfToken) setCsrf(result.csrfToken);
-  return result;
-}
-
-export async function getMfaStatus() {
-  return api<any>("/v1/admin/mfa/status");
-}
-
-export async function startMfaSetup() {
-  return api<{ secret: string; otpauthUri: string }>("/v1/admin/mfa/setup", {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-export async function confirmMfaSetup(code: string) {
-  return api<{ ok: true; recoveryCodes: string[] }>("/v1/admin/mfa/confirm", {
-    method: "POST",
-    body: JSON.stringify({ code }),
-  });
 }
 
 export async function signOut() {
@@ -127,9 +87,12 @@ export function qs(values: Record<string, unknown>) {
   return params.size ? `?${params}` : "";
 }
 
-export async function reauthAdmin(code: string) {
-  return api<any>("/v1/admin/mfa/reauth", {
-    method: "POST",
-    body: JSON.stringify({ code }),
-  });
+// Legacy exports retained temporarily so older locally cached admin bundles can
+// compile during upgrade. The backend no longer registers or requires MFA.
+export async function verifyMfa(_challengeToken: string, _code: string) {
+  throw new ApiError(410, "MFA_DISABLED", "Super Admin MFA is disabled. Sign in with email and password.");
+}
+
+export async function reauthAdmin(_code: string) {
+  return { ok: true };
 }
