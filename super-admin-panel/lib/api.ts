@@ -1,4 +1,4 @@
-export const API_URL=(process.env.NEXT_PUBLIC_API_URL||"http://localhost:4000").replace(/\/$/,"");
+export const API_URL=(process.env.NEXT_PUBLIC_API_URL||"/api").replace(/\/$/,"");
 const CSRF_KEY="n8nauto.admin.csrf";
 export function csrf(){if(typeof window==="undefined")return null;return localStorage.getItem(CSRF_KEY)||decodeURIComponent(document.cookie.split("; ").find((x)=>x.startsWith("n8nauto_csrf="))?.split("=")[1]||"")||null}
 export function setCsrf(v:string|null){if(typeof window==="undefined")return;v?localStorage.setItem(CSRF_KEY,v):localStorage.removeItem(CSRF_KEY)}
