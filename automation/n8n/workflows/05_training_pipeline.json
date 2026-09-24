@@ -5,7 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "saas-training",
-        "responseMode": "onReceived",
+        "responseMode": "lastNode",
         "options": {}
       },
       "id": "15000000-0000-4000-8000-000000000001",
