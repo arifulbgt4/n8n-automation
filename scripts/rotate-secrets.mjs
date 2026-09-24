@@ -4,7 +4,6 @@ const targets=[
   {table:"channel_credentials",key:"id",column:"encrypted_value"},
   {table:"ai_provider_connections",key:"id",column:"encrypted_api_key"},
   {table:"tenant_media_accounts",key:"id",column:"encrypted_api_key"},
-  {table:"platform_admins",key:"user_id",column:"mfa_secret_encrypted"},
   {table:"trainer_identities",key:"id",column:"encrypted_identifier"},
 ];
 
