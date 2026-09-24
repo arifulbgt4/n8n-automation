@@ -38,12 +38,19 @@ try {
     await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", [user.rows[0].id]);
   }
   await client.query(`
-    INSERT INTO platform_admins(user_id,role,mfa_required,active)
-    VALUES ($1,'SUPER_ADMIN',true,true)
-    ON CONFLICT(user_id) DO UPDATE SET role='SUPER_ADMIN',mfa_required=true,active=true,updated_at=now()
+    INSERT INTO platform_admins(user_id,role,mfa_required,mfa_enabled,mfa_secret_encrypted,recovery_code_hashes,active)
+    VALUES ($1,'SUPER_ADMIN',false,false,NULL,'{}',true)
+    ON CONFLICT(user_id) DO UPDATE SET
+      role='SUPER_ADMIN',
+      mfa_required=false,
+      mfa_enabled=false,
+      mfa_secret_encrypted=NULL,
+      recovery_code_hashes='{}',
+      active=true,
+      updated_at=now()
   `, [user.rows[0].id]);
   await client.query("COMMIT");
-  console.log(`Super admin ready: ${email}. MFA enrollment is required on first admin session.`);
+  console.log(`Super admin ready: ${email}. Sign in with email and password.`);
 } catch (error) {
   await client.query("ROLLBACK");
   throw error;
