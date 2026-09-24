@@ -1,0 +1,65 @@
+{
+  "name": "SaaS - 03 Agent Runtime",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "saas-agent-runtime",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "13000000-0000-4000-8000-000000000001",
+      "name": "Agent Runtime Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SAAS_API_INTERNAL_URL + '/v1/internal/orchestration/turn'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{JSON.stringify({turnId:($json.body || $json).turnId})}}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "13000000-0000-4000-8000-000000000002",
+      "name": "Process Agent Turn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, 0]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Agent Runtime Webhook": {
+      "main": [[{"node": "Process Agent Turn", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Dhaka"
+  },
+  "versionId": "13000000-0000-4000-8000-000000000099",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
