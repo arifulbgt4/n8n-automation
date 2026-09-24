@@ -1,426 +1,288 @@
-# n8n automation specification
+# n8n automation specification — implemented bundle 2.0.0
 
 ## 1. Role of n8n
 
-n8n is the platform's **automation and integration orchestrator**. It coordinates provider webhooks, AI calls, scheduled flows, follow-ups, and external integrations, but it is not the SaaS database, authentication system, customer admin surface, or primary source of business truth.
+n8n is the platform's automation/orchestration runtime. It coordinates turn processing, training synthesis, follow-up schedules, heartbeat/maintenance, and service-to-service workflow sequencing. It is not the SaaS database, authentication system, customer admin surface, AI-secret store, or authoritative business-rules engine.
 
-The n8n runtime is already provisioned and operated outside this application repository. This repository does **not** install, configure, or replace n8n infrastructure. It owns the SaaS-specific n8n workflow JSON artifacts and the contracts those workflows use.
+The existing n8n runtime is operated outside this repository. This repository owns the sanitized workflow JSON artifacts under `automation/n8n/`, their manifest, deployment tooling, and the application contracts those workflows call.
 
-## 2. Database rule
+## 2. Source-of-truth boundary
 
-n8n's own database stores only n8n internal data. SaaS business data remains in `app_db`.
+PostgreSQL `app_db` is the durable SaaS source of truth. n8n's own database stores n8n internal workflow/execution state only.
 
-There is no `n8n_db <-> app_db` synchronization process.
+n8n must not mirror or directly own tenant business data. Authoritative state changes are performed by application APIs/workers with tenant authorization, validation, idempotency, audit, queueing, and transaction guarantees.
 
-n8n obtains business state through:
+## 3. Raw Meta webhook boundary
 
-1. preferred internal SaaS API/service calls for mutations and policy-sensitive reads.
-2. explicitly approved read-only PostgreSQL queries for selected internal/high-throughput cases.
-3. queue/event payloads carrying identifiers and bounded immutable facts.
-
-n8n should not directly write raw business tables except where a reviewed contract explicitly permits it.
-
-## 3. Recommended workflow decomposition
-
-Avoid a giant monolithic workflow. Use small, versioned workflows with clear ownership and shared sub-workflows/services.
-
-### A. Meta Webhook Gateway
-
-- Facebook/Instagram/WhatsApp webhook verification endpoints where required.
-- POST event intake or handoff from backend gateway.
-- signature/verification checks at the selected boundary.
-- normalization handoff.
-- fast dedupe/persist/enqueue.
-
-Heavy AI/media work must not block webhook acknowledgment.
-
-### B. Inbound Conversation Orchestrator
-
-- resolve tenant/business/channel/conversation context.
-- check tenant/channel state.
-- trainer identity vs production route.
-- HUMAN/AI mode.
-- aggregation/turn-ready coordination.
-- route to relevant agent runtime.
-
-### C. Agent Runtime Orchestrator
-
-- load active agent/version/provider configuration.
-- classify/route intent when needed.
-- request structured/vector context.
-- invoke configured AI task.
-- validate structured AI output.
-- call application action endpoints for order/booking/lead/etc.
-- build provider-neutral response plan.
-- enqueue outbound delivery.
-
-### D. Multimodal / Vision / Audio
-
-- process bounded image/screenshot batches.
-- call configured vision model.
-- produce structured search hints.
-- route to current business data.
-- process supported audio/transcription.
-- persist transcript/analysis provenance through application services.
-
-Never treat image-derived price/stock/availability as authoritative when current database data exists.
-
-### E. Training Pipeline
-
-- receive trainer/session event.
-- gather approved training context.
-- invoke prompt-synthesis model.
-- return/store candidate through application service.
-- record usage/status.
-
-Publishing remains a customer/application decision unless an explicit auto-publish policy is enabled.
-
-### F. Follow-up Scheduler/Executor
-
-- identify/receive due follow-up jobs.
-- re-check eligibility immediately before send.
-- block HUMAN/inactive/disconnected/limit/policy violations.
-- enqueue outbound delivery; never bypass queue/rate limiter.
-
-### G. Health / Maintenance
-
-- channel connection health checks.
-- AI provider connectivity checks where safe.
-- cache/config invalidation signals.
-- workflow heartbeat/version reporting.
-
-Use workers/services instead of n8n schedules where that is safer for platform housekeeping.
-
-## 4. Shared contracts
-
-Centralize reusable operations:
-
-- resolve channel/tenant/business.
-- resolve active agent/prompt/model configuration.
-- record usage.
-- emit application event.
-- create outbound response plan.
-- normalize errors.
-
-If shared behavior is safer in backend/worker code, call that service rather than duplicating logic in several n8n workflows.
-
-## 5. Webhook processing timing
+Raw Facebook/Instagram/WhatsApp callbacks terminate at the SaaS API:
 
 ```text
-Receive -> verify -> dedupe/persist/enqueue -> 2xx
+Meta -> SaaS API /webhooks/meta
 ```
 
-Do not hold provider requests open during model inference, multi-image analysis, media upload, multi-message send, vector-heavy processing, or order confirmation orchestration.
+The API performs raw-body HMAC signature verification, webhook normalization, channel/tenant resolution, deduplication, persistence, delivery-status handling, media-ingestion queueing, and aggregation queueing.
 
-## 6. Credentials
+This boundary is mandatory because provider signatures are calculated over the original body. n8n does not act as a transparent raw-body proxy for Meta.
 
-Customer BYOK credentials are not manually configured as one n8n credential per customer.
+After aggregation produces a logical conversation turn, the worker calls the n8n turn entrypoint.
 
-Preferred approach:
-
-- tenant secrets live encrypted in application secret storage/database.
-- internal services resolve/decrypt them only for approved runtime operations.
-- workflows receive task-scoped results/credentials only through approved interfaces.
-- n8n execution logs must not contain keys.
-
-Platform-level credentials may use n8n credential storage where appropriate. Media Storage admin credentials are never used by workflows. Direct media access, if approved, uses only a tenant/platform media user credential or goes through the SaaS internal media API.
-
-## 7. Dynamic model routing
-
-Task-specific model configs are stored in `app_db`. n8n resolves provider/model dynamically for tasks such as:
-
-- default chat.
-- intent classification.
-- image analysis.
-- transcription.
-- structured extraction.
-- prompt synthesis.
-- embeddings.
-
-No workflow hard-codes one provider/model as the only option.
-
-## 8. Dynamic prompts
-
-Prompts come from the active agent/prompt version resolved at runtime. n8n does not contain hidden business-specific fallback prompts.
-
-If required configuration is missing, return a clear configuration error and safe customer response/escalation rather than silently using unrelated defaults.
-
-## 9. Business actions
-
-n8n orchestrates; the application service performs authoritative validation/mutation.
+## 4. Final workflow topology
 
 ```text
-AI proposes create_order
- -> n8n calls internal order API with idempotency key
- -> application validates tenant/business/items/stock/required fields
- -> DB transaction commits
- -> application returns result
- -> n8n builds confirmation response plan
- -> outbound queue delivers
+Meta callback
+  -> API verify/normalize/dedupe/persist
+  -> Redis/worker media + aggregation
+  -> 01 Meta Turn Gateway
+       -> 02 Inbound Conversation
+            -> 04 Multimodal Preflight
+            -> 03 Agent Runtime
+                 -> internal orchestration API
+                      -> AI/RAG/multimodal
+                      -> business actions
+                      -> handoff/follow-up policy
+                      -> outbound queue
+                      -> delivery worker
+
+05 Training Pipeline
+06 Follow-up Scheduler
+07 Health and Maintenance
 ```
 
-Use the same pattern for bookings, leads, quotes, support cases, etc.
+The split is modular at the orchestration boundary while expensive/stateful behavior remains in the backend/worker layer.
 
-## 10. Outbound delivery
+## 5. Workflow source files
 
-n8n should not synchronously loop through many messages/images in the main conversation workflow.
+The final bundle is:
 
 ```text
-Response plan
- -> enqueue outbound jobs
- -> delivery worker
- -> Redis rate limiter
- -> media resolver/channel adapter
- -> provider API
+automation/n8n/
+  manifest.json
+  README.md
+  workflows/
+    01_meta_webhook_gateway.json
+    02_inbound_conversation.json
+    03_agent_runtime.json
+    04_multimodal.json
+    05_training_pipeline.json
+    06_followups.json
+    07_health_maintenance.json
 ```
 
-n8n may receive delivery-result events when later orchestration depends on them.
+`manifest.json` bundle version is `2.0.0` and API contract version is `1`.
 
-## 11. Media use
+## 6. Workflow responsibilities
 
-n8n references internal `media_asset_id`. The media/delivery layer determines whether the actual send uses:
+### 01 Meta Turn Gateway
 
-- reusable provider media ID.
-- authenticated binary content fetched from Media Storage.
-- approved public media URL.
-- fresh provider upload.
+Public n8n entrypoint: `POST /webhook/saas-turn`.
 
-Workflows must not know host filesystem paths or infrastructure admin URLs.
+Despite the filename retaining the original planned "Meta gateway" concept, this is **not** the raw Meta callback. It receives a verified/persisted/aggregated turn-ready event from the worker. It acknowledges quickly and forwards the event to the private inbound-conversation workflow.
 
-## 12. HUMAN mode
+This keeps provider ingress security in the API while preserving a stable n8n orchestration entrypoint for all Facebook, Instagram, and WhatsApp turns.
 
-Before producing or dispatching an automated reply, re-check conversation mode late enough to avoid a race with human takeover.
+### 02 Inbound Conversation
 
-Where feasible:
+Private n8n entrypoint: `POST /webhook/saas-inbound-conversation`.
 
-- acquire/consult conversation lock/version.
-- generate response.
-- verify mode/version again before enqueue/send.
-- suppress pending AI jobs after HUMAN takeover.
-
-## 13. Manual Page-owner echo detection
-
-Compare provider echo events against durable outbound message/provider IDs so bot/API echoes are ignored while a genuine manual Page-owner response may switch the conversation to HUMAN mode under customer policy.
-
-## 14. Follow-up guards
-
-Immediately before follow-up send verify:
-
-- channel active/connected.
-- tenant not suspended.
-- conversation AI-eligible.
-- not HUMAN mode.
-- no newer customer response invalidating the job.
-- provider messaging window/policy allows send.
-- plan/rate limits allow send.
-- idempotency key not already completed.
-
-## 15. Error handling
-
-Classify errors:
-
-- configuration missing/invalid.
-- authentication/reconnect required.
-- tenant suspended/limit reached.
-- provider transient/permanent.
-- AI validation/format failure.
-- application action rejected.
-- media unavailable/quota/file missing.
-- queue unavailable.
-
-Emit structured operational events with correlation IDs.
-
-## 16. Idempotency
-
-Stable identifiers include:
-
-- inbound provider event/message ID.
-- logical turn ID.
-- order/action idempotency key.
-- outbound delivery idempotency key.
-- follow-up unique key.
-- training job ID.
-
-Retries must not duplicate durable side effects.
-
-## 17. Workflow JSON artifacts
-
-The workflow source-of-record for deployment is version-controlled JSON in this repository, not an undocumented production-only n8n editor state.
-
-Planned layout:
+It loads canonical runtime context through:
 
 ```text
-automation/
-  n8n/
-    manifest.json
-    workflows/
-      01_meta_webhook_gateway.json
-      02_inbound_conversation.json
-      03_agent_runtime.json
-      04_multimodal.json
-      05_training_pipeline.json
-      06_followups.json
-      07_health_maintenance.json
-    README.md
+GET /v1/internal/runtime/turn/:turnId
 ```
 
-This directory is created during implementation when the first workflows are ready. Documentation-only planning does not require adding placeholder JSON files now.
+The API returns tenant/business/channel/conversation/turn context, messages, active agent/prompt references, collection schemas, recent history, and ready media. The workflow then runs multimodal preflight and agent runtime in sequence.
 
-## 18. Workflow bundle manifest
+### 03 Agent Runtime
 
-A manifest records the bundle version and required workflow set.
+Private n8n entrypoint: `POST /webhook/saas-agent-runtime`.
 
-Conceptual format:
-
-```json
-{
-  "bundleVersion": "1.0.0",
-  "minimumN8nVersion": "validated-version-or-range",
-  "apiContractVersion": "1",
-  "workflows": [
-    {
-      "key": "meta-webhook-gateway",
-      "file": "workflows/01_meta_webhook_gateway.json",
-      "required": true,
-      "activation": "webhook"
-    }
-  ]
-}
-```
-
-The manifest may also track required environment keys, credential aliases, migration notes, and checksums.
-
-## 19. Export sanitation
-
-Every committed workflow export must be reviewed for portability/security:
-
-- no Meta access token/API key/customer secret.
-- no Media Storage admin token.
-- no production-only hostname if configuration can be injected.
-- no customer data/sample secrets.
-- no unnecessary environment-specific credential ID dependency.
-- stable meaningful workflow/node names.
-- valid JSON.
-- version/manifest updated.
-- documentation/API contracts updated when behavior changes.
-
-Never commit n8n credential exports or n8n database data.
-
-## 20. Initial import process
-
-The n8n runtime already exists. Initial deployment is an import/configure/test/activate operation:
-
-1. export and commit sanitized workflow JSON from the validated development/staging workflow.
-2. review the Git diff and manifest version.
-3. open the target n8n runtime.
-4. import each workflow JSON using the n8n workflow import-from-file capability.
-5. keep imported workflows inactive.
-6. bind environment-specific platform/internal credentials.
-7. verify internal API/Redis/media dependencies.
-8. ensure webhook paths/schedules do not conflict with currently active workflows.
-9. execute manual/test paths and end-to-end checks.
-10. record target n8n workflow IDs + bundle version in deployment metadata.
-11. perform controlled activation/cutover.
-
-Do not activate duplicate webhook or schedule workflows while the previous bundle is still active.
-
-## 21. Update/cutover strategies
-
-### Blue/green bundle — preferred for major changes
+It invokes:
 
 ```text
-bundle A active
- -> import bundle B inactive
- -> configure/test B
- -> deactivate conflicting triggers in A
- -> activate B
- -> monitor
- -> retain A for bounded rollback window
+POST /v1/internal/orchestration/turn
 ```
 
-### In-place update
+The API remains responsible for HUMAN/AI eligibility, prompt/model routing, provider fallback, multimodal inference, current catalog/knowledge retrieval, action validation, handoff, outbound response planning, follow-up policy scheduling, and turn completion/failure state.
 
-Allowed only when deployment tooling can deterministically target the existing workflow and a backup/export of the current version exists.
+### 04 Multimodal Preflight
 
-Human-readable workflow names are not sufficient deployment identity by themselves.
+Private n8n entrypoint: `POST /webhook/saas-multimodal`.
 
-## 22. Automated deployment later
+It reloads the authoritative turn context and emits a compact media summary before agent runtime. It is deliberately a readiness/observability step rather than a credential-bearing AI pipeline.
 
-After manual import/cutover is stable, implement deployment automation using the API/CLI supported by the exact deployed n8n version.
+Image/audio bytes are fetched server-side from Media Storage by the API, and task-specific vision/transcription models are resolved dynamically there. This prevents tenant secrets and business-state rules from being duplicated into n8n.
 
-The deployer should:
+### 05 Training Pipeline
 
-- read manifest.
-- validate n8n compatibility.
-- validate required configuration/credential aliases.
-- create/update workflows deterministically.
-- keep trigger activation explicit.
-- record workflow IDs/bundle version/timestamp/result.
-- support dry-run/diff where possible.
-- avoid partial activation of conflicting webhook versions.
+Public/application entrypoint: `POST /webhook/saas-training` with an existing `trainingJobId`.
 
-Do not hard-code an n8n management API route before implementation confirms the installed n8n version/interface.
+It invokes `/v1/internal/training/synthesize` to produce a versioned prompt/agent candidate. Generated candidates require the configured application review/test/publish policy. The workflow does not silently replace an active production prompt.
 
-## 23. Workflow versioning and visibility
+### 06 Follow-up Scheduler
 
-Track expected/deployed workflow bundle version in platform deployment metadata. Super Admin should eventually show:
+Schedule: every minute.
 
-- expected bundle version.
-- deployed bundle version.
-- required workflows present/missing.
-- workflow active/inactive state.
-- last heartbeat/health.
-- recent execution failures.
-- deployment timestamp.
+It invokes `/v1/internal/orchestration/followups/sweep` with a bounded batch limit. The API atomically claims due records and queues follow-up worker jobs. Final eligibility remains a worker/application concern so HUMAN mode, new customer replies, channel state, provider windows, quotas, idempotency, and rate limits are rechecked immediately before delivery.
 
-Changing workflow contracts requires compatible API/event changes and migration notes.
+### 07 Health and Maintenance
 
-## 24. Rollback
+This workflow owns three operational paths:
 
-Rollback sequence:
+- runtime heartbeat every minute -> `/v1/internal/n8n/heartbeat`;
+- maintenance every fifteen minutes -> `/v1/internal/orchestration/maintenance`;
+- public health endpoint -> `GET /webhook/saas-health`.
 
-1. deactivate new conflicting triggers.
-2. restore/reactivate previous compatible bundle.
-3. verify application API/database compatibility.
-4. verify provider webhook health.
-5. record rollback reason/state.
+The heartbeat publishes the expected bundle/workflow manifest for Super Admin observability.
 
-Do not roll back to a workflow bundle that cannot understand the current API/database contract.
+## 7. Runtime environment
 
-## 25. Environment separation
+n8n requires:
 
-Development/staging/production must use isolated data/credentials/workflow deployment state. Never test production provider callbacks with development secrets/workflows.
+```text
+SAAS_API_INTERNAL_URL
+INTERNAL_SERVICE_AUTH_SECRET
+N8N_INTERNAL_WEBHOOK_BASE_URL
+N8N_WORKFLOW_BUNDLE_VERSION=2.0.0
+```
 
-Infrastructure endpoints come from deployment configuration, not committed JSON.
+`N8N_INTERNAL_WEBHOOK_BASE_URL` is the private base used for workflow-to-workflow calls. It should resolve over loopback/private container networking or another protected internal route and must not include a trailing slash.
 
-## 26. Testing strategy
+The application/worker uses:
 
-Workflow tests cover:
+```text
+N8N_TURN_WEBHOOK_URL=<public n8n>/webhook/saas-turn
+N8N_TRAINING_WEBHOOK_URL=<public n8n>/webhook/saas-training
+N8N_HEALTH_WEBHOOK_URL=<public n8n>/webhook/saas-health
+N8N_WORKFLOW_BUNDLE_VERSION=2.0.0
+```
 
-- multi-business routing.
-- Facebook/Instagram/WhatsApp routing.
-- trainer identity routing.
-- HUMAN mode.
-- duplicate webhook.
-- screenshot/multi-image turn.
-- missing prompt/model config.
-- provider failure/fallback policy.
-- order/booking idempotency.
-- follow-up guards.
-- media-cache stale-ID fallback.
-- Media Storage binary retrieval/quota/unavailable cases.
-- queue failure/recovery.
-- import of a fresh sanitized workflow bundle.
-- prevention of duplicate active webhook/schedule bundles.
+## 8. Public and private webhooks
 
-## 27. Acceptance criteria
+Publicly reachable n8n paths:
 
-n8n architecture is complete when:
+```text
+POST /webhook/saas-turn
+POST /webhook/saas-training
+GET  /webhook/saas-health
+```
 
-- all business state can be managed from SaaS applications without editing workflow data manually.
-- the same workflow bundle safely serves many tenants/businesses/channels dynamically.
-- n8n infrastructure installation is not duplicated in this repository.
-- Git contains sanitized reproducible workflow JSON + manifest.
-- imported workflows can be configured/tested while inactive.
-- bundle activation/rollback is controlled and observable.
-- customer/Media/AI secrets are absent from committed workflow JSON.
+Internal-only paths:
+
+```text
+POST /webhook/saas-inbound-conversation
+POST /webhook/saas-agent-runtime
+POST /webhook/saas-multimodal
+```
+
+The reverse proxy/network policy should not intentionally expose internal paths to untrusted public callers. The raw Meta path is the API `/webhooks/meta`, not an n8n webhook.
+
+## 9. AI and business-action boundary
+
+Prompts define behavior; mutable business facts remain in PostgreSQL/knowledge retrieval. n8n does not hard-code provider/model/customer prompts.
+
+The internal turn orchestrator follows this pattern:
+
+```text
+turn context
+ -> HUMAN/AI eligibility
+ -> active agent + prompt
+ -> multimodal context
+ -> current collection/RAG facts
+ -> task model selection/fallback
+ -> structured AI response
+ -> validated business actions
+ -> optional handoff
+ -> outbound response plan
+ -> queue
+ -> rate-limited delivery worker
+```
+
+For an order/booking/lead/quote/support action, the AI proposes an action but the application service validates and commits it transactionally with an idempotency key.
+
+## 10. Media rule
+
+n8n passes identifiers/context and never relies on infrastructure filesystem paths. Media binaries live in the existing Media Storage service. The API/worker resolves tenant-scoped credentials, provider media cache IDs, binary fetch/re-upload, vision/transcription, and delivery state.
+
+## 11. HUMAN mode
+
+AI generation is blocked when the conversation is not AI-eligible. Manual Page-owner echoes and staff takeover are persisted by the API and can switch the conversation to HUMAN mode. Pending/outbound automation must respect the current conversation state/version before delivery.
+
+## 12. Idempotency
+
+Stable idempotency identifiers include provider message/event IDs, logical turn IDs, business-action keys, outbound logical response IDs, follow-up IDs, and training jobs. Workflow retries must route through the application contracts rather than create raw duplicate side effects.
+
+## 13. Deployment artifacts and sanitation
+
+Committed workflow JSON must be inactive and portable. It must contain no customer secrets, Meta tokens, AI keys, Media Storage admin credentials, production-only credential IDs, database/Redis connection strings, or fixed infrastructure hostnames.
+
+The repository validator checks the manifest/file set and common forbidden-secret patterns.
+
+## 14. Deployment process
+
+Repository validation:
+
+```bash
+npm run validate:n8n
+npm run n8n:plan
+```
+
+Staged create/update:
+
+```bash
+npm run n8n:deploy
+```
+
+Controlled activation after environment configuration/testing:
+
+```bash
+npm run n8n:deploy:activate
+```
+
+The deployment script matches workflows by their exact version-controlled names, refuses ambiguous duplicates, stages changes before activation, records deployment metadata when configured, and prevents unsafe in-place mutation of active canonical workflows.
+
+## 15. Manual activation order
+
+For manual imports, activate child dependencies before the public turn entrypoint:
+
+```text
+04 Multimodal Preflight
+03 Agent Runtime
+02 Inbound Conversation
+01 Meta Turn Gateway
+05 Training Pipeline
+06 Follow-up Scheduler
+07 Health and Maintenance
+```
+
+Then set application `N8N_*_WEBHOOK_URL` values and run the end-to-end checks.
+
+## 16. Testing requirements
+
+Before production cutover verify at minimum:
+
+- Meta verification/signature rejection/acceptance on API `/webhooks/meta`.
+- duplicate inbound event idempotency.
+- text turn through 01 -> 02 -> 04 -> 03.
+- multi-image/audio turn and media readiness.
+- HUMAN-mode suppression.
+- missing agent/prompt/model failure behavior.
+- provider fallback behavior.
+- order/booking/action idempotency.
+- outbound queue/rate-limit behavior.
+- follow-up guard/cancellation behavior.
+- training candidate creation without unintended publish.
+- health endpoint and fresh heartbeat.
+- previous-bundle rollback.
+
+## 17. Rollback
+
+Deactivate workflow 01 first to stop new turn intake, then stop conflicting schedules and reactivate only a previous bundle compatible with the current API/database contract. Never leave two workflow bundles active for the same `saas-turn` webhook or follow-up schedule.
+
+## 18. Operational guide
+
+Exact per-workflow usage, environment wiring, smoke-test commands, troubleshooting, activation order, and rollback procedures are documented in:
+
+- `automation/n8n/README.md`
+- `docs/22_N8N_WORKFLOW_USAGE.md`
+
+Those documents are the operator-facing instructions for bundle `2.0.0`.
