@@ -1,0 +1,109 @@
+{
+  "name": "SaaS - 04 Multimodal Preflight",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "saas-multimodal",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "14000000-0000-4000-8000-000000000001",
+      "name": "Multimodal Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-420, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SAAS_API_INTERNAL_URL + '/v1/internal/runtime/turn/' + ($json.body || $json).turnId}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "14000000-0000-4000-8000-000000000002",
+      "name": "Load Media Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-140, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "turn-id",
+              "name": "turnId",
+              "value": "={{$json.turn.id}}",
+              "type": "string"
+            },
+            {
+              "id": "message-count",
+              "name": "messageCount",
+              "value": "={{($json.messages || []).length}}",
+              "type": "number"
+            },
+            {
+              "id": "media-count",
+              "name": "mediaCount",
+              "value": "={{($json.media || []).length}}",
+              "type": "number"
+            },
+            {
+              "id": "has-image",
+              "name": "hasImage",
+              "value": "={{($json.media || []).some(item => item.kind === 'image' || String(item.mime_type || '').startsWith('image/'))}}",
+              "type": "boolean"
+            },
+            {
+              "id": "has-audio",
+              "name": "hasAudio",
+              "value": "={{($json.media || []).some(item => item.kind === 'audio' || String(item.mime_type || '').startsWith('audio/'))}}",
+              "type": "boolean"
+            },
+            {
+              "id": "ready",
+              "name": "ready",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "14000000-0000-4000-8000-000000000003",
+      "name": "Multimodal Summary",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [160, 0]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Multimodal Webhook": {
+      "main": [[{"node": "Load Media Context", "type": "main", "index": 0}]]
+    },
+    "Load Media Context": {
+      "main": [[{"node": "Multimodal Summary", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Dhaka"
+  },
+  "versionId": "14000000-0000-4000-8000-000000000099",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
