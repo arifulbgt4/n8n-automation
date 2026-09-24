@@ -5,7 +5,6 @@ import multipart from "@fastify/multipart";
 import { assertDatabaseReady, env, redis, redisKey } from "@n8n-automation/core";
 import { ApiError, jsonError, requestId } from "./lib.js";
 import { authRoutes } from "./routes/auth.js";
-import { adminAuthRoutes } from "./routes/admin-auth.js";
 import { tenantRoutes } from "./routes/tenant.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { channelRoutes } from "./routes/channels.js";
@@ -105,7 +104,6 @@ app.get("/readyz", async (_request, reply) => {
 });
 
 await authRoutes(app);
-await adminAuthRoutes(app);
 await tenantRoutes(app);
 await invitationRoutes(app);
 await channelRoutes(app);
