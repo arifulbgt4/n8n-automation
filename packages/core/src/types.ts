@@ -10,9 +10,6 @@ export type SessionPrincipal = {
   sessionId: string;
   csrfToken: string;
   platformAdmin: boolean;
-  platformAdminMfaRequired: boolean;
-  platformAdminMfaEnabled: boolean;
-  mfaVerifiedAt: string | null;
 };
 
 export type ResponsePlanMessage =
