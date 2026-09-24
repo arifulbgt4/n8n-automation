@@ -1,22 +1,19 @@
 # Final n8n workflow usage guide
 
-This guide describes how to operate workflow bundle `2.0.0` in the existing n8n runtime. The canonical JSON artifacts live in `automation/n8n/workflows/` and are deployed according to `automation/n8n/manifest.json`.
+This is the operator guide for workflow bundle `2.0.0`. The canonical workflow JSON files are under `automation/n8n/workflows/`, and `automation/n8n/manifest.json` defines the required set.
 
-## 1. Runtime boundary
-
-The final production path is intentionally split between the SaaS API/worker and n8n:
+## Runtime architecture
 
 ```text
 Facebook / Instagram / WhatsApp
           |
           v
 SaaS API /webhooks/meta
-  raw signature verification
-  normalization + dedupe + persistence
+  raw-body HMAC verification
+  normalize + dedupe + persist
           |
           v
-Redis queues / worker
-  media ingestion + aggregation
+Redis / worker aggregation
           |
           v
 01 Meta Turn Gateway
@@ -28,117 +25,150 @@ Redis queues / worker
 04 Multimodal   03 Agent Runtime
  Preflight           |
                      v
-              internal orchestration API
+              SaaS internal orchestration
                      |
-     +---------------+----------------+
-     |               |                |
-     v               v                v
- AI/RAG        business actions   outbound queue
-                                      |
-                                      v
-                             provider delivery worker
+       AI/RAG + business actions
+                     |
+                     v
+              outbound queue/worker
+                     |
+                     v
+             provider API delivery
 ```
 
-Raw Meta callbacks never terminate at n8n. The SaaS API keeps the raw-body signature verification boundary because Meta HMAC validation must be performed against the original request body.
+Raw Meta callbacks do not go to n8n. Provider verification remains on the SaaS API because Meta HMAC verification requires the original request body.
 
-## 2. Workflow inventory
+## Workflow inventory and usage
 
-### `01_meta_webhook_gateway.json`
+### 01 — `01_meta_webhook_gateway.json`
 
-Public entrypoint: `POST /webhook/saas-turn`.
-
-The aggregation worker calls this after it has produced a durable logical conversation turn. The workflow responds quickly and passes the turn-ready payload to workflow 02 through the private n8n webhook base.
-
-Application setting:
+Entrypoint:
 
 ```text
-N8N_TURN_WEBHOOK_URL=https://<public-n8n-host>/webhook/saas-turn
+POST /webhook/saas-turn
 ```
 
-### `02_inbound_conversation.json`
+Caller: aggregation worker after a durable logical turn is ready.
 
-Private entrypoint: `POST /webhook/saas-inbound-conversation`.
+Required header:
 
-It loads the authoritative runtime context from:
+```text
+Authorization: Bearer <INTERNAL_SERVICE_AUTH_SECRET>
+```
+
+Typical body:
+
+```json
+{
+  "turnId": "<uuid>",
+  "tenantId": "<uuid>",
+  "businessId": "<uuid>",
+  "channelAccountId": "<uuid>",
+  "conversationId": "<uuid>",
+  "correlationId": "<string>"
+}
+```
+
+The workflow authenticates the caller and forwards the event to workflow 02 through the private n8n webhook base.
+
+### 02 — `02_inbound_conversation.json`
+
+Private entrypoint:
+
+```text
+POST /webhook/saas-inbound-conversation
+```
+
+It loads authoritative turn context from:
 
 ```text
 GET /v1/internal/runtime/turn/:turnId
 ```
 
-Then it runs workflow 04 followed by workflow 03. This workflow is the routing boundary between a verified/aggregated turn and the AI/business-action runtime.
+Then it runs workflow 04 and workflow 03. Normal production turns should enter through workflow 01 rather than calling this directly.
 
-### `03_agent_runtime.json`
+### 03 — `03_agent_runtime.json`
 
-Private entrypoint: `POST /webhook/saas-agent-runtime`.
+Private entrypoint:
 
-It invokes:
+```text
+POST /webhook/saas-agent-runtime
+```
+
+It calls:
 
 ```text
 POST /v1/internal/orchestration/turn
 ```
 
-The SaaS API performs AI eligibility checks, model/prompt routing, RAG/current-data lookup, multimodal inference, structured action execution, HUMAN handoff, response-plan creation, outbound enqueueing, and turn completion. n8n coordinates the operation without becoming the business-data source of truth.
+The SaaS API remains authoritative for AI eligibility, prompt/model routing, provider fallback, image/audio analysis, current catalog/RAG lookup, validated actions, HUMAN handoff, follow-up policy, outbound response planning, queueing, and turn completion.
 
-### `04_multimodal.json`
+### 04 — `04_multimodal.json`
 
-Private entrypoint: `POST /webhook/saas-multimodal`.
-
-It loads the turn context and reports message/media readiness before the agent runtime. Actual image/audio bytes and AI-provider calls stay in the API runtime, where tenant-scoped Media Storage credentials and AI keys are protected.
-
-### `05_training_pipeline.json`
-
-Public/application entrypoint: `POST /webhook/saas-training`.
-
-Expected input:
-
-```json
-{
-  "trainingJobId": "<uuid>"
-}
-```
-
-It calls `/v1/internal/training/synthesize`. The result is a candidate prompt/agent version. Review, testing, publishing, rollback, and optional guarded auto-publish remain application responsibilities.
-
-Application setting:
+Private entrypoint:
 
 ```text
-N8N_TRAINING_WEBHOOK_URL=https://<public-n8n-host>/webhook/saas-training
+POST /webhook/saas-multimodal
 ```
 
-### `06_followups.json`
+It reloads the turn and reports message/media readiness. Actual media bytes, tenant Media Storage credentials, vision/transcription models, and inference remain in the API layer.
+
+### 05 — `05_training_pipeline.json`
+
+Entrypoint:
+
+```text
+POST /webhook/saas-training
+Authorization: Bearer <INTERNAL_SERVICE_AUTH_SECRET>
+```
+
+Body:
+
+```json
+{"trainingJobId":"<uuid>"}
+```
+
+It invokes `/v1/internal/training/synthesize`. The output is a versioned prompt/agent candidate. Review, test, publish, rollback, and any guarded auto-publish policy remain application-controlled.
+
+### 06 — `06_followups.json`
 
 Schedule: every minute.
 
-It calls `/v1/internal/orchestration/followups/sweep` with a bounded batch limit. The API claims due follow-up rows and queues worker jobs. The delivery worker performs final eligibility, HUMAN-mode, policy-window, newer-message, idempotency, plan-limit, and rate-limit checks before send.
-
-### `07_health_maintenance.json`
-
-This workflow contains three paths:
-
-- one-minute runtime heartbeat -> `/v1/internal/n8n/heartbeat`;
-- fifteen-minute maintenance -> `/v1/internal/orchestration/maintenance`;
-- public health endpoint -> `GET /webhook/saas-health`.
-
-Application setting:
+It calls:
 
 ```text
-N8N_HEALTH_WEBHOOK_URL=https://<public-n8n-host>/webhook/saas-health
+POST /v1/internal/orchestration/followups/sweep
+{"limit":100}
 ```
 
-## 3. n8n runtime environment
+The API claims due jobs atomically. The worker re-checks HUMAN mode, tenant/channel state, newer inbound messages, provider windows, quotas, rate limits, and idempotency before delivery.
 
-The n8n process requires:
+### 07 — `07_health_maintenance.json`
+
+It contains three trigger paths:
 
 ```text
-SAAS_API_INTERNAL_URL=<API URL reachable from n8n>
-INTERNAL_SERVICE_AUTH_SECRET=<shared internal bearer secret>
-N8N_INTERNAL_WEBHOOK_BASE_URL=<private n8n base URL with no trailing slash>
+every 1 minute  -> /v1/internal/n8n/heartbeat
+every 15 minutes -> /v1/internal/orchestration/maintenance
+GET /webhook/saas-health -> workflow health response
+```
+
+The heartbeat reports bundle `2.0.0`, API contract `1`, runtime version, and the expected workflow manifest for Super Admin monitoring.
+
+## n8n process environment
+
+Configure on the existing n8n runtime:
+
+```text
+SAAS_API_INTERNAL_URL=<API base reachable from n8n>
+INTERNAL_SERVICE_AUTH_SECRET=<shared internal secret>
+N8N_INTERNAL_WEBHOOK_BASE_URL=<private n8n webhook base, no trailing slash>
 N8N_WORKFLOW_BUNDLE_VERSION=2.0.0
 ```
 
-`N8N_INTERNAL_WEBHOOK_BASE_URL` is specifically for workflow-to-workflow calls. It should resolve over loopback, private container/service networking, or a protected internal proxy.
+`N8N_INTERNAL_WEBHOOK_BASE_URL` is used for n8n-to-n8n workflow calls. Prefer private container networking, loopback, or a protected internal reverse-proxy path.
 
-The following paths are internal and must not be intentionally exposed to untrusted public traffic:
+Do not intentionally expose these internal webhooks to untrusted public traffic:
 
 ```text
 /webhook/saas-inbound-conversation
@@ -146,17 +176,17 @@ The following paths are internal and must not be intentionally exposed to untrus
 /webhook/saas-multimodal
 ```
 
-Only these n8n paths need public reachability:
+Publicly reachable n8n endpoints are:
 
 ```text
-POST /webhook/saas-turn
-POST /webhook/saas-training
+POST /webhook/saas-turn       # bearer-authenticated
+POST /webhook/saas-training   # bearer-authenticated
 GET  /webhook/saas-health
 ```
 
-The Meta callback itself remains the SaaS API `/webhooks/meta` URL.
+The Meta callback is the SaaS API `/webhooks/meta` endpoint, not an n8n endpoint.
 
-## 4. Application/worker environment
+## Application/worker environment
 
 Configure:
 
@@ -167,23 +197,23 @@ N8N_HEALTH_WEBHOOK_URL=https://<public-n8n-host>/webhook/saas-health
 N8N_WORKFLOW_BUNDLE_VERSION=2.0.0
 ```
 
-The worker falls back to direct internal orchestration when the turn webhook is intentionally absent in development; production should use the n8n entrypoint when this bundle is the selected orchestration mode.
+The existing aggregation worker already sends the shared bearer header when it invokes `N8N_TURN_WEBHOOK_URL`. Any future training caller must do the same for `N8N_TRAINING_WEBHOOK_URL`.
 
-## 5. Automated deployment
+## Automated deployment
 
-Validate the committed bundle first:
+Validate before touching n8n:
 
 ```bash
 npm run validate:n8n
 npm run n8n:plan
 ```
 
-For deployment, supply the n8n Public API management values:
+Configure deployment management credentials:
 
 ```bash
 export N8N_API_URL="https://<n8n-host>"
-export N8N_API_KEY="<api-key>"
-export SAAS_API_INTERNAL_URL="https://<api-host-reachable-from-deployer>"
+export N8N_API_KEY="<n8n-api-key>"
+export SAAS_API_INTERNAL_URL="https://<api-host>"
 export INTERNAL_SERVICE_AUTH_SECRET="<shared-secret>"
 ```
 
@@ -193,100 +223,94 @@ Stage workflows inactive:
 npm run n8n:deploy
 ```
 
-After the n8n process environment is configured and staging tests pass:
+After the n8n process environment and staging checks are complete:
 
 ```bash
 npm run n8n:deploy:activate
 ```
 
-Do not keep an older workflow bundle active if it owns the same public webhook or schedule responsibility.
+Do not leave an older bundle active if it owns the same webhook or scheduler responsibility.
 
-## 6. Manual import and activation
+## Manual import
 
-If the n8n API deployment script is not used:
+If importing through the n8n UI, import all seven JSON files while inactive. Configure the n8n environment, then activate in this dependency-safe order:
 
-1. Import all seven files from `automation/n8n/workflows/`.
-2. Keep every imported workflow inactive while configuring the environment.
-3. Verify n8n can reach `SAAS_API_INTERNAL_URL`.
-4. Verify `N8N_INTERNAL_WEBHOOK_BASE_URL` resolves privately from the n8n process.
-5. Activate workflow 04.
-6. Activate workflow 03.
-7. Activate workflow 02.
-8. Activate workflow 01.
-9. Activate workflow 05.
-10. Activate workflow 06.
-11. Activate workflow 07.
-12. Set the application's three `N8N_*_WEBHOOK_URL` values.
-13. Restart/reload services if environment variables are loaded only at process start.
+```text
+04 Multimodal Preflight
+03 Agent Runtime
+02 Inbound Conversation
+01 Meta Turn Gateway
+05 Training Pipeline
+06 Follow-up Scheduler
+07 Health and Maintenance
+```
 
-The child-first order ensures the public turn gateway cannot receive traffic before its private downstream workflows exist and are active.
+After activation, configure the application `N8N_*_WEBHOOK_URL` values and restart/reload services if environment variables are read only at process start.
 
-## 7. Required end-to-end checks
+## Smoke tests
 
-### Health
+Health:
 
 ```bash
 curl -fsS "https://<public-n8n-host>/webhook/saas-health"
 ```
 
-Expected bundle: `2.0.0` and API contract `1`.
-
-### Normal text turn
-
-Use an existing staged `conversation_turns.id`:
+Turn test using an existing staging `conversation_turns.id`:
 
 ```bash
 curl -X POST "https://<public-n8n-host>/webhook/saas-turn" \
-  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $INTERNAL_SERVICE_AUTH_SECRET" \
+  -H 'Content-Type: application/json' \
   -d '{"turnId":"<existing-turn-uuid>"}'
 ```
 
-Verify the workflow chain reaches workflow 03, the turn moves to processed/failed deterministically, and any outbound response enters the normal delivery queue.
+Training test using an existing training job:
 
-### Multimodal turn
+```bash
+curl -X POST "https://<public-n8n-host>/webhook/saas-training" \
+  -H "Authorization: Bearer $INTERNAL_SERVICE_AUTH_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"trainingJobId":"<existing-training-job-uuid>"}'
+```
 
-Send a real staged image or audio message through the configured Meta test channel. Verify media ingestion completes, workflow 04 reports media, workflow 03 processes the turn, and model usage is recorded.
+Use real staging records, not random UUIDs.
 
-### Business action
+## End-to-end acceptance checks
 
-Exercise at least one enabled action such as order, booking, lead, quote, or support. Retry the same logical turn/action and verify the idempotency key prevents duplicate durable side effects.
+Before production cutover verify all of the following:
 
-### HUMAN mode
+- Meta GET verification and POST signature validation succeed on API `/webhooks/meta`.
+- Missing/wrong bearer token cannot reach workflow 01 or 05 downstream processing.
+- a text-only turn traverses 01 -> 02 -> 04 -> 03.
+- image/audio media is ingested before agent processing and multimodal inference succeeds.
+- HUMAN/PAUSED/closed conversations do not receive AI replies.
+- active agent, prompt, and model selection/fallback behave correctly.
+- an order/booking/lead/quote/support action is idempotent on retry.
+- outbound delivery enters the normal queue and obeys rate limits.
+- a new customer message cancels/suppresses an obsolete follow-up.
+- training generates a candidate without unintended active-prompt replacement.
+- workflow 07 heartbeat is fresh in Super Admin.
+- the health endpoint reports bundle `2.0.0`.
 
-Put the conversation in HUMAN mode and verify workflow 03/API refuses AI response generation rather than sending an automated reply.
+## Troubleshooting
 
-### Training
-
-Use an existing training job and confirm a candidate is produced without automatically replacing the active prompt unless an explicitly approved auto-publish policy allows it.
-
-### Follow-up
-
-Create a due follow-up, confirm workflow 06 queues it, and verify a newer inbound customer message cancels/suppresses the pending follow-up.
-
-## 8. Operational interpretation
-
-n8n success only means orchestration steps completed. Provider delivery is asynchronous. A successful n8n execution can still be followed by a provider delivery failure, which must be inspected in message delivery state, worker logs, dead-letter queues, and analytics.
-
-Conversely, a workflow 03 failure does not justify direct database edits. Fix the missing agent/model/channel/media configuration or retry the idempotent turn through the supported API/workflow path.
-
-## 9. Troubleshooting map
-
-| Symptom | Check first |
+| Symptom | Check |
 | --- | --- |
-| `saas-turn` succeeds but no downstream execution | `N8N_INTERNAL_WEBHOOK_BASE_URL`, workflow 02 activation |
-| workflow 02 cannot load turn | `SAAS_API_INTERNAL_URL`, internal secret, actual `turnId` |
-| workflow 04 has zero media for an image turn | media-ingestion worker/status and Media Storage mapping |
-| workflow 03 returns `CONVERSATION_NOT_AI_ELIGIBLE` | HUMAN/PAUSED/closed conversation state |
-| workflow 03 returns agent/model config error | active agent, active prompt version, task model config |
-| no outbound provider message | outbound queue, limiter, channel adapter, provider token/status |
-| follow-up duplicates | duplicate active scheduler/bundle or idempotency/queue diagnosis |
-| heartbeat stale | workflow 07 activation, API reachability, internal secret |
-| health says wrong version | n8n `N8N_WORKFLOW_BUNDLE_VERSION` environment and process restart |
+| Turn stops at unauthorized caller | Bearer header and shared secret parity between worker/app and n8n |
+| Workflow 01 cannot reach workflow 02 | `N8N_INTERNAL_WEBHOOK_BASE_URL`, workflow 02 activation, internal routing |
+| Workflow 02 cannot load turn | `SAAS_API_INTERNAL_URL`, internal secret, real `turnId` |
+| Workflow 04 has no media | media-ingestion worker/status and Media Storage mapping |
+| `CONVERSATION_NOT_AI_ELIGIBLE` | HUMAN/PAUSED/closed conversation state |
+| Agent/model configuration error | active agent, active prompt, task model config |
+| Orchestration succeeds but no customer message | outbound queue, rate limiter, adapter/provider status, dead-letter jobs |
+| Follow-up duplicates | duplicate active bundle/scheduler and idempotency state |
+| Heartbeat stale | workflow 07 activation, API reachability, shared secret |
+| Wrong health bundle version | n8n `N8N_WORKFLOW_BUNDLE_VERSION` and process restart |
 
-## 10. Rollback
+## Rollback
 
-Deactivate workflow 01 first to stop accepting new turn traffic. Then stop conflicting schedules, reactivate the previous API-compatible bundle, and verify a real staged turn, outbound delivery, heartbeat, and follow-up behavior. Never leave two bundles active for the same `saas-turn` webhook or follow-up schedule.
+Deactivate workflow 01 first to stop new turn intake. Then disable conflicting scheduled workflows, drain or safely handle already queued jobs, reactivate only a previous bundle compatible with the current API/database contract, and verify a real turn, outbound delivery, follow-up path, and heartbeat. Never keep two production bundles active for the same `saas-turn` webhook or follow-up schedule.
 
-## 11. Source-of-record rule
+## Source-of-record rule
 
-Production editor changes are not canonical until exported, sanitized, reviewed, and committed. No committed workflow may contain customer tokens, AI keys, Meta credentials, Media Storage admin credentials, production-only credential IDs, or hard-coded infrastructure hostnames.
+Production editor changes are not canonical until exported, sanitized, reviewed, and committed. Workflow JSON must never contain customer tokens, AI keys, Meta credentials, Media Storage admin secrets, n8n credential exports, production-only credential IDs, or hard-coded infrastructure hostnames.
