@@ -12,7 +12,48 @@
       "name": "Multimodal Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [-420, 0]
+      "position": [-720, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "14000000-0000-4000-8000-000000000010",
+              "leftValue": "={{$json.headers?.authorization || $json.headers?.Authorization || ''}}",
+              "rightValue": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "14000000-0000-4000-8000-000000000004",
+      "name": "Authorize Internal Caller",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-470, 0]
+    },
+    {
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "Unauthorized multimodal workflow call"
+      },
+      "id": "14000000-0000-4000-8000-000000000005",
+      "name": "Reject Unauthorized Caller",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [-220, 180]
     },
     {
       "parameters": {
@@ -34,7 +75,7 @@
       "name": "Load Media Context",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-140, 0]
+      "position": [-220, -80]
     },
     {
       "parameters": {
@@ -84,13 +125,19 @@
       "name": "Multimodal Summary",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [160, 0]
+      "position": [80, -80]
     }
   ],
   "pinData": {},
   "connections": {
     "Multimodal Webhook": {
-      "main": [[{"node": "Load Media Context", "type": "main", "index": 0}]]
+      "main": [[{"node": "Authorize Internal Caller", "type": "main", "index": 0}]]
+    },
+    "Authorize Internal Caller": {
+      "main": [
+        [{"node": "Load Media Context", "type": "main", "index": 0}],
+        [{"node": "Reject Unauthorized Caller", "type": "main", "index": 0}]
+      ]
     },
     "Load Media Context": {
       "main": [[{"node": "Multimodal Summary", "type": "main", "index": 0}]]
@@ -101,7 +148,7 @@
     "executionOrder": "v1",
     "timezone": "Asia/Dhaka"
   },
-  "versionId": "14000000-0000-4000-8000-000000000099",
+  "versionId": "14000000-0000-4000-8000-000000000199",
   "meta": {
     "templateCredsSetupCompleted": false
   },
