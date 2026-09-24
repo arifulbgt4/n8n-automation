@@ -73,10 +73,6 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
     sessionId: row.session_id,
     csrfToken: row.csrf_token,
     platformAdmin: row.platform_admin,
-    // Legacy fields remain in SessionPrincipal for schema/API compatibility, but MFA is disabled.
-    platformAdminMfaRequired: false,
-    platformAdminMfaEnabled: false,
-    mfaVerifiedAt: null,
   };
 }
 
@@ -94,7 +90,7 @@ export async function requirePlatformAdmin(request: FastifyRequest): Promise<Ses
 }
 
 // Kept as a compatibility alias for privileged routes. Password-authenticated
-// Super Admin sessions are sufficient; there is no secondary MFA re-auth gate.
+// Super Admin sessions are sufficient; there is no secondary re-auth gate.
 export async function requireRecentPlatformAdmin(request: FastifyRequest, _maxAgeMinutes = 15): Promise<SessionPrincipal> {
   return requirePlatformAdmin(request);
 }
