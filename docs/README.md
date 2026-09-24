@@ -25,6 +25,8 @@ This directory is the implementation contract for the n8n Automation SaaS.
 19. [`18_IMPLEMENTATION_STATUS.md`](18_IMPLEMENTATION_STATUS.md) — implemented repository state, automated verification, and production/environment activation gates.
 20. [`19_OPERATIONAL_RUNBOOK.md`](19_OPERATIONAL_RUNBOOK.md) — incident diagnosis, queue/provider recovery, n8n rollback, Redis-loss recovery, backup objectives, and restore exercise.
 21. [`20_LOCAL_DEVELOPMENT.md`](20_LOCAL_DEVELOPMENT.md) — complete local environment setup, startup workflow, migrations, integrations, CI parity, reset procedures, and troubleshooting.
+22. [`21_VPS_API_LOCAL_PANELS.md`](21_VPS_API_LOCAL_PANELS.md) — running the API on the VPS while using customer/admin panels locally.
+23. [`22_N8N_WORKFLOW_USAGE.md`](22_N8N_WORKFLOW_USAGE.md) — final workflow bundle `2.0.0`, per-workflow usage, environment wiring, activation order, smoke tests, troubleshooting, and rollback.
 
 Contributor workflow and engineering standards are documented in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
@@ -45,6 +47,7 @@ The target platform has the following non-negotiable architecture decisions unle
 - Multi-business, multi-channel, shared-catalog, and channel-specific override scenarios must all be supported.
 - Dynamic products/services/custom datasets are built through controlled schema definitions and JSONB data, not arbitrary customer-created PostgreSQL tables.
 - n8n is an orchestration engine, not the primary business-data store.
+- Raw Meta callbacks terminate at the SaaS API for signature verification; n8n receives only verified, persisted, turn-ready orchestration events.
 
 ## Documentation change rule
 
