@@ -1,43 +1,67 @@
 {
-  "bundleVersion": "1.0.0",
+  "bundleVersion": "2.0.0",
   "apiContractVersion": "1",
   "minimumN8nVersion": "1.100.0",
+  "architecture": "modular-thin-orchestrator",
+  "metaIngress": "SaaS API /webhooks/meta performs provider verification, normalization, deduplication and queueing before n8n receives a turn-ready event.",
+  "requiredEnvironment": [
+    "SAAS_API_INTERNAL_URL",
+    "INTERNAL_SERVICE_AUTH_SECRET",
+    "N8N_INTERNAL_WEBHOOK_BASE_URL",
+    "N8N_WORKFLOW_BUNDLE_VERSION"
+  ],
+  "publicWebhooks": {
+    "turn": "saas-turn",
+    "training": "saas-training",
+    "health": "saas-health"
+  },
+  "internalWebhooks": {
+    "inboundConversation": "saas-inbound-conversation",
+    "agentRuntime": "saas-agent-runtime",
+    "multimodal": "saas-multimodal"
+  },
   "workflows": [
     {
-      "key": "turn",
-      "file": "workflows/01_turn_orchestrator.json",
+      "key": "meta-gateway",
+      "file": "workflows/01_meta_webhook_gateway.json",
       "required": true,
       "trigger": "webhook"
     },
     {
+      "key": "inbound-conversation",
+      "file": "workflows/02_inbound_conversation.json",
+      "required": true,
+      "trigger": "internal-webhook"
+    },
+    {
+      "key": "agent-runtime",
+      "file": "workflows/03_agent_runtime.json",
+      "required": true,
+      "trigger": "internal-webhook"
+    },
+    {
+      "key": "multimodal",
+      "file": "workflows/04_multimodal.json",
+      "required": true,
+      "trigger": "internal-webhook"
+    },
+    {
       "key": "training",
-      "file": "workflows/02_training_orchestrator.json",
-      "required": false,
+      "file": "workflows/05_training_pipeline.json",
+      "required": true,
       "trigger": "webhook"
     },
     {
       "key": "followups",
-      "file": "workflows/03_followup_scheduler.json",
+      "file": "workflows/06_followups.json",
       "required": true,
       "trigger": "schedule"
     },
     {
-      "key": "maintenance",
-      "file": "workflows/04_maintenance.json",
+      "key": "health-maintenance",
+      "file": "workflows/07_health_maintenance.json",
       "required": true,
-      "trigger": "schedule"
-    },
-    {
-      "key": "heartbeat",
-      "file": "workflows/05_runtime_heartbeat.json",
-      "required": true,
-      "trigger": "schedule"
-    },
-    {
-      "key": "health",
-      "file": "workflows/06_health_endpoint.json",
-      "required": true,
-      "trigger": "webhook"
+      "trigger": "mixed"
     }
   ]
 }
