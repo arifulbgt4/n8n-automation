@@ -1,0 +1,174 @@
+{
+  "name": "SaaS - 07 Health and Maintenance",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "17000000-0000-4000-8000-000000000001",
+      "name": "Every Minute Heartbeat",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-500, -180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SAAS_API_INTERNAL_URL + '/v1/internal/n8n/heartbeat'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{JSON.stringify({runtimeKey:'primary',bundleVersion:$env.N8N_WORKFLOW_BUNDLE_VERSION || '2.0.0',apiContractVersion:'1',runtimeVersion:$env.N8N_VERSION || null,workflowManifest:{metaGateway:true,inboundConversation:true,agentRuntime:true,multimodal:true,training:true,followups:true,healthMaintenance:true}})}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "17000000-0000-4000-8000-000000000002",
+      "name": "Publish Runtime Heartbeat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-160, -180]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "17000000-0000-4000-8000-000000000003",
+      "name": "Every 15 Minutes Maintenance",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-500, 40]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SAAS_API_INTERNAL_URL + '/v1/internal/orchestration/maintenance'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.INTERNAL_SERVICE_AUTH_SECRET}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{JSON.stringify({})}}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "17000000-0000-4000-8000-000000000004",
+      "name": "Run Maintenance",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-160, 40]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "saas-health",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "17000000-0000-4000-8000-000000000005",
+      "name": "Health Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-500, 260]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "health-status",
+              "name": "status",
+              "value": "ok",
+              "type": "string"
+            },
+            {
+              "id": "health-bundle",
+              "name": "bundleVersion",
+              "value": "={{$env.N8N_WORKFLOW_BUNDLE_VERSION || '2.0.0'}}",
+              "type": "string"
+            },
+            {
+              "id": "health-contract",
+              "name": "apiContractVersion",
+              "value": "1",
+              "type": "string"
+            },
+            {
+              "id": "health-time",
+              "name": "timestamp",
+              "value": "={{$now.toISO()}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "17000000-0000-4000-8000-000000000006",
+      "name": "Health Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-160, 260]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every Minute Heartbeat": {
+      "main": [[{"node": "Publish Runtime Heartbeat", "type": "main", "index": 0}]]
+    },
+    "Every 15 Minutes Maintenance": {
+      "main": [[{"node": "Run Maintenance", "type": "main", "index": 0}]]
+    },
+    "Health Webhook": {
+      "main": [[{"node": "Health Response", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Dhaka"
+  },
+  "versionId": "17000000-0000-4000-8000-000000000099",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
