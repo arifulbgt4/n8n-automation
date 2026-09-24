@@ -150,7 +150,10 @@ MEDIA_ADMIN_TOKEN=
 N8N_TURN_WEBHOOK_URL=
 N8N_TRAINING_WEBHOOK_URL=
 N8N_HEALTH_WEBHOOK_URL=
-N8N_WORKFLOW_BUNDLE_VERSION=1.0.0
+N8N_WORKFLOW_BUNDLE_VERSION=2.0.0
+
+# Used only by the n8n process when the final modular bundle is enabled.
+N8N_INTERNAL_WEBHOOK_BASE_URL=
 
 META_APP_ID=
 META_OAUTH_REDIRECT_URI=http://localhost:4000/v1/channels/meta/oauth/callback
@@ -171,6 +174,8 @@ NODE_ENV=development
 ~~~
 
 Backend-required values are DATABASE_URL, REDIS_URL, APP_ENCRYPTION_KEY, and INTERNAL_SERVICE_AUTH_SECRET. APP_ENCRYPTION_KEY must be exactly 32 bytes represented as 64 hexadecimal characters. INTERNAL_SERVICE_AUTH_SECRET must be at least 24 characters.
+
+`N8N_INTERNAL_WEBHOOK_BASE_URL` is not consumed by the application schema; it is an n8n-runtime variable used by bundle `2.0.0` for private workflow-to-workflow calls.
 
 ### Environment loading behavior
 
@@ -337,7 +342,7 @@ Never use password reset/bootstrap casually against shared or production databas
 
 ## 13. Optional n8n integration
 
-Workflow source is under automation/n8n.
+Workflow source is under `automation/n8n`. Bundle `2.0.0` contains the seven final modular workflows. Read `docs/22_N8N_WORKFLOW_USAGE.md` before activating them.
 
 Repository-only validation:
 
@@ -357,13 +362,30 @@ export INTERNAL_SERVICE_AUTH_SECRET='same-secret-used-by-api'
 npm run n8n:deploy
 ~~~
 
-The deploy command creates/updates workflows while keeping activation explicit.
+On the n8n process itself also configure:
+
+~~~text
+SAAS_API_INTERNAL_URL=<API reachable from n8n>
+INTERNAL_SERVICE_AUTH_SECRET=<same shared secret>
+N8N_INTERNAL_WEBHOOK_BASE_URL=<private n8n webhook base>
+N8N_WORKFLOW_BUNDLE_VERSION=2.0.0
+~~~
 
 Only activate after checking webhook/schedule conflicts:
 
 ~~~bash
 npm run n8n:deploy:activate
 ~~~
+
+When bundle `2.0.0` is active, application/worker settings point to the public n8n endpoints:
+
+~~~text
+N8N_TURN_WEBHOOK_URL=https://<n8n-host>/webhook/saas-turn
+N8N_TRAINING_WEBHOOK_URL=https://<n8n-host>/webhook/saas-training
+N8N_HEALTH_WEBHOOK_URL=https://<n8n-host>/webhook/saas-health
+~~~
+
+`saas-turn` and `saas-training` require the shared bearer secret. Raw Meta callbacks continue to use the SaaS API `/webhooks/meta` endpoint and must not be pointed at n8n.
 
 Never commit n8n API keys, customer data, production credential IDs, or provider secrets into workflow JSON.
 
@@ -550,6 +572,14 @@ Configure MEDIA_BASE_URL and appropriate server-side credentials.
 
 Check public HTTPS reachability, exact callback URL, Graph API version, loaded app credentials, verify token, and signature configuration.
 
+### n8n turn workflow stops at authorization
+
+Ensure the worker and n8n runtime use the same `INTERNAL_SERVICE_AUTH_SECRET`. The worker sends `Authorization: Bearer <secret>` to `saas-turn`.
+
+### Internal n8n workflow returns connection refused/404
+
+Check `N8N_INTERNAL_WEBHOOK_BASE_URL`, private routing, and activation of workflows 02/03/04. It must point to the n8n webhook base, not the n8n management `/api/v1` endpoint.
+
 ### Queue jobs fail because of custom IDs
 
 Use the shared core enqueue/BullMQ job-ID helper. Keep application idempotency keys stable and do not invent raw BullMQ custom IDs independently.
@@ -569,4 +599,4 @@ During development:
 - workflow JSON remains sanitized and version controlled.
 - docs change with implementation contracts.
 
-See ../CONTRIBUTING.md for contribution and review standards.
+See `../CONTRIBUTING.md` for contribution and review standards and `22_N8N_WORKFLOW_USAGE.md` for the complete final workflow operating guide.
