@@ -2,7 +2,6 @@ import { env } from "@n8n-automation/core";
 
 export const META_PAGE_SUBSCRIBED_FIELDS = [
   "messages",
-  "messaging_postbacks",
   "message_deliveries",
   "message_reads",
   "message_echoes",
