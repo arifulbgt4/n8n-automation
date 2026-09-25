@@ -12,11 +12,23 @@ AI response generation also requires a resolvable active `DEFAULT_CHAT` model co
 
 1. Connect and test the Facebook/Instagram/WhatsApp channel.
 2. Add an AI provider connection.
-3. Add a `DEFAULT_CHAT` model route.
+3. Open Customer Panel → **AI provider models** (`/ai-models`). Select the provider, load the model catalog exposed to that provider API key, choose or manually enter a provider model ID, and save a `DEFAULT_CHAT` route. `DEFAULT_CHAT` is tested against the provider before the route is saved.
 4. Create an AI agent. Agent creation publishes an initial prompt version automatically.
 5. Open Customer Panel → **AI Channel Setup** (`/channel-ai`).
 6. Select the default agent for the channel and save.
 7. Send a new customer message and verify the conversation/outbound delivery.
+
+## Provider model discovery
+
+The model identifier is owned by the AI provider; the SaaS does not invent a model ID. The discovery page calls:
+
+```text
+GET /v1/tenants/:tenantId/ai/providers/:providerId/catalog
+```
+
+The API retrieves the available model catalog using the provider credential already stored by the SaaS. It supports OpenAI, Anthropic, Gemini, and OpenAI-compatible providers. OpenAI-compatible providers can still use a manually entered model ID when their `/models` endpoint is unavailable or incomplete.
+
+No provider API key is returned to the browser. The browser receives only model catalog metadata such as the model ID, display label, owner, or supported methods when the upstream provider supplies them.
 
 ## Assignment API
 
