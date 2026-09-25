@@ -12,8 +12,9 @@ import { channelAgentRoutes } from "./routes/channel-agent.js";
 import { collectionRoutes } from "./routes/collections.js";
 import { mediaRoutes } from "./routes/media.js";
 import { aiRoutes } from "./routes/ai.js";
-import { aiModelCatalogRoutes } from "./routes/ai-model-catalog.js";
 import { platformAiRoutes } from "./routes/platform-ai.js";
+import { platformAiCustomerGuard } from "./routes/platform-ai-customer-guard.js";
+import { aiPlanAdminRoutes } from "./routes/ai-plan-admin.js";
 import { conversationRoutes } from "./routes/conversations.js";
 import { actionRoutes } from "./routes/actions.js";
 import { knowledgeRoutes } from "./routes/knowledge.js";
@@ -106,6 +107,7 @@ app.get("/readyz", async (_request, reply) => {
   reply.send({ status: "ready" });
 });
 
+await platformAiCustomerGuard(app);
 await authRoutes(app);
 await tenantRoutes(app);
 await invitationRoutes(app);
@@ -114,8 +116,8 @@ await channelAgentRoutes(app);
 await collectionRoutes(app);
 await mediaRoutes(app);
 await aiRoutes(app);
-await aiModelCatalogRoutes(app);
 await platformAiRoutes(app);
+await aiPlanAdminRoutes(app);
 await conversationRoutes(app);
 await actionRoutes(app);
 await knowledgeRoutes(app);
