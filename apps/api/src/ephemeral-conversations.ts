@@ -97,8 +97,37 @@ async function purgeStaleConversationMedia() {
   return purgeAssets(assets.rows);
 }
 
+function hideConversationMediaFromLibrary(requestUrl: string, payload: unknown) {
+  const path = requestUrl.split("?")[0];
+  if (!/^\/v1\/tenants\/[0-9a-f-]+\/media$/i.test(path)) return payload;
+
+  const raw = Buffer.isBuffer(payload)
+    ? payload.toString("utf8")
+    : typeof payload === "string"
+      ? payload
+      : null;
+  if (!raw) return payload;
+
+  try {
+    const body = JSON.parse(raw);
+    if (!Array.isArray(body?.assets)) return payload;
+    const visible = body.assets.filter((asset: any) => asset?.metadata?.source !== "inbound_message");
+    const hiddenOnPage = body.assets.length - visible.length;
+    body.assets = visible;
+    if (typeof body.total === "number" && hiddenOnPage > 0) body.total = Math.max(0, body.total - hiddenOnPage);
+    return JSON.stringify(body);
+  } catch {
+    return payload;
+  }
+}
+
 export async function ephemeralConversationLifecycle(app: FastifyInstance) {
   let cleanupTimer: NodeJS.Timeout | null = null;
+
+  app.addHook("onSend", async (request, _reply, payload) => {
+    if (request.method !== "GET") return payload;
+    return hideConversationMediaFromLibrary(request.url, payload);
+  });
 
   app.addHook("onResponse", async (request) => {
     if (request.method !== "POST") return;
