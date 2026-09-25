@@ -14,6 +14,7 @@ import {
 } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant } from "../lib.js";
 import { assertChannelOverrideWithinPlan, assertTenantCountLimit } from "../limits.js";
+import { ensureMetaPageSubscription, type MetaPageSubscriptionResult } from "../meta-page-subscription.js";
 
 const platformSchema = z.enum(["facebook", "instagram", "whatsapp"]);
 const credentialInput = z.object({
@@ -45,7 +46,22 @@ async function credentialValue(channelId: string, type: string): Promise<string 
   return result.rows[0] ? decryptSecret(result.rows[0].encrypted_value) : null;
 }
 
-async function testMetaChannel(channel: { id: string; platform: string; external_account_id: string }): Promise<{ ok: boolean; detail: string }> {
+function metaPageIdForChannel(channel: { platform: string; external_account_id: string; settings_json?: unknown }): string | null {
+  if (channel.platform === "facebook") return channel.external_account_id;
+  if (channel.platform !== "instagram") return null;
+  const settings = channel.settings_json;
+  if (!settings || typeof settings !== "object") return null;
+  const pageId = (settings as Record<string, unknown>).facebookPageId;
+  return typeof pageId === "string" && pageId.trim() ? pageId.trim() : null;
+}
+
+type ChannelConnectionTest = {
+  ok: boolean;
+  detail: string;
+  metaSubscription?: MetaPageSubscriptionResult;
+};
+
+async function testMetaChannel(channel: { id: string; platform: string; external_account_id: string; settings_json?: unknown }): Promise<ChannelConnectionTest> {
   const accessToken = await credentialValue(channel.id, "access_token");
   if (!accessToken) return { ok: false, detail: "Access token is not configured." };
   const version = env().META_GRAPH_API_VERSION;
@@ -56,6 +72,26 @@ async function testMetaChannel(channel: { id: string; platform: string; external
     const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     const body = await response.text();
     if (!response.ok) return { ok: false, detail: `Meta returned ${response.status}: ${body.slice(0, 240)}` };
+
+    if ((channel.platform === "facebook" || channel.platform === "instagram") && env().META_APP_ID) {
+      const pageId = metaPageIdForChannel(channel);
+      if (!pageId) {
+        return {
+          ok: false,
+          detail: "Connection verified, but the linked Facebook Page ID is missing so webhook subscription cannot be verified.",
+        };
+      }
+      const metaSubscription = await ensureMetaPageSubscription(pageId, accessToken);
+      if (!metaSubscription.ok) {
+        return {
+          ok: false,
+          detail: `Connection verified, but Meta webhook subscription failed: ${metaSubscription.detail}`,
+          metaSubscription,
+        };
+      }
+      return { ok: true, detail: "Connection and Meta webhook subscription verified.", metaSubscription };
+    }
+
     return { ok: true, detail: "Connection verified." };
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : "Connection test failed." };
@@ -187,15 +223,30 @@ export async function channelRoutes(app: FastifyInstance) {
     const name = input.platform === "facebook" ? page.name : (page.instagram?.username || `${page.name} Instagram`);
     const duplicate = await query("SELECT id FROM channel_accounts WHERE platform=$1 AND external_account_id=$2",[input.platform,externalAccountId]);
     if (duplicate.rowCount) throw new ApiError(409,"CHANNEL_ALREADY_CONNECTED","This channel account is already connected.");
+
+    const metaSubscription = await ensureMetaPageSubscription(page.id, page.accessToken);
+    if (!metaSubscription.ok) {
+      throw new ApiError(502,"META_PAGE_SUBSCRIPTION_FAILED",`Unable to subscribe the selected Page to Meta webhooks: ${metaSubscription.detail}`,{
+        pageId:page.id,
+        httpStatus:metaSubscription.httpStatus ?? null,
+        providerError:metaSubscription.providerError ?? null,
+        requestedFields:metaSubscription.requestedFields,
+      });
+    }
+    const subscriptionMetadata = {
+      appId:metaSubscription.appId,
+      subscribedFields:metaSubscription.subscribedFields ?? metaSubscription.requestedFields,
+      verifiedAt:new Date().toISOString(),
+    };
     const created = await query<any>(`
       INSERT INTO channel_accounts(tenant_id,business_id,platform,name,external_account_id,connection_status,graph_api_version,settings_json)
       VALUES ($1,$2,$3,$4,$5,'connected',$6,$7::jsonb) RETURNING *
-    `, [params.tenantId,discovery.businessId,input.platform,name,externalAccountId,env().META_GRAPH_API_VERSION,JSON.stringify({connectedVia:"meta_oauth",facebookPageId:page.id})]);
+    `, [params.tenantId,discovery.businessId,input.platform,name,externalAccountId,env().META_GRAPH_API_VERSION,JSON.stringify({connectedVia:"meta_oauth",facebookPageId:page.id,metaSubscription:subscriptionMetadata})]);
     await upsertCredential(params.tenantId,created.rows[0].id,"access_token",page.accessToken);
     if (env().META_APP_SECRET) await upsertCredential(params.tenantId,created.rows[0].id,"app_secret",env().META_APP_SECRET!);
     await redis().del(key);
-    await audit({ actorUserId:principal.userId,tenantId:params.tenantId,businessId:discovery.businessId,action:"CHANNEL_CONNECTED",resourceType:"channel_account",resourceId:created.rows[0].id,safeDiff:{platform:input.platform,externalAccountId,via:"meta_oauth"},request });
-    reply.code(201).send({ channel:created.rows[0] });
+    await audit({ actorUserId:principal.userId,tenantId:params.tenantId,businessId:discovery.businessId,action:"CHANNEL_CONNECTED",resourceType:"channel_account",resourceId:created.rows[0].id,safeDiff:{platform:input.platform,externalAccountId,via:"meta_oauth",metaSubscribed:true,subscribedFields:subscriptionMetadata.subscribedFields},request });
+    reply.code(201).send({ channel:created.rows[0], metaSubscription });
   });
 
   app.get("/v1/tenants/:tenantId/channels", async (request, reply) => {
@@ -242,7 +293,7 @@ export async function channelRoutes(app: FastifyInstance) {
 
     const channel = await transaction(async (client) => {
       const created = await client.query<{
-        id: string; platform: string; external_account_id: string; [key: string]: unknown;
+        id: string; platform: string; external_account_id: string; settings_json: unknown; [key: string]: unknown;
       }>(`
         INSERT INTO channel_accounts(tenant_id,business_id,platform,name,external_account_id,public_identifier,graph_api_version,settings_json)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
@@ -256,7 +307,7 @@ export async function channelRoutes(app: FastifyInstance) {
     if (input.credentials.verifyToken) await upsertCredential(params.tenantId, channel.id, "verify_token", input.credentials.verifyToken);
     if (input.credentials.whatsappBusinessAccountId) await upsertCredential(params.tenantId, channel.id, "whatsapp_business_account_id", input.credentials.whatsappBusinessAccountId);
 
-    let test: { ok: boolean; detail: string } | undefined;
+    let test: ChannelConnectionTest | undefined;
     if (input.testConnection && input.credentials.accessToken) {
       test = await testMetaChannel(channel);
       await query("UPDATE channel_accounts SET connection_status=$2,updated_at=now() WHERE id=$1", [channel.id, test.ok ? "connected" : "degraded"]);
@@ -320,12 +371,12 @@ export async function channelRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     const principal = await requireAuth(request);
     requireCsrf(request);
-    const result = await query<{ id: string; platform: string; external_account_id: string; business_id: string }>("SELECT id,platform,external_account_id,business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId, params.tenantId]);
+    const result = await query<{ id: string; platform: string; external_account_id: string; business_id: string; settings_json: unknown }>("SELECT id,platform,external_account_id,business_id,settings_json FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId, params.tenantId]);
     if (!result.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
     await requireBusinessAccess(request, params.tenantId, result.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
     const test = await testMetaChannel(result.rows[0]);
     await query("UPDATE channel_accounts SET connection_status=$2,updated_at=now() WHERE id=$1", [params.channelId, test.ok ? "connected" : "degraded"]);
-    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: result.rows[0].business_id, action: "CHANNEL_TESTED", resourceType: "channel_account", resourceId: params.channelId, safeDiff: { ok: test.ok }, request });
+    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: result.rows[0].business_id, action: "CHANNEL_TESTED", resourceType: "channel_account", resourceId: params.channelId, safeDiff: { ok: test.ok, metaSubscribed:test.metaSubscription?.subscribed ?? null }, request });
     reply.send(test);
   });
 
@@ -357,13 +408,13 @@ export async function channelRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/channels/:channelId/reconnect", async (request, reply) => {
     const params=z.object({tenantId:z.string().uuid(),channelId:z.string().uuid()}).parse(request.params);
     const principal=await requireAuth(request);
-    const channel=await query<any>("SELECT id,platform,external_account_id,business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2",[params.channelId,params.tenantId]);
+    const channel=await query<{id:string;platform:string;external_account_id:string;business_id:string;settings_json:unknown}>("SELECT id,platform,external_account_id,business_id,settings_json FROM channel_accounts WHERE id=$1 AND tenant_id=$2",[params.channelId,params.tenantId]);
     if(!channel.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
     await requireBusinessAccess(request,params.tenantId,channel.rows[0].business_id,["OWNER","ADMIN"]);
     requireCsrf(request);
     const test=await testMetaChannel(channel.rows[0]);
     const updated=await query<any>("UPDATE channel_accounts SET active=$2,connection_status=$3,updated_at=now() WHERE id=$1 RETURNING *",[params.channelId,test.ok,test.ok?"connected":"degraded"]);
-    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:channel.rows[0].business_id,action:"CHANNEL_RECONNECT_TESTED",resourceType:"channel_account",resourceId:params.channelId,safeDiff:{ok:test.ok},request});
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:channel.rows[0].business_id,action:"CHANNEL_RECONNECT_TESTED",resourceType:"channel_account",resourceId:params.channelId,safeDiff:{ok:test.ok,metaSubscribed:test.metaSubscription?.subscribed ?? null},request});
     reply.send({channel:updated.rows[0],test});
   });
 
