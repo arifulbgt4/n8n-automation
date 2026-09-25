@@ -46,10 +46,11 @@ export async function analyticsRoutes(app: FastifyInstance) {
       `, [tenantId, q.from, q.to, q.businessId ?? null, q.channelId ?? null, scope]),
       query(`
         SELECT ca.id,ca.platform,ca.name,
-          count(m.id) FILTER (WHERE m.direction='INBOUND')::int AS inbound_messages,
-          count(m.id) FILTER (WHERE m.direction='OUTBOUND')::int AS outbound_messages,
-          count(DISTINCT m.conversation_id)::int AS conversations
-        FROM channel_accounts ca LEFT JOIN messages m ON m.channel_account_id=ca.id AND m.created_at BETWEEN $2 AND $3
+          COALESCE(SUM(ue.quantity) FILTER (WHERE ue.event_type='inbound_message'),0)::int AS inbound_messages,
+          COALESCE(SUM(ue.quantity) FILTER (WHERE ue.event_type='outbound_message'),0)::int AS outbound_messages,
+          COUNT(DISTINCT ue.conversation_id) FILTER (WHERE ue.event_type IN ('inbound_message','outbound_message'))::int AS conversations
+        FROM channel_accounts ca
+        LEFT JOIN usage_events ue ON ue.channel_account_id=ca.id AND ue.occurred_at BETWEEN $2 AND $3
         WHERE ca.tenant_id=$1 AND ($4::uuid IS NULL OR ca.business_id=$4) AND ($5::uuid IS NULL OR ca.id=$5) AND ($6::uuid[] IS NULL OR ca.business_id=ANY($6::uuid[]))
         GROUP BY ca.id,ca.platform,ca.name ORDER BY ca.name
       `, [tenantId, q.from, q.to, q.businessId ?? null, q.channelId ?? null, scope]),
