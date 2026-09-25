@@ -208,7 +208,7 @@ After the n8n runtime environment is configured and staging tests pass:
 npm run n8n:deploy:activate
 ```
 
-The deployer refuses ambiguous workflow-name matches and unsafe in-place mutation of an active canonical workflow. Activation remains an explicit phase.
+The deployer refuses ambiguous workflow-name matches and unsafe in-place mutation of an active canonical workflow. Activation remains an explicit phase. n8n-owned workflow `staticData` is intentionally excluded from source drift comparison because activation and execution may mutate it; repeated deployment of an unchanged active bundle must remain idempotent.
 
 ## Manual import activation order
 
