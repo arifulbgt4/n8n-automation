@@ -2,27 +2,19 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env, query, transaction } from "@n8n-automation/core";
 import { chat, embedding } from "../ai-provider.js";
-import { ApiError } from "../lib.js";
-import { assertMonthlyAiCostBudget } from "../limits.js";
+import { ApiError, requestId } from "../lib.js";
+import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
   if (!token || token !== env().INTERNAL_SERVICE_AUTH_SECRET) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Internal service authentication is required.");
 }
 
-async function resolveTaskModel(tenantId: string, businessId: string, agentId: string | null, taskKey: string, explicitConfigId?: string | null) {
-  const result = explicitConfigId
-    ? await query<any>(`SELECT m.*,p.provider,p.encrypted_api_key,p.base_url,p.ownership_mode FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id WHERE m.id=$1 AND m.tenant_id=$2 AND m.active=true AND p.status='active'`, [explicitConfigId, tenantId])
-    : await query<any>(`
-      SELECT m.*,p.provider,p.encrypted_api_key,p.base_url,p.ownership_mode
-      FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id
-      WHERE m.tenant_id=$1 AND m.active=true AND p.status='active' AND m.task_key=$4
-        AND (m.business_id=$2 OR m.business_id IS NULL) AND (m.agent_profile_id=$3 OR m.agent_profile_id IS NULL)
-      ORDER BY (m.agent_profile_id IS NOT NULL) DESC,(m.business_id IS NOT NULL) DESC,m.created_at DESC LIMIT 1
-    `, [tenantId, businessId, agentId, taskKey]);
-  if (!result.rows[0]) throw new ApiError(409, "AI_MODEL_MISSING", `No active ${taskKey} model configuration is available.`);
-  await assertMonthlyAiCostBudget(tenantId,result.rows[0].ownership_mode);
-  return result.rows[0];
+async function resolveTaskModel(tenantId: string, _businessId: string, _agentId: string | null, taskKey: string, _explicitConfigId?: string | null) {
+  await assertMonthlyAiAllowance(tenantId);
+  const model=await resolvePlatformModel(taskKey);
+  if (!model) throw new ApiError(409, "AI_MODEL_MISSING", `No active platform ${taskKey} model is configured.`);
+  return model;
 }
 
 function chunkText(text: string, maxChars = 3500, overlap = 400): string[] {
@@ -78,7 +70,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
     }
     const model = await resolveTaskModel(row.tenant_id, row.business_id, row.agent_profile_id, "PROMPT_SYNTHESIS", row.model_config_id);
     const system = `You are a prompt engineer for a multi-tenant business automation platform. Synthesize a production agent prompt from approved demonstrations. Preserve safety and grounding rules. Do not copy mutable product/service facts into the prompt. Return strict JSON with keys sections (object) and evaluation (object). The sections object should include core_role, tone_language, grounding, capabilities, business_process, human_handoff, restrictions, and custom_instructions.`;
-    const result = await chat(model, { model: model.model, parameters: { ...model.parameters, temperature: 0.15 } }, {
+    const result = await chat(model, { model: model.model, parameters: model.parameters ?? {} }, {
       system,
       messages: [{ role: "user", content: JSON.stringify({
         agentName: row.agent_name,
@@ -89,6 +81,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
         examples: examples.rows,
       }) }],
     });
+    await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,eventType:"training_job",unit:"job",taskKey:"PROMPT_SYNTHESIS",model,usage:result.usage,idempotencyKey:`training:${trainingJobId}`,correlationId:requestId(request)});
     let parsed: any;
     try { parsed = JSON.parse(result.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); } catch { throw new ApiError(502, "TRAINING_OUTPUT_INVALID", "Prompt synthesis model did not return valid JSON."); }
     if (!parsed.sections || typeof parsed.sections !== "object") throw new ApiError(502, "TRAINING_OUTPUT_INVALID", "Prompt synthesis output is missing sections.");
@@ -108,8 +101,6 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
         INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,sections_json,assembled_prompt,base_version_id,training_job_id)
         VALUES ($1,$2,$3,'training','candidate',$4::jsonb,$5,$6,$7) RETURNING *
       `, [row.tenant_id,row.agent_profile_id,version,JSON.stringify(parsed.sections),assembled,row.base_prompt_version_id ?? null,trainingJobId]);
-      await client.query(`INSERT INTO usage_events(tenant_id,business_id,event_type,quantity,unit,provider,model,task_key,idempotency_key,metadata)
-        VALUES ($1,$2,'training_job',1,'job',$3,$4,'PROMPT_SYNTHESIS',$5,$6::jsonb) ON CONFLICT DO NOTHING`, [row.tenant_id,row.business_id,model.provider,model.model,`training:${trainingJobId}`,JSON.stringify(result.usage)]);
       return created.rows[0];
     });
     reply.send({ candidatePromptVersionId: candidate.id, version, sections: parsed.sections, evaluation: { ...(parsed.evaluation ?? {}), validation, passed: validationPassed }, usage: result.usage });
@@ -127,11 +118,14 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
       const model = await resolveTaskModel(row.tenant_id,row.business_id,row.agent_profile_id,"EMBEDDINGS",null);
       const chunks = chunkText(row.content || "");
       if (!chunks.length) throw new ApiError(400,"KNOWLEDGE_EMPTY","Knowledge source has no indexable text.");
-      const vectors: Array<{ content: string; vector: number[]; usage: unknown }> = [];
-      for (const content of chunks) {
+      const vectors: Array<{ content: string; vector: number[]; usage: any }> = [];
+      for (let index=0;index<chunks.length;index++) {
+        if(index>0) await assertMonthlyAiAllowance(row.tenant_id);
+        const content=chunks[index];
         const embedded = await embedding(model,{model:model.model,parameters:model.parameters ?? {}},content);
         if (embedded.vector.length !== env().EMBEDDING_DIMENSIONS) throw new ApiError(400,"EMBEDDING_DIMENSION_MISMATCH",`Expected ${env().EMBEDDING_DIMENSIONS} embedding dimensions but provider returned ${embedded.vector.length}.`);
         vectors.push({ content, vector: embedded.vector, usage: embedded.usage });
+        await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,eventType:"embedding",unit:"chunk",taskKey:"EMBEDDINGS",model,usage:embedded.usage,idempotencyKey:`embedding:${input.sourceId}:${input.sourceVersion}:${index}`,correlationId:requestId(request),metadata:{sourceId:input.sourceId,sourceVersion:input.sourceVersion,chunkIndex:index}});
       }
       await transaction(async (client) => {
         await client.query("UPDATE knowledge_chunks SET active=false WHERE source_id=$1",[input.sourceId]);
@@ -141,8 +135,6 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
             VALUES ($1,$2,$3,$4,$5,$6,$7::vector,$8,$9::jsonb,true)`,[row.tenant_id,row.business_id,input.sourceId,input.sourceVersion,index,item.content,`[${item.vector.join(",")}]`,model.model,JSON.stringify({sourceTitle:row.title})]);
         }
         await client.query("UPDATE knowledge_sources SET status='ready',updated_at=now() WHERE id=$1 AND source_version=$2",[input.sourceId,input.sourceVersion]);
-        await client.query(`INSERT INTO usage_events(tenant_id,business_id,event_type,quantity,unit,provider,model,task_key,idempotency_key,metadata)
-          VALUES ($1,$2,'embedding', $3,'chunk',$4,$5,'EMBEDDINGS',$6,$7::jsonb) ON CONFLICT DO NOTHING`,[row.tenant_id,row.business_id,vectors.length,model.provider,model.model,`embedding:${input.sourceId}:${input.sourceVersion}`,JSON.stringify({chunks:vectors.length})]);
       });
       reply.send({ ok:true, chunks:vectors.length, sourceVersion:input.sourceVersion });
     } catch (error) {
@@ -156,6 +148,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
     const input=z.object({tenantId:z.string().uuid(),businessId:z.string().uuid(),agentProfileId:z.string().uuid().nullable().optional(),query:z.string().min(1).max(10000),limit:z.number().int().min(1).max(30).default(8)}).parse(request.body);
     const model=await resolveTaskModel(input.tenantId,input.businessId,input.agentProfileId ?? null,"EMBEDDINGS",null);
     const embedded=await embedding(model,{model:model.model,parameters:model.parameters ?? {}},input.query);
+    await recordPlatformAiUsage({tenantId:input.tenantId,businessId:input.businessId,eventType:"ai_call",unit:"call",taskKey:"EMBEDDINGS",model,usage:embedded.usage,idempotencyKey:`knowledge-search:${requestId(request)}`,correlationId:requestId(request),metadata:{operation:"knowledge_search"}});
     if(embedded.vector.length!==env().EMBEDDING_DIMENSIONS) throw new ApiError(400,"EMBEDDING_DIMENSION_MISMATCH","Embedding dimension does not match the configured vector schema.");
     const result=await query(`
       SELECT kc.id,kc.source_id,kc.content,kc.metadata,ks.title,ks.type,1-(kc.embedding <=> $4::vector) AS similarity
