@@ -1,10 +1,33 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || "/api").replace(/\/$/, "");
 
 const CSRF_STORAGE_KEY = "n8nauto.csrf";
+const CSRF_COOKIE_NAME = "n8nauto_csrf";
+
+function readCsrfCookie(): string | null {
+  if (typeof document === "undefined") return null;
+  const raw = document.cookie
+    .split("; ")
+    .find((item) => item.startsWith(`${CSRF_COOKIE_NAME}=`))
+    ?.slice(CSRF_COOKIE_NAME.length + 1);
+  if (!raw) return null;
+  try { return decodeURIComponent(raw); } catch { return raw; }
+}
 
 export function getCsrfToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(CSRF_STORAGE_KEY) || decodeURIComponent(document.cookie.split("; ").find((item) => item.startsWith("n8nauto_csrf="))?.split("=")[1] || "") || null;
+
+  // The readable CSRF cookie is created together with the authenticated session,
+  // so it is authoritative for the browser's current session. localStorage is only
+  // a fallback for environments where the cookie is temporarily unavailable.
+  const cookieToken = readCsrfCookie();
+  if (cookieToken) {
+    if (window.localStorage.getItem(CSRF_STORAGE_KEY) !== cookieToken) {
+      window.localStorage.setItem(CSRF_STORAGE_KEY, cookieToken);
+    }
+    return cookieToken;
+  }
+
+  return window.localStorage.getItem(CSRF_STORAGE_KEY);
 }
 
 export function setCsrfToken(value: string | null): void {
