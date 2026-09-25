@@ -1,12 +1,30 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || "/api").replace(/\/$/, "");
 
 const CSRF_KEY = "n8nauto.admin.csrf";
+const CSRF_COOKIE_NAME = "n8nauto_csrf";
+
+function readCsrfCookie(): string | null {
+  if (typeof document === "undefined") return null;
+  const raw = document.cookie
+    .split("; ")
+    .find((item) => item.startsWith(`${CSRF_COOKIE_NAME}=`))
+    ?.slice(CSRF_COOKIE_NAME.length + 1);
+  if (!raw) return null;
+  try { return decodeURIComponent(raw); } catch { return raw; }
+}
 
 export function csrf() {
   if (typeof window === "undefined") return null;
-  return localStorage.getItem(CSRF_KEY)
-    || decodeURIComponent(document.cookie.split("; ").find((x) => x.startsWith("n8nauto_csrf="))?.split("=")[1] || "")
-    || null;
+
+  // Keep the CSRF header bound to the browser's current authenticated session.
+  // The readable CSRF cookie is authoritative; localStorage is only a fallback.
+  const cookieToken = readCsrfCookie();
+  if (cookieToken) {
+    if (localStorage.getItem(CSRF_KEY) !== cookieToken) localStorage.setItem(CSRF_KEY, cookieToken);
+    return cookieToken;
+  }
+
+  return localStorage.getItem(CSRF_KEY);
 }
 
 export function setCsrf(value: string | null) {
