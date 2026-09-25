@@ -27,6 +27,7 @@ This directory is the implementation contract for the n8n Automation SaaS.
 21. [`20_LOCAL_DEVELOPMENT.md`](20_LOCAL_DEVELOPMENT.md) — complete local environment setup, startup workflow, migrations, integrations, CI parity, reset procedures, and troubleshooting.
 22. [`21_VPS_API_LOCAL_PANELS.md`](21_VPS_API_LOCAL_PANELS.md) — running the API on the VPS while using customer/admin panels locally.
 23. [`22_N8N_WORKFLOW_USAGE.md`](22_N8N_WORKFLOW_USAGE.md) — final workflow bundle `2.0.0`, per-workflow usage, environment wiring, activation order, smoke tests, troubleshooting, and rollback.
+24. [`23_META_CHANNEL_ONBOARDING.md`](23_META_CHANNEL_ONBOARDING.md) — customer Meta OAuth, app-level webhook setup, automatic per-Page `subscribed_apps`, self-healing connection tests, and production diagnostics.
 
 Contributor workflow and engineering standards are documented in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
