@@ -1,10 +1,12 @@
 import Link from "next/link";
 import CustomerApp from "../components/CustomerApp";
+import PlatformManagedAiUi from "../components/PlatformManagedAiUi";
 
 export default function Home() {
   return (
     <>
       <CustomerApp />
+      <PlatformManagedAiUi />
       <Link
         href="/usage"
         aria-label="Open monthly AI usage"
