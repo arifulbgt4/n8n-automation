@@ -48,8 +48,33 @@ ON CONFLICT(key) DO UPDATE SET
   limits=EXCLUDED.limits||plans.limits,
   updated_at=now();
 
+-- Existing workspaces without a package, and legacy Starter workspaces, become Free.
 UPDATE tenants
 SET plan_id=(SELECT id FROM plans WHERE key='free'),updated_at=now()
-WHERE plan_id IS NULL;
+WHERE plan_id IS NULL
+   OR plan_id=(SELECT id FROM plans WHERE key='starter' LIMIT 1);
+
+-- Keep signup backward-compatible until the legacy Starter lookup is removed from application code:
+-- any NULL/legacy Starter plan selected on INSERT is normalized to Free at the database boundary.
+CREATE OR REPLACE FUNCTION normalize_tenant_default_plan() RETURNS trigger AS $$
+DECLARE
+  free_plan_id uuid;
+  starter_plan_id uuid;
+BEGIN
+  SELECT id INTO free_plan_id FROM plans WHERE key='free' LIMIT 1;
+  SELECT id INTO starter_plan_id FROM plans WHERE key='starter' LIMIT 1;
+  IF NEW.plan_id IS NULL OR (starter_plan_id IS NOT NULL AND NEW.plan_id=starter_plan_id) THEN
+    NEW.plan_id:=free_plan_id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tenants_default_free_plan ON tenants;
+CREATE TRIGGER tenants_default_free_plan
+BEFORE INSERT ON tenants
+FOR EACH ROW EXECUTE FUNCTION normalize_tenant_default_plan();
+
+UPDATE plans SET active=false,updated_at=now() WHERE key='starter';
 
 COMMIT;
