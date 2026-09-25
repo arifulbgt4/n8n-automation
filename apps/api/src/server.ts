@@ -4,6 +4,7 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import { assertDatabaseReady, env, redis, redisKey } from "@n8n-automation/core";
 import { ApiError, jsonError, requestId } from "./lib.js";
+import { ephemeralConversationLifecycle } from "./ephemeral-conversations.js";
 import { authRoutes } from "./routes/auth.js";
 import { tenantRoutes } from "./routes/tenant.js";
 import { invitationRoutes } from "./routes/invitations.js";
@@ -109,6 +110,7 @@ app.get("/readyz", async (_request, reply) => {
   reply.send({ status: "ready" });
 });
 
+await ephemeralConversationLifecycle(app);
 await platformAiCustomerGuard(app);
 await authRoutes(app);
 await tenantRoutes(app);
