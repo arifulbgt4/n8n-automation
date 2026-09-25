@@ -6,6 +6,30 @@ export default function Home() {
     <>
       <CustomerApp />
       <Link
+        href="/usage"
+        aria-label="Open monthly AI usage"
+        style={{
+          position: "fixed",
+          right: 18,
+          bottom: 118,
+          zIndex: 60,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "10px 14px",
+          borderRadius: 999,
+          border: "1px solid rgba(79,70,229,.24)",
+          background: "#fff",
+          color: "#4338ca",
+          textDecoration: "none",
+          fontSize: 14,
+          fontWeight: 700,
+          boxShadow: "0 12px 28px rgba(17,24,39,.12)",
+        }}
+      >
+        AI Usage
+      </Link>
+      <Link
         href="/channel-ai"
         aria-label="Open channel AI setup"
         style={{
