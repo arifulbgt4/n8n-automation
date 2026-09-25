@@ -9,10 +9,10 @@ BEGIN
   DELETE FROM messages m
   WHERE m.conversation_id = NEW.conversation_id
     AND m.id IN (
-      SELECT old.id
-      FROM messages old
-      WHERE old.conversation_id = NEW.conversation_id
-      ORDER BY old.created_at DESC, old.id DESC
+      SELECT candidate.id
+      FROM messages AS candidate
+      WHERE candidate.conversation_id = NEW.conversation_id
+      ORDER BY candidate.created_at DESC, candidate.id DESC
       OFFSET 20
     );
   RETURN NEW;
