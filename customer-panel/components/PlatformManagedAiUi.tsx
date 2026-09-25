@@ -9,21 +9,24 @@ import { useEffect } from "react";
  */
 export default function PlatformManagedAiUi() {
   useEffect(() => {
-    const routeTargets: Record<string, string> = {
-      "Data / Catalogs": "/catalogs",
-      "Media": "/media-library",
-    };
+    const routeTargets: Array<[string, string]> = [
+      ["Data / Catalogs", "/catalogs"],
+      ["Media", "/media-library"],
+    ];
 
     const reconcile = () => {
       document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
-        const text = (button.textContent || "").trim();
-        if (/^AI providers(?:\s*\(\d+\))?$/i.test(text)) {
+        const text = (button.textContent || "").replace(/\s+/g, " ").trim();
+        if (/AI providers(?:\s*\(\d+\))?$/i.test(text)) {
           button.hidden = true;
           button.setAttribute("aria-hidden", "true");
           button.tabIndex = -1;
         }
 
-        const target = routeTargets[text];
+        // Sidebar buttons include an icon glyph before their label (for example
+        // "▦Data / Catalogs"), so match the semantic label at the end instead of
+        // relying on an exact textContent match.
+        const target = routeTargets.find(([label]) => text === label || text.endsWith(label))?.[1];
         if (target && button.dataset.featureRoute !== target) {
           button.dataset.featureRoute = target;
           button.addEventListener("click", (event) => {
