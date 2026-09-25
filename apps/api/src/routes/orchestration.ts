@@ -3,6 +3,14 @@ import { z } from "zod";
 import { enqueue, env, query, QUEUES, randomToken, transaction } from "@n8n-automation/core";
 import { ApiError, requestId } from "../lib.js";
 
+const NON_RETRYABLE_TURN_CODES = new Set([
+  "AGENT_NOT_CONFIGURED",
+  "CONVERSATION_NOT_AI_ELIGIBLE",
+  "AI_MODEL_MISSING",
+  "USAGE_LIMIT_REACHED",
+  "AI_BUDGET_REACHED",
+]);
+
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
   if (!token || token !== env().INTERNAL_SERVICE_AUTH_SECRET) {
@@ -101,10 +109,25 @@ async function processTurn(turnId: string) {
     await internalJson(`/v1/internal/turns/${turnId}/complete`, { status: "processed", metadata: { actionCount: actionResults.length } });
     return { ok: true, ai, actionResults };
   } catch (error) {
+    const code = error instanceof ApiError ? error.code : null;
+    const nonRetryable = Boolean(code && NON_RETRYABLE_TURN_CODES.has(code));
     await internalJson(`/v1/internal/turns/${turnId}/complete`, {
       status: "failed",
-      metadata: { error: error instanceof Error ? error.message : "Turn orchestration failed" },
+      metadata: {
+        error: error instanceof Error ? error.message : "Turn orchestration failed",
+        code,
+        nonRetryable,
+      },
     }).catch(() => undefined);
+
+    if (nonRetryable) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: code,
+        detail: error instanceof Error ? error.message : "Turn skipped because the current AI configuration cannot process it.",
+      };
+    }
     throw error;
   }
 }
