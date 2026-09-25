@@ -1,6 +1,6 @@
 # Meta channel onboarding and Page webhook subscription
 
-This document describes the production connection flow for Facebook Pages and Instagram professional accounts connected through Facebook Login.
+This document describes the production connection flow for Facebook Pages and Instagram professional accounts connected through Facebook Login for Business.
 
 ## 1. One platform Meta App, many customer Pages
 
@@ -15,10 +15,13 @@ The API requires:
 ```text
 META_APP_ID=<platform Meta App ID>
 META_APP_SECRET=<platform Meta App secret>
+META_BUSINESS_LOGIN_CONFIG_ID=<Facebook Login for Business configuration ID>
 META_OAUTH_REDIRECT_URI=https://<api-host>/v1/channels/meta/oauth/callback
 META_VERIFY_TOKEN=<shared Meta webhook verification token>
 META_GRAPH_API_VERSION=<pinned Graph API version>
 ```
+
+`META_BUSINESS_LOGIN_CONFIG_ID` is required when the Meta app uses Facebook Login for Business. The matching configuration is created under Facebook Login for Business in Meta Developer Dashboard and carries the approved permission set. When this variable is present, the SaaS sends `config_id`, `response_type=code`, and `override_default_response_type=true`; it does not send a raw `scope` parameter. If the variable is omitted, the API falls back to the legacy/raw-scope OAuth mode for apps that still support it.
 
 The public Meta webhook callback is:
 
@@ -53,7 +56,7 @@ The Customer Panel starts OAuth through:
 GET /v1/tenants/:tenantId/channels/meta/oauth/start
 ```
 
-For Facebook, the platform requests the Page permissions needed to discover/manage the Page and use Messenger. For Instagram with Facebook Login, the linked professional account is discovered from the Facebook Page.
+For Facebook Login for Business, the authorization URL uses the configured Business Login `config_id`; permissions are defined in that Meta configuration rather than passed as a `scope` query parameter. The Business Login configuration should include the Page/Instagram permissions required by the selected channel type. For Instagram with Facebook Login, the linked professional account is discovered from the Facebook Page.
 
 The callback exchanges the OAuth code, requests a longer-lived user token when available, then loads managed Pages from Meta `/me/accounts` including Page access tokens and linked Instagram professional-account metadata.
 
@@ -61,7 +64,7 @@ The discovery state is short-lived and bound to the authenticated SaaS user, ten
 
 ## 5. Automatic `subscribed_apps` behavior
 
-When the customer chooses a Page/account and completes the connection, the backend now automatically ensures the platform Meta App is subscribed to that Facebook Page through:
+When the customer chooses a Page/account and completes the connection, the backend automatically ensures the platform Meta App is subscribed to that Facebook Page through:
 
 ```text
 POST /{page-id}/subscribed_apps
@@ -104,7 +107,7 @@ For Instagram channels connected through Facebook Login, `settings_json.facebook
 
 ## 8. Permissions and Meta review
 
-The OAuth implementation requests the relevant Facebook/Instagram permissions from the platform Meta App. Production use with customer-owned Pages and messages from people who are not app-role testers requires the Meta App to have the appropriate approved/advanced access and production status required by Meta.
+The Facebook Login for Business configuration must contain the relevant approved Facebook/Instagram permissions. Production use with customer-owned Pages and messages from people who are not app-role testers requires the Meta App to have the appropriate approved/advanced access and production status required by Meta.
 
 Automatic Page subscription does not bypass Meta App Review, Business Verification, access-level restrictions, or messaging-policy windows.
 
@@ -129,19 +132,22 @@ It never contains the Page access token.
 When diagnosing a customer Page that receives no messages, check in this order:
 
 1. platform Meta App is in the expected production/access state;
-2. app-level callback `/webhooks/meta` verifies successfully;
-3. app-level webhook fields are enabled;
-4. OAuth token includes required permissions;
-5. `GET /{page-id}/subscribed_apps` lists the platform app;
-6. channel is active/connected in SaaS;
-7. API receives a valid signed Meta POST;
-8. worker/n8n turn pipeline processes the persisted message.
+2. `META_BUSINESS_LOGIN_CONFIG_ID` matches the intended Facebook Login for Business configuration;
+3. OAuth redirect URI in that configuration exactly matches the runtime callback;
+4. app-level callback `/webhooks/meta` verifies successfully;
+5. app-level webhook fields are enabled;
+6. Business Login configuration includes required permissions;
+7. `GET /{page-id}/subscribed_apps` lists the platform app;
+8. channel is active/connected in SaaS;
+9. API receives a valid signed Meta POST;
+10. worker/n8n turn pipeline processes the persisted message.
 
 ## 10. Source files
 
 Implementation:
 
 ```text
+packages/core/src/env.ts
 apps/api/src/meta-page-subscription.ts
 apps/api/src/routes/channels.ts
 apps/api/src/routes/webhooks.ts
