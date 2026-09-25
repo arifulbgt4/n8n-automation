@@ -108,10 +108,10 @@ export default function ChannelAiPage() {
         <div>
           <div style={{ color: "#6b7280", fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em" }}>Customer Panel</div>
           <h1 style={{ margin: "6px 0" }}>Channel AI setup</h1>
-          <p style={{ color: "#6b7280", margin: 0 }}>Choose the default AI agent for each connected channel. Saving also repairs open AI conversations that were created before an agent was assigned.</p>
+          <p style={{ color: "#6b7280", margin: 0 }}>Choose the default AI agent for each connected channel. AI providers and task models are configured centrally by the platform administrator.</p>
         </div>
         <div style={{ display: "flex", gap: 14 }}>
-          <Link href="/ai-models" style={{ color: "#4f46e5", fontWeight: 700, textDecoration: "none" }}>AI provider models</Link>
+          <Link href="/usage" style={{ color: "#4f46e5", fontWeight: 700, textDecoration: "none" }}>Monthly AI usage</Link>
           <Link href="/" style={{ color: "#4f46e5", fontWeight: 700, textDecoration: "none" }}>← Dashboard</Link>
         </div>
       </div>
@@ -137,9 +137,7 @@ export default function ChannelAiPage() {
       {!eligibleAgents.length && (
         <div style={{ padding: 16, marginBottom: 18, borderRadius: 10, border: "1px solid #f59e0b", background: "#fffbeb" }}>
           <strong>No active AI agent with an active prompt is available for this business.</strong>
-          <div style={{ marginTop: 6, color: "#92400e" }}>
-            Configure a provider/model on <Link href="/ai-models" style={{ color: "#4f46e5", fontWeight: 700 }}>AI provider models</Link>, then return to Dashboard → AI Agents and create an agent.
-          </div>
+          <div style={{ marginTop: 6, color: "#92400e" }}>Return to Dashboard → AI Agents and create an agent. Provider credentials and model routes are supplied by the platform, not by customer workspaces.</div>
         </div>
       )}
 
