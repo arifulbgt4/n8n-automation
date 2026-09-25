@@ -1,11 +1,13 @@
 import Link from "next/link";
 import CustomerApp from "../components/CustomerApp";
+import DashboardV2 from "../components/DashboardV2";
 import PlatformManagedAiUi from "../components/PlatformManagedAiUi";
 
 export default function Home() {
   return (
     <>
       <CustomerApp />
+      <DashboardV2 />
       <PlatformManagedAiUi />
       <Link
         href="/usage"
