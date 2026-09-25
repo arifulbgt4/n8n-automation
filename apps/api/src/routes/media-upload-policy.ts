@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { query, sha256 } from "@n8n-automation/core";
+import { env, query, sha256 } from "@n8n-automation/core";
 import { ApiError, requireCsrf, requireTenant } from "../lib.js";
 import { tenantLimit } from "../limits.js";
 import { readImageDimensions } from "../image-metadata.js";
@@ -17,6 +17,14 @@ async function numericLimit(tenantId:string,key:string,fallback:number){const va
 async function managedImageCount(tenantId:string){const r=await query<{count:string}>(`SELECT count(*)::text AS count FROM media_assets m WHERE m.tenant_id=$1 AND m.processing_status<>'deleted' AND m.mime_type LIKE 'image/%' AND (m.metadata->>'origin'='customer_upload' OR EXISTS(SELECT 1 FROM collection_item_media cim WHERE cim.media_asset_id=m.id) OR NOT EXISTS(SELECT 1 FROM message_media mm WHERE mm.media_asset_id=m.id))`,[tenantId]);return Number(r.rows[0]?.count??0)}
 async function mediaBytesUsed(tenantId:string){const r=await query<{used:string}>(`SELECT COALESCE(sum(size_bytes),0)::text AS used FROM media_assets WHERE tenant_id=$1 AND processing_status<>'deleted'`,[tenantId]);return Number(r.rows[0]?.used??0)}
 async function findDuplicate(tenantId:string,businessId:string|null,checksum:string){const r=await query<any>(`SELECT * FROM media_assets WHERE tenant_id=$1 AND content_hash=$2 AND processing_status='ready' AND (($3::uuid IS NULL AND business_id IS NULL) OR business_id=$3) ORDER BY created_at LIMIT 1`,[tenantId,checksum,businessId]);return r.rows[0]??null}
+async function syncMediaServiceQuota(tenantId:string,quotaBytes:number){
+  const config=env();if(!config.MEDIA_ADMIN_TOKEN||!config.MEDIA_BASE_URL)return;
+  const account=await query<{external_media_user_id:string|null}>("SELECT external_media_user_id FROM tenant_media_accounts WHERE tenant_id=$1 AND status='active'",[tenantId]);
+  const userId=account.rows[0]?.external_media_user_id;if(!userId)return;
+  const response=await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/admin/users/${encodeURIComponent(userId)}`,{method:"PATCH",headers:{authorization:`Bearer ${config.MEDIA_ADMIN_TOKEN}`,"content-type":"application/json"},body:JSON.stringify({quota_bytes:quotaBytes})});
+  if(!response.ok)throw new ApiError(502,"MEDIA_QUOTA_SYNC_FAILED",`Media Storage quota synchronization failed with ${response.status}.`);
+  await query("UPDATE tenant_media_accounts SET quota_bytes=$2,updated_at=now() WHERE tenant_id=$1",[tenantId,quotaBytes]).catch(()=>undefined);
+}
 
 export async function mediaUploadPolicyRoutes(app:FastifyInstance){
   app.get("/v1/tenants/:tenantId/media/limits",async(request,reply)=>{const{tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);await requireTenant(request,tenantId);const[maxImageMegapixels,maxImageAssets,maxImageBytes,mediaStorageBytes,imageAssets,storageBytes]=await Promise.all([numericLimit(tenantId,"maxImageMegapixels",DEFAULT_MAX_IMAGE_MEGAPIXELS),numericLimit(tenantId,"maxImageAssets",DEFAULT_MAX_IMAGE_ASSETS),numericLimit(tenantId,"maxImageBytes",DEFAULT_MAX_IMAGE_BYTES),numericLimit(tenantId,"mediaStorageBytes",DEFAULT_MEDIA_STORAGE_BYTES),managedImageCount(tenantId),mediaBytesUsed(tenantId)]);reply.send({limits:{maxImageMegapixels,maxImageAssets,maxImageBytes,mediaStorageBytes},usage:{imageAssets,storageBytes},remaining:{imageAssets:Math.max(0,maxImageAssets-imageAssets),storageBytes:Math.max(0,mediaStorageBytes-storageBytes)}})});
@@ -38,11 +46,10 @@ export async function mediaUploadPolicyRoutes(app:FastifyInstance){
       marker.width=dimensions.width;marker.height=dimensions.height;marker.megapixels=dimensions.megapixels;
     }
 
-    const duplicate=await findDuplicate(tenantId,businessId,checksum);(request as any).mediaUploadPolicy=marker;
-    if(duplicate)return reply.status(200).send({asset:duplicate,deduplicated:true});
-
+    const duplicate=await findDuplicate(tenantId,businessId,checksum);(request as any).mediaUploadPolicy=marker;if(duplicate)return reply.status(200).send({asset:duplicate,deduplicated:true});
     if(isImage){const current=await managedImageCount(tenantId);if(current>=maxImageAssets)throw new ApiError(402,"IMAGE_COUNT_LIMIT_REACHED",`This package allows up to ${maxImageAssets} stored images. Delete unused images or upgrade the package.`,{limit:maxImageAssets,current})}
     const storageLimit=await numericLimit(tenantId,"mediaStorageBytes",DEFAULT_MEDIA_STORAGE_BYTES);const used=await mediaBytesUsed(tenantId);if(used+bytes.length>storageLimit)throw new ApiError(402,"MEDIA_STORAGE_LIMIT_REACHED","Media storage limit reached for this package.",{limitBytes:storageLimit,usedBytes:used,incomingBytes:bytes.length});
+    await syncMediaServiceQuota(tenantId,storageLimit);
     (request as any).file=async()=>({fieldname:file.fieldname,filename:file.filename,encoding:file.encoding,mimetype:file.mimetype,fields:file.fields,toBuffer:async()=>bytes});
   });
 
