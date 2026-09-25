@@ -3,13 +3,17 @@
 import { useEffect } from "react";
 
 /**
- * Temporary presentation guard while CustomerApp remains a large legacy single-file screen.
- * The API is authoritative and already blocks customer provider/model management. This guard
- * removes the obsolete provider entry point from the rendered customer UI until CustomerApp
- * is split into feature components.
+ * Transitional presentation/navigation guard while CustomerApp remains a large legacy
+ * single-file screen. Feature routes are being split out incrementally; this component
+ * keeps the existing sidebar useful without weakening the API boundaries.
  */
 export default function PlatformManagedAiUi() {
   useEffect(() => {
+    const routeTargets: Record<string, string> = {
+      "Data / Catalogs": "/catalogs",
+      "Media": "/media-library",
+    };
+
     const reconcile = () => {
       document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
         const text = (button.textContent || "").trim();
@@ -17,6 +21,16 @@ export default function PlatformManagedAiUi() {
           button.hidden = true;
           button.setAttribute("aria-hidden", "true");
           button.tabIndex = -1;
+        }
+
+        const target = routeTargets[text];
+        if (target && button.dataset.featureRoute !== target) {
+          button.dataset.featureRoute = target;
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            window.location.assign(target);
+          }, { capture: true });
         }
       });
 
