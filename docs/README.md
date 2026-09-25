@@ -28,6 +28,8 @@ This directory is the implementation contract for the n8n Automation SaaS.
 22. [`21_VPS_API_LOCAL_PANELS.md`](21_VPS_API_LOCAL_PANELS.md) — running the API on the VPS while using customer/admin panels locally.
 23. [`22_N8N_WORKFLOW_USAGE.md`](22_N8N_WORKFLOW_USAGE.md) — final workflow bundle `2.0.0`, per-workflow usage, environment wiring, activation order, smoke tests, troubleshooting, and rollback.
 24. [`23_META_CHANNEL_ONBOARDING.md`](23_META_CHANNEL_ONBOARDING.md) — customer Meta OAuth, app-level webhook setup, automatic per-Page `subscribed_apps`, self-healing connection tests, and production diagnostics.
+25. [`24_CHANNEL_AI_ASSIGNMENT.md`](24_CHANNEL_AI_ASSIGNMENT.md) — channel default-agent assignment, conversation backfill/recovery, and AI readiness diagnostics.
+26. [`25_PLATFORM_AI_PLANS.md`](25_PLATFORM_AI_PLANS.md) — platform-owned AI providers/models, monthly token/credit allowances, Free/Pro packages, usage metering, and the no-payment phase boundary.
 
 Contributor workflow and engineering standards are documented in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
@@ -49,6 +51,7 @@ The target platform has the following non-negotiable architecture decisions unle
 - Dynamic products/services/custom datasets are built through controlled schema definitions and JSONB data, not arbitrary customer-created PostgreSQL tables.
 - n8n is an orchestration engine, not the primary business-data store.
 - Raw Meta callbacks terminate at the SaaS API for signature verification; n8n receives only verified, persisted, turn-ready orchestration events.
+- AI provider credentials and task model routing are platform-owned. Customer workspaces consume approved platform AI routes within monthly token and credit allowances and do not manage provider secrets/model IDs.
 
 ## Documentation change rule
 
