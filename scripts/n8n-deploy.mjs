@@ -12,12 +12,15 @@ const root=path.resolve("automation/n8n");
 const manifest=JSON.parse(await readFile(path.join(root,"manifest.json"),"utf8"));
 
 function workflowPayload(source){
+  // n8n owns workflow staticData at runtime and can mutate it when a workflow is
+  // activated or executed. It is deliberately excluded from source-controlled
+  // deployment drift checks so an already-active canonical workflow remains
+  // idempotent across repeated deploys.
   return {
     name:source.name,
     nodes:source.nodes,
     connections:source.connections ?? {},
     settings:source.settings ?? {},
-    staticData:source.staticData ?? null,
   };
 }
 function stable(value){
