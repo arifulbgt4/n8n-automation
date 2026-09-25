@@ -11,7 +11,8 @@ import {
 } from "@n8n-automation/core";
 import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
 import { ApiError, requestId } from "../lib.js";
-import { assertMonthlyAiCostBudget, assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
+import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
+import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -81,12 +82,13 @@ async function findRelevantItems(tenantId: string, businessId: string, agentId: 
   return result.rows;
 }
 
-async function findKnowledge(tenantId: string, businessId: string, agentId: string | null, channelId: string, text: string) {
+async function findKnowledge(tenantId: string, businessId: string, agentId: string | null, channelId: string, text: string, turnId: string) {
   if (!text.trim()) return [];
   try {
     const model = await resolveModel(tenantId, businessId, agentId, channelId, "EMBEDDINGS");
     if (model) {
       const embedded = await embedding(model, { model: model.model, parameters: model.parameters ?? {} }, text.slice(0, 8000));
+      await recordPlatformAiUsage({tenantId,businessId,channelAccountId:channelId,eventType:"ai_call",unit:"call",taskKey:"EMBEDDINGS",model,usage:embedded.usage,idempotencyKey:`turn-embedding:${turnId}`,metadata:{operation:"conversation_rag"}});
       if (embedded.vector.length === env().EMBEDDING_DIMENSIONS) {
         const vector = `[${embedded.vector.join(",")}]`;
         const result = await query(`
@@ -102,7 +104,8 @@ async function findKnowledge(tenantId: string, businessId: string, agentId: stri
         return result.rows;
       }
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof ApiError && ["AI_TOKEN_LIMIT_REACHED","AI_CREDIT_LIMIT_REACHED"].includes(error.code)) throw error;
     // Keyword fallback keeps the conversation available when embedding search is degraded.
   }
   const result = await query(`
@@ -150,7 +153,7 @@ async function multimodalContext(context: any) {
   const row = context.row;
   const images = (context.media ?? []).filter((item: any) => item.kind === "image" || String(item.mime_type).startsWith("image/")).slice(0, 5);
   const audio = (context.media ?? []).find((item: any) => item.kind === "audio" || String(item.mime_type).startsWith("audio/"));
-  const result: { imageAnalysis?: string; transcript?: string; usage: unknown[] } = { usage: [] };
+  const result: { imageAnalysis?: string; transcript?: string; usage: Array<{task:string;model:PlatformAiModel;usage:any}> } = { usage: [] };
 
   if (images.length) {
     const model = await resolveModel(row.tenant_id,row.business_id,row.agent_profile_id,row.channel_account_id,"IMAGE_ANALYSIS");
@@ -160,7 +163,7 @@ async function multimodalContext(context: any) {
       const analysis = await analyzeImages(model,{model:model.model,parameters:model.parameters ?? {}},
         "Analyze these customer-provided screenshots/images for business matching. Extract visible product/service names, text, SKU, category, colors, sizes, distinguishing attributes, and the user's likely intent. Do not invent price, stock, availability, or policy. Return concise searchable observations.",binaries);
       result.imageAnalysis = analysis.text;
-      result.usage.push({ task: "IMAGE_ANALYSIS", provider: model.provider, model: model.model, usage: analysis.usage });
+      result.usage.push({ task: "IMAGE_ANALYSIS", model, usage: analysis.usage });
     }
   }
 
@@ -170,45 +173,19 @@ async function multimodalContext(context: any) {
       const binary = await readMedia(row.tenant_id,audio);
       const transcript = await transcribeAudio(model,{model:model.model,parameters:model.parameters ?? {}},binary);
       result.transcript = transcript.text;
-      result.usage.push({ task: "AUDIO_TRANSCRIPTION", provider: model.provider, model: model.model, usage: transcript.usage });
+      result.usage.push({ task: "AUDIO_TRANSCRIPTION", model, usage: transcript.usage });
     }
   }
   return result;
 }
 
-async function resolveModels(tenantId: string, businessId: string, agentId: string | null, channelId: string, taskKey: string) {
-  const result = await query<any>(`
-    SELECT m.id,m.model,m.parameters,p.provider,p.encrypted_api_key,p.base_url,p.id AS provider_connection_id,p.ownership_mode
-    FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id
-    WHERE m.tenant_id=$1 AND m.active=true AND p.status='active'
-      AND m.task_key=$5
-      AND (m.business_id=$2 OR m.business_id IS NULL)
-      AND (m.agent_profile_id=$3 OR m.agent_profile_id IS NULL)
-      AND (m.channel_account_id=$4 OR m.channel_account_id IS NULL)
-    ORDER BY
-      (m.channel_account_id IS NOT NULL) DESC,
-      (m.agent_profile_id IS NOT NULL) DESC,
-      (m.business_id IS NOT NULL) DESC,
-      COALESCE((m.parameters->>'fallbackOrder')::int, 1000),
-      m.created_at DESC
-    LIMIT 5
-  `, [tenantId, businessId, agentId, channelId, taskKey]);
-  return result.rows;
+async function resolveModels(tenantId: string, _businessId: string, _agentId: string | null, _channelId: string, taskKey: string) {
+  await assertMonthlyAiAllowance(tenantId);
+  return resolvePlatformModels(taskKey,5);
 }
 
 async function resolveModel(tenantId: string, businessId: string, agentId: string | null, channelId: string, taskKey: string) {
   return (await resolveModels(tenantId,businessId,agentId,channelId,taskKey))[0] ?? null;
-}
-
-async function estimateAiCost(provider:string,model:string,usage:any):Promise<number|null>{
-  const registry=await query<any>("SELECT pricing_json FROM ai_model_registry WHERE provider=$1 AND model=$2 AND active=true",[provider,model]).catch(()=>({rows:[] as any[]}));
-  const pricing=registry.rows[0]?.pricing_json;
-  if(!pricing)return null;
-  const inputRate=Number(pricing.inputPerMillion ?? pricing.input_per_million ?? 0);
-  const outputRate=Number(pricing.outputPerMillion ?? pricing.output_per_million ?? 0);
-  if(!Number.isFinite(inputRate)||!Number.isFinite(outputRate))return null;
-  const input=Number(usage?.inputTokens ?? 0);const output=Number(usage?.outputTokens ?? 0);
-  return (input/1_000_000)*inputRate+(output/1_000_000)*outputRate;
 }
 
 export async function internalRoutes(app: FastifyInstance) {
@@ -231,16 +208,19 @@ export async function internalRoutes(app: FastifyInstance) {
     const context = await runtimeContext(input.turnId);
     const row = context.row;
     await assertMonthlyUsageLimit(row.tenant_id, "ai_call", "aiTurnsPerMonth");
+    await assertMonthlyAiAllowance(row.tenant_id);
     if (row.mode !== "AI" || row.conversation_status !== "open") throw new ApiError(409, "CONVERSATION_NOT_AI_ELIGIBLE", "Conversation is not eligible for an AI response.");
     if (!row.agent_profile_id || !row.active_prompt_version_id) throw new ApiError(409, "AGENT_NOT_CONFIGURED", "Conversation has no active AI agent/prompt.");
     const originalTurnText = context.messages.map((message: any) => message.text_content).filter(Boolean).join("\n");
     const multimodal = await multimodalContext(context);
+    for (const [index, extra] of multimodal.usage.entries()) {
+      await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:extra.task,model:extra.model,usage:extra.usage,correlationId:requestId(request),idempotencyKey:`ai-extra:${input.turnId}:${index}:${extra.task}`});
+    }
     const turnText = [originalTurnText, multimodal.transcript, multimodal.imageAnalysis].filter(Boolean).join("\n\n");
     const items = await findRelevantItems(row.tenant_id, row.business_id, row.agent_profile_id, turnText);
-    const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText);
+    const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText, input.turnId);
     const modelCandidates = await resolveModels(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, "DEFAULT_CHAT");
-    if (!modelCandidates.length) throw new ApiError(409, "AI_MODEL_MISSING", "No DEFAULT_CHAT model is configured for this agent.");
-    await assertMonthlyAiCostBudget(row.tenant_id, modelCandidates[0]?.ownership_mode);
+    if (!modelCandidates.length) throw new ApiError(409, "AI_MODEL_MISSING", "No platform DEFAULT_CHAT model is configured.");
     const system = [
       row.assembled_prompt || "You are a helpful business assistant.",
       "\n## Runtime rules\nUse only current provided business facts. If facts are missing, say they are unavailable. Never invent prices, stock, booking availability, or policy. Only request/perform capabilities listed below.",
@@ -257,7 +237,7 @@ export async function internalRoutes(app: FastifyInstance) {
       content: message.text_content,
     }));
     history.push({ role: "user", content: originalTurnText || multimodal.transcript || multimodal.imageAnalysis || "[The user sent media without text.]" });
-    let result:any=null;let model:any=null;let lastModelError:unknown=null;
+    let result:any=null;let model:PlatformAiModel|null=null;let lastModelError:unknown=null;
     for (const candidate of modelCandidates) {
       try {
         result = await chat(candidate,{model:candidate.model,parameters:candidate.parameters??{}},{system,messages:history});
@@ -268,7 +248,7 @@ export async function internalRoutes(app: FastifyInstance) {
         if(status>=400 && status<500 && ![408,409,429].includes(status)) break;
       }
     }
-    if(!result||!model) throw lastModelError instanceof Error ? lastModelError : new ApiError(502,"AI_PROVIDER_UNAVAILABLE","No configured AI fallback model could produce a response.");
+    if(!result||!model) throw lastModelError instanceof Error ? lastModelError : new ApiError(502,"AI_PROVIDER_UNAVAILABLE","No configured platform AI fallback model could produce a response.");
     let parsed: any;
     try {
       const clean = result.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -282,14 +262,7 @@ export async function internalRoutes(app: FastifyInstance) {
     const messages = rawMessages.filter((message: any) => message.type !== "media" || mediaCount++ < imageLimit).slice(0, 10);
     const actions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 5) : [];
     if (!messages.length && !parsed.handoff) messages.push({ type: "text", text: "I’m unable to answer that right now. A team member can help if needed." });
-    const estimatedCost=await estimateAiCost(model.provider,model.model,result.usage);
-    await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,estimated_cost,correlation_id,idempotency_key,metadata)
-      VALUES ($1,$2,$3,$4,'ai_call',1,'call',$5,$6,'DEFAULT_CHAT',$7,$8,$9,$10::jsonb) ON CONFLICT DO NOTHING`, [row.tenant_id,row.business_id,row.channel_account_id,row.conversation_id,model.provider,model.model,estimatedCost,requestId(request),`ai:${input.turnId}:${row.active_prompt_version_id}`,JSON.stringify(result.usage)]);
-    for (const [index, extra] of multimodal.usage.entries()) {
-      await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,provider,model,task_key,correlation_id,idempotency_key,metadata)
-        VALUES ($1,$2,$3,$4,'ai_call',1,'call',$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT DO NOTHING`,
-        [row.tenant_id,row.business_id,row.channel_account_id,row.conversation_id,(extra as any).provider,(extra as any).model,(extra as any).task,requestId(request),`ai-extra:${input.turnId}:${index}:${(extra as any).task}`,JSON.stringify((extra as any).usage ?? {})]);
-    }
+    await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:"DEFAULT_CHAT",model,usage:result.usage,correlationId:requestId(request),idempotencyKey:`ai:${input.turnId}:${row.active_prompt_version_id}`});
     reply.send({
       turnId: input.turnId,
       tenantId: row.tenant_id,
