@@ -102,13 +102,13 @@
             {
               "id": "has-image",
               "name": "hasImage",
-              "value": "={{($json.media || []).some(item => item.kind === 'image' || String(item.mime_type || '').startsWith('image/'))}}",
+              "value": "={{JSON.stringify($json.media || []).includes('\\\"kind\\\":\\\"image\\\"') || JSON.stringify($json.media || []).includes('image/')}}",
               "type": "boolean"
             },
             {
               "id": "has-audio",
               "name": "hasAudio",
-              "value": "={{($json.media || []).some(item => item.kind === 'audio' || String(item.mime_type || '').startsWith('audio/'))}}",
+              "value": "={{JSON.stringify($json.media || []).includes('\\\"kind\\\":\\\"audio\\\"') || JSON.stringify($json.media || []).includes('audio/')}}",
               "type": "boolean"
             },
             {
