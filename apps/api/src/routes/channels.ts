@@ -132,7 +132,13 @@ export async function channelRoutes(app: FastifyInstance) {
     url.searchParams.set("client_id", config.META_APP_ID!);
     url.searchParams.set("redirect_uri", config.META_OAUTH_REDIRECT_URI!);
     url.searchParams.set("state", state);
-    url.searchParams.set("scope", scope.join(","));
+    if (config.META_BUSINESS_LOGIN_CONFIG_ID) {
+      url.searchParams.set("config_id", config.META_BUSINESS_LOGIN_CONFIG_ID);
+      url.searchParams.set("response_type", "code");
+      url.searchParams.set("override_default_response_type", "true");
+    } else {
+      url.searchParams.set("scope", scope.join(","));
+    }
     reply.send({ authorizationUrl: url.toString(), expiresInSeconds: 600 });
   });
 
