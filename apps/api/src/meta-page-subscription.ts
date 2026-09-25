@@ -72,6 +72,21 @@ async function readJson(response: Response): Promise<any> {
   }
 }
 
+async function fetchSubscribedApps(
+  pageId: string,
+  pageAccessToken: string,
+  includeSubscribedFields: boolean,
+): Promise<{ response: Response; body: any }> {
+  const url = new URL(
+    `https://graph.facebook.com/${env().META_GRAPH_API_VERSION}/${encodeURIComponent(pageId)}/subscribed_apps`,
+  );
+  if (includeSubscribedFields) url.searchParams.set("fields", "id,name,subscribed_fields");
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${pageAccessToken}` },
+  });
+  return { response, body: await readJson(response) };
+}
+
 export async function inspectMetaPageSubscription(
   pageId: string,
   pageAccessToken: string,
@@ -79,27 +94,22 @@ export async function inspectMetaPageSubscription(
   const appId = env().META_APP_ID || null;
   if (!appId) return failure({ pageId, detail: "META_APP_ID is not configured." });
 
-  const url = new URL(
-    `https://graph.facebook.com/${env().META_GRAPH_API_VERSION}/${encodeURIComponent(pageId)}/subscribed_apps`,
-  );
-  url.searchParams.set("fields", "id,name,subscribed_fields");
-
   try {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${pageAccessToken}` },
-    });
-    const body = await readJson(response);
-    if (!response.ok) {
-      const error = providerError(body);
+    let inspection = await fetchSubscribedApps(pageId, pageAccessToken, true);
+    if (!inspection.response.ok && inspection.response.status === 400) {
+      inspection = await fetchSubscribedApps(pageId, pageAccessToken, false);
+    }
+    if (!inspection.response.ok) {
+      const error = providerError(inspection.body);
       return failure({
         pageId,
-        detail: error?.message || `Meta subscription inspection failed with ${response.status}.`,
-        httpStatus: response.status,
+        detail: error?.message || `Meta subscription inspection failed with ${inspection.response.status}.`,
+        httpStatus: inspection.response.status,
         providerError: error,
       });
     }
 
-    const apps = Array.isArray(body?.data) ? body.data : [];
+    const apps = Array.isArray(inspection.body?.data) ? inspection.body.data : [];
     const app = apps.find((candidate: any) => String(candidate?.id ?? "") === appId);
     if (!app) {
       return {
