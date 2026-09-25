@@ -74,9 +74,14 @@ export async function chat(connection: AiConnection, config: AiModelConfig, inpu
     const body: Record<string, unknown> = {
       model: config.model,
       messages,
-      temperature: typeof config.parameters.temperature === "number" ? config.parameters.temperature : 0.3,
       max_tokens: typeof config.parameters.maxOutputTokens === "number" ? config.parameters.maxOutputTokens : undefined,
     };
+    // Do not force a sampling temperature. Some current OpenAI models only accept
+    // their provider default. A route can still opt in to an explicit temperature
+    // when the selected model supports it.
+    if (typeof config.parameters.temperature === "number") {
+      body.temperature = config.parameters.temperature;
+    }
     if (input.responseSchema && connection.provider === "openai") {
       body.response_format = {
         type: "json_schema",
@@ -199,7 +204,6 @@ export async function testConnection(connection: AiConnection, config?: AiModelC
   }
 }
 
-
 export type BinaryAiInput = {
   bytes: Uint8Array;
   mimeType: string;
@@ -223,15 +227,18 @@ export async function analyzeImages(
         image_url: { url: `data:${image.mimeType};base64,${Buffer.from(image.bytes).toString("base64")}` },
       });
     }
+    const body: Record<string, unknown> = {
+      model: config.model,
+      messages: [{ role: "user", content }],
+      max_tokens: typeof config.parameters.maxOutputTokens === "number" ? config.parameters.maxOutputTokens : 1000,
+    };
+    if (typeof config.parameters.temperature === "number") {
+      body.temperature = config.parameters.temperature;
+    }
     const response = await fetch(`${base}/chat/completions`, {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey(connection)}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [{ role: "user", content }],
-        temperature: typeof config.parameters.temperature === "number" ? config.parameters.temperature : 0.1,
-        max_tokens: typeof config.parameters.maxOutputTokens === "number" ? config.parameters.maxOutputTokens : 1000,
-      }),
+      body: JSON.stringify(body),
     });
     const json = await jsonResponse(response);
     return {
