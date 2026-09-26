@@ -140,6 +140,7 @@ export async function tenantRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const input = z.object({
       name: z.string().trim().min(1).max(160).optional(),
+      businessTypeHint: z.string().trim().max(80).nullable().optional(),
       timezone: z.string().trim().min(1).max(80).optional(),
       currency: z.string().regex(/^[A-Z]{3}$/).optional(),
       locale: z.string().trim().min(2).max(20).optional(),
@@ -148,12 +149,14 @@ export async function tenantRoutes(app: FastifyInstance) {
     }).parse(request.body);
     const result = await query(`
       UPDATE businesses SET
-        name=COALESCE($3,name),timezone=COALESCE($4,timezone),currency=COALESCE($5,currency),
-        locale=COALESCE($6,locale),status=COALESCE($7,status),
-        settings_json=CASE WHEN $8::jsonb IS NULL THEN settings_json ELSE settings_json || $8::jsonb END,
+        name=COALESCE($3,name),
+        business_type_hint=CASE WHEN $4::boolean THEN $5 ELSE business_type_hint END,
+        timezone=COALESCE($6,timezone),currency=COALESCE($7,currency),
+        locale=COALESCE($8,locale),status=COALESCE($9,status),
+        settings_json=CASE WHEN $10::jsonb IS NULL THEN settings_json ELSE settings_json || $10::jsonb END,
         updated_at=now()
       WHERE id=$1 AND tenant_id=$2 RETURNING *
-    `, [params.businessId, params.tenantId, input.name ?? null, input.timezone ?? null, input.currency ?? null, input.locale ?? null, input.status ?? null, input.settings ? JSON.stringify(input.settings) : null]);
+    `, [params.businessId, params.tenantId, input.name ?? null, Object.prototype.hasOwnProperty.call(input,"businessTypeHint"), input.businessTypeHint ?? null, input.timezone ?? null, input.currency ?? null, input.locale ?? null, input.status ?? null, input.settings ? JSON.stringify(input.settings) : null]);
     if (!result.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: params.businessId, action: "BUSINESS_UPDATED", resourceType: "business", resourceId: params.businessId, safeDiff: input, request });
     reply.send({ business: result.rows[0] });
