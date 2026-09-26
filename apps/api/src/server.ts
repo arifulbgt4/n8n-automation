@@ -33,6 +33,13 @@ import { platformConfigRoutes } from "./routes/platform-config.js";
 import { resourceCrudRoutes } from "./routes/resource-crud.js";
 
 const config = env();
+const configuredOrigins = (value: string): string[] => value.split(",").map((origin) => origin.trim()).filter(Boolean);
+const allowedBrowserOrigins = new Set([
+  config.CUSTOMER_APP_ORIGIN,
+  config.ADMIN_APP_ORIGIN,
+  ...configuredOrigins(config.CUSTOMER_APP_ALLOWED_ORIGINS),
+  ...configuredOrigins(config.ADMIN_APP_ALLOWED_ORIGINS),
+]);
 const app = Fastify({
   logger: { level: config.LOG_LEVEL, redact: ["req.headers.authorization", "req.headers.cookie", "body.apiKey", "body.accessToken", "body.appSecret"] },
   trustProxy: config.TRUST_PROXY,
@@ -53,7 +60,7 @@ app.addContentTypeParser("application/json", { parseAs: "buffer" }, (request, bo
 await app.register(cookie);
 await app.register(cors, {
   origin(origin, callback) {
-    if (!origin || [config.CUSTOMER_APP_ORIGIN, config.ADMIN_APP_ORIGIN].includes(origin)) return callback(null, true);
+    if (!origin || allowedBrowserOrigins.has(origin)) return callback(null, true);
     callback(new Error("Origin not allowed"), false);
   },
   credentials: true,

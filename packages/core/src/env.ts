@@ -14,6 +14,8 @@ const schema = z.object({
   CSRF_HEADER_NAME: z.string().default("x-csrf-token"),
   CUSTOMER_APP_ORIGIN: z.string().url().default("http://localhost:3000"),
   ADMIN_APP_ORIGIN: z.string().url().default("http://localhost:3001"),
+  CUSTOMER_APP_ALLOWED_ORIGINS: z.string().default(""),
+  ADMIN_APP_ALLOWED_ORIGINS: z.string().default(""),
   API_PUBLIC_ORIGIN: z.string().url().default("http://localhost:4000"),
   INTERNAL_SERVICE_AUTH_SECRET: z.string().min(24),
   EMAIL_DELIVERY_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
