@@ -46,7 +46,7 @@ export async function dataManagementRoutes(app: FastifyInstance) {
     const input=z.object({confirmation:z.string().min(1),password:z.string().min(1).max(200)}).parse(request.body);
     const [tenant,user]=await Promise.all([
       query<{slug:string;name:string}>("SELECT slug,name FROM tenants WHERE id=$1 AND status<>'deleted'",[tenantId]),
-      query<{password_hash:string}>("SELECT password_hash FROM users WHERE id=$1",[principal.userId])
+      query<{password_hash:string}>("SELECT password_hash FROM auth_credentials WHERE user_id=$1 AND realm=$2",[principal.userId,principal.authRealm])
     ]);
     if(!tenant.rows[0]||!user.rows[0]) throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
     if(input.confirmation !== tenant.rows[0].slug) throw new ApiError(400,"CONFIRMATION_MISMATCH","Type the workspace slug exactly to confirm deletion.");

@@ -29,6 +29,17 @@ The implementation may later add social/OAuth login, but email/password must not
 - Session tokens/refresh tokens must not be logged.
 - Short-lived elevated-action confirmation may be required for secret rotation, tenant deletion, billing changes, or admin impersonation.
 
+### Authentication realms
+
+Customer and platform-admin access are separate authentication realms. The
+same email may have one credential in each realm, but each realm has its own
+password hash, browser session audience, and password-reset token. Customer
+sign-in always creates a `customer` session and never returns platform-admin
+MFA state. Super Admin sign-in must explicitly use the `admin` realm; only an
+`admin` session can satisfy `requirePlatformAdmin` or access platform-admin
+MFA endpoints. A customer password reset therefore cannot change or revoke
+the administrator credential/session.
+
 ## 4. Tenant model
 
 A tenant is the top-level customer organization boundary. A tenant can contain multiple businesses and users.

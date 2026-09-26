@@ -62,7 +62,7 @@ export async function adminAuthRoutes(app: FastifyInstance): Promise<void> {
       if (result.recoveryHash) {
         await client.query("UPDATE platform_admins SET recovery_code_hashes=array_remove(recovery_code_hashes,$2),updated_at=now() WHERE user_id=$1", [row.user_id, result.recoveryHash]);
       }
-      return createSession(row.user_id, request, reply, { mfaVerified: true, client });
+      return createSession(row.user_id, request, reply, { mfaVerified: true, realm: "admin", client });
     });
     await audit({ actorUserId: row.user_id, actorType: "platform_admin", action: "ADMIN_MFA_SIGNIN", resourceType: "user", resourceId: row.user_id, request });
     reply.send({ ok: true, csrfToken: session.csrfToken, user: { id: row.user_id, email: row.email, name: row.name, platformAdmin: true } });

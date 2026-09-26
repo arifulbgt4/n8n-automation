@@ -65,7 +65,7 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 }
 
 export async function signIn(email: string, password: string) {
-  const result = await api<any>("/v1/auth/signin", { method: "POST", body: JSON.stringify({ email, password }) });
+  const result = await api<any>("/v1/auth/signin", { method: "POST", body: JSON.stringify({ email, password, realm: "customer" }) });
   if (result.csrfToken) setCsrfToken(result.csrfToken);
   return result;
 }

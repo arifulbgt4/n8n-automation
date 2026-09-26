@@ -161,20 +161,43 @@ export async function invitationRoutes(app: FastifyInstance) {
     const userId = await transaction(async (client) => {
       const locked = await client.query<any>("SELECT * FROM tenant_invitations WHERE id=$1 AND status='pending' AND expires_at>now() FOR UPDATE", [invite.id]);
       if (!locked.rows[0]) throw new ApiError(409, "INVITATION_ALREADY_USED", "Invitation is no longer available.");
-      const existing = await client.query("SELECT id FROM users WHERE lower(email)=lower($1)", [invite.email]);
-      if (existing.rows[0]) throw new ApiError(409, "ACCOUNT_EXISTS", "An account already exists for this email. Sign in and accept the invitation.");
-      const user = await client.query<{ id: string }>(`
-        INSERT INTO users(email,password_hash,name,status,email_verified_at)
-        VALUES ($1,$2,$3,'active',now()) RETURNING id
-      `, [invite.email,passwordHash,input.name]);
+      const existing = await client.query<{ id: string; status: string }>(
+        "SELECT id,status FROM users WHERE lower(email)=lower($1) FOR UPDATE",
+        [invite.email],
+      );
+      let userId: string;
+      if (existing.rows[0]) {
+        if (existing.rows[0].status !== "active") throw new ApiError(403, "ACCOUNT_UNAVAILABLE", "This account is not available.");
+        const customerCredential = await client.query(
+          "SELECT 1 FROM auth_credentials WHERE user_id=$1 AND realm='customer'",
+          [existing.rows[0].id],
+        );
+        if (customerCredential.rowCount) throw new ApiError(409, "ACCOUNT_EXISTS", "A customer account already exists for this email. Sign in and accept the invitation.");
+        userId = existing.rows[0].id;
+        await client.query(`
+          INSERT INTO auth_credentials(user_id,realm,email,password_hash)
+          VALUES ($1,'customer',$2,$3)
+        `, [userId, invite.email, passwordHash]);
+        await client.query("UPDATE users SET email_verified_at=COALESCE(email_verified_at,now()),updated_at=now() WHERE id=$1", [userId]);
+      } else {
+        const user = await client.query<{ id: string }>(`
+          INSERT INTO users(email,password_hash,name,status,email_verified_at)
+          VALUES ($1,$2,$3,'active',now()) RETURNING id
+        `, [invite.email,passwordHash,input.name]);
+        userId = user.rows[0].id;
+        await client.query(`
+          INSERT INTO auth_credentials(user_id,realm,email,password_hash)
+          VALUES ($1,'customer',$2,$3)
+        `, [userId, invite.email, passwordHash]);
+      }
       await client.query(`
         INSERT INTO tenant_memberships(tenant_id,user_id,role,status,business_scope,invited_by)
         VALUES ($1,$2,$3,'active',$4,$5)
-      `, [invite.tenant_id,user.rows[0].id,invite.role,invite.business_scope,invite.invited_by]);
-      await client.query("UPDATE tenant_invitations SET status='accepted',accepted_by=$2,accepted_at=now(),updated_at=now() WHERE id=$1", [invite.id,user.rows[0].id]);
-      return user.rows[0].id;
+      `, [invite.tenant_id,userId,invite.role,invite.business_scope,invite.invited_by]);
+      await client.query("UPDATE tenant_invitations SET status='accepted',accepted_by=$2,accepted_at=now(),updated_at=now() WHERE id=$1", [invite.id,userId]);
+      return userId;
     });
-    const session = await createSession(userId, request, reply);
+    const session = await createSession(userId, request, reply, { realm: "customer" });
     await audit({ actorUserId: userId, tenantId: invite.tenant_id, action: "INVITATION_SIGNUP_ACCEPTED", resourceType: "tenant_invitation", resourceId: invite.id, request });
     reply.code(201).send({ ok: true, tenantId: invite.tenant_id, csrfToken: session.csrfToken });
   });

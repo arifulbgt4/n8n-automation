@@ -26,16 +26,24 @@ const client = await pool.connect();
 try {
   await client.query("BEGIN");
   let user = await client.query("SELECT id FROM users WHERE email=$1 FOR UPDATE", [email]);
+  const passwordHash = await hashPassword(password);
   if (!user.rows[0]) {
-    const passwordHash = await hashPassword(password);
     user = await client.query(`
       INSERT INTO users(email,password_hash,name,status,email_verified_at)
       VALUES ($1,$2,$3,'active',now()) RETURNING id
     `, [email, passwordHash, name]);
+  }
+  const adminCredential = await client.query("SELECT id FROM auth_credentials WHERE user_id=$1 AND realm='admin'", [user.rows[0].id]);
+  if (!adminCredential.rows[0]) {
+    await client.query(`
+      INSERT INTO auth_credentials(user_id,realm,email,password_hash)
+      VALUES ($1,'admin',$2,$3)
+    `, [user.rows[0].id, email, passwordHash]);
   } else if (process.env.ADMIN_RESET_PASSWORD === "true") {
-    const passwordHash = await hashPassword(password);
-    await client.query("UPDATE users SET password_hash=$2,status='active',email_verified_at=COALESCE(email_verified_at,now()),updated_at=now() WHERE id=$1", [user.rows[0].id, passwordHash]);
-    await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", [user.rows[0].id]);
+    await client.query("UPDATE auth_credentials SET password_hash=$2,updated_at=now() WHERE user_id=$1 AND realm='admin'", [user.rows[0].id, passwordHash]);
+  }
+  if (process.env.ADMIN_RESET_PASSWORD === "true") {
+    await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND auth_realm='admin' AND revoked_at IS NULL", [user.rows[0].id]);
   }
   await client.query(`
     INSERT INTO platform_admins(user_id,role,active)

@@ -6,6 +6,7 @@ import {
   query,
   randomToken,
   sha256,
+  type AuthRealm,
   type MembershipRole,
   type PlatformAdminRole,
   type SessionPrincipal,
@@ -53,6 +54,7 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
   if (!token) return null;
   const result = await query<{
     session_id: string;
+    auth_realm: AuthRealm;
     csrf_token: string;
     user_id: string;
     email: string;
@@ -66,11 +68,12 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
   }>(`
     SELECT s.id AS session_id, s.csrf_token, u.id AS user_id, u.email, u.name,
            u.email_verified_at,
+           s.auth_realm,
            s.mfa_verified_at,
-           (pa.user_id IS NOT NULL AND pa.active=true) AS platform_admin,
-           CASE WHEN pa.user_id IS NOT NULL AND pa.active=true THEN pa.role ELSE NULL END AS platform_admin_role,
-           COALESCE(pa.mfa_required,false) AS platform_admin_mfa_required,
-           COALESCE(pa.mfa_enabled,false) AS platform_admin_mfa_enabled
+           (s.auth_realm='admin' AND pa.user_id IS NOT NULL AND pa.active=true) AS platform_admin,
+           CASE WHEN s.auth_realm='admin' AND pa.user_id IS NOT NULL AND pa.active=true THEN pa.role ELSE NULL END AS platform_admin_role,
+           CASE WHEN s.auth_realm='admin' THEN COALESCE(pa.mfa_required,false) ELSE false END AS platform_admin_mfa_required,
+           CASE WHEN s.auth_realm='admin' THEN COALESCE(pa.mfa_enabled,false) ELSE false END AS platform_admin_mfa_enabled
       FROM sessions s
       JOIN users u ON u.id=s.user_id
       LEFT JOIN platform_admins pa ON pa.user_id=u.id
@@ -88,6 +91,7 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
     name: row.name,
     emailVerifiedAt: row.email_verified_at?.toISOString() ?? null,
     sessionId: row.session_id,
+    authRealm: row.auth_realm,
     csrfToken: row.csrf_token,
     platformAdmin: row.platform_admin,
     platformAdminRole: row.platform_admin_role,
@@ -113,7 +117,7 @@ type PlatformAdminOptions = {
 
 export async function requirePlatformAdmin(request: FastifyRequest, options: PlatformAdminOptions = {}): Promise<SessionPrincipal> {
   const principal = await requireAuth(request);
-  if (!principal.platformAdmin || !principal.platformAdminRole) throw new ApiError(403, "ADMIN_REQUIRED", "Platform administrator access is required.");
+  if (principal.authRealm !== "admin" || !principal.platformAdmin || !principal.platformAdminRole) throw new ApiError(403, "ADMIN_REQUIRED", "Platform administrator access is required.");
   const safeMethod = ["GET", "HEAD", "OPTIONS"].includes(request.method);
   // Read operations may be viewed by any active platform-admin role. Any
   // mutation must opt into an explicit role list; the safe default is the
@@ -155,6 +159,9 @@ export async function requireTenant(
   allowedRoles: MembershipRole[] = ["OWNER", "ADMIN", "STAFF", "VIEWER"],
 ): Promise<RequestContext> {
   const principal = request.auth?.principal ?? await requireAuth(request);
+  if (principal.authRealm !== "customer" && !(principal.platformAdmin && request.headers["x-admin-tenant-access"] === "support")) {
+    throw new ApiError(404, "RESOURCE_NOT_FOUND", "Resource not found.");
+  }
   if (principal.platformAdmin && request.headers["x-admin-tenant-access"] === "support") {
     if (!principal.platformAdminRole || !["SUPER_ADMIN", "SUPPORT_ADMIN"].includes(principal.platformAdminRole)) {
       throw new ApiError(403, "ADMIN_ROLE_REQUIRED", "Support tenant access is restricted to support administrators.");
@@ -218,22 +225,23 @@ export async function createSession(
   userId: string,
   request: FastifyRequest,
   reply: FastifyReply,
-  options: { mfaVerified?: boolean; client?: pg.PoolClient } = {},
+  options: { mfaVerified?: boolean; client?: pg.PoolClient; realm?: AuthRealm } = {},
 ): Promise<{ csrfToken: string }> {
   const token = randomToken(32);
   const csrfRaw = randomToken(24);
   const csrfHash = sha256(csrfRaw);
   const days = env().SESSION_TTL_DAYS;
-  const values = [userId, sha256(token), csrfHash, request.ip || null, request.headers["user-agent"] || null, String(days), Boolean(options.mfaVerified)];
+  const realm = options.realm ?? "customer";
+  const values = [userId, realm, sha256(token), csrfHash, request.ip || null, request.headers["user-agent"] || null, String(days), Boolean(options.mfaVerified)];
   if (options.client) {
     await options.client.query(`
-      INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
-      VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval,CASE WHEN $7 THEN now() ELSE NULL END)
+      INSERT INTO sessions(user_id, auth_realm, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
+      VALUES ($1,$2,$3,$4,$5,$6,now()+($7 || ' days')::interval,CASE WHEN $8 THEN now() ELSE NULL END)
     `, values);
   } else {
     await query(`
-    INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
-    VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval,CASE WHEN $7 THEN now() ELSE NULL END)
+    INSERT INTO sessions(user_id, auth_realm, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
+    VALUES ($1,$2,$3,$4,$5,$6,now()+($7 || ' days')::interval,CASE WHEN $8 THEN now() ELSE NULL END)
     `, values);
   }
   reply.setCookie("n8nauto_csrf", csrfRaw, {

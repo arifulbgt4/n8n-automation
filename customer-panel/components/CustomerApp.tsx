@@ -41,11 +41,7 @@ function AuthView({ onAuthenticated }: { onAuthenticated: () => void }) {
     try {
       if (mode === "signin") {
         const result = await signIn(form.email, form.password);
-        if (result.mfaRequired || result.mfaSetupRequired) {
-          setNoticeTone("warn");
-          setNotice("This is a platform administrator account. Use the Super Admin Panel to complete MFA.");
-          return;
-        }
+        if (result.mfaRequired || result.mfaSetupRequired) throw new Error("Customer sign-in could not be established. Use a customer account in the Customer Panel.");
       } else {
         await signUp(form); setNotice("Account created. Check your email to verify the address.");
       }
@@ -56,7 +52,7 @@ function AuthView({ onAuthenticated }: { onAuthenticated: () => void }) {
   async function requestReset() {
     if (!form.email) { setNotice(""); return setError("Enter your email first."); }
     setError(""); setNotice(""); setNoticeTone("success");
-    try { await api("/v1/auth/request-password-reset", { method:"POST", body:JSON.stringify({email:form.email}) }); setNotice("If the account exists, a password-reset email has been sent."); } catch (err) { setNotice(""); setError(err instanceof Error ? err.message : "Request failed"); }
+    try { await api("/v1/auth/request-password-reset", { method:"POST", body:JSON.stringify({email:form.email,realm:"customer"}) }); setNotice("If the account exists, a password-reset email has been sent."); } catch (err) { setNotice(""); setError(err instanceof Error ? err.message : "Request failed"); }
   }
   return (
     <main className="auth-shell">

@@ -48,13 +48,37 @@ export async function authRoutes(app: FastifyInstance) {
     const token = randomToken(32);
     const passwordHash = await hashPassword(input.password);
     const { userId, tenantId } = await transaction(async (client) => {
-      const existing = await client.query("SELECT id FROM users WHERE email=$1", [input.email]);
-      if (existing.rowCount) throw new ApiError(409, "EMAIL_EXISTS", "An account already exists for this email.");
-      const user = await client.query<{ id: string }>(`
-        INSERT INTO users(email,password_hash,name)
-        VALUES ($1,$2,$3)
-        RETURNING id
-      `, [input.email, passwordHash, input.name]);
+      const existing = await client.query<{ id: string; status: string }>(
+        "SELECT id,status FROM users WHERE email=$1 FOR UPDATE",
+        [input.email],
+      );
+      let userId: string;
+      if (existing.rows[0]) {
+        if (existing.rows[0].status !== "active") {
+          throw new ApiError(403, "ACCOUNT_UNAVAILABLE", "This account is not available for customer sign-in.");
+        }
+        const customerCredential = await client.query(
+          "SELECT 1 FROM auth_credentials WHERE user_id=$1 AND realm='customer'",
+          [existing.rows[0].id],
+        );
+        if (customerCredential.rowCount) throw new ApiError(409, "EMAIL_EXISTS", "An account already exists for this email.");
+        userId = existing.rows[0].id;
+        await client.query(`
+          INSERT INTO auth_credentials(user_id,realm,email,password_hash)
+          VALUES ($1,'customer',$2,$3)
+        `, [userId, input.email, passwordHash]);
+      } else {
+        const user = await client.query<{ id: string }>(`
+          INSERT INTO users(email,password_hash,name)
+          VALUES ($1,$2,$3)
+          RETURNING id
+        `, [input.email, passwordHash, input.name]);
+        userId = user.rows[0].id;
+        await client.query(`
+          INSERT INTO auth_credentials(user_id,realm,email,password_hash)
+          VALUES ($1,'customer',$2,$3)
+        `, [userId, input.email, passwordHash]);
+      }
       let slug = slugify(input.organizationName);
       const collision = await client.query("SELECT 1 FROM tenants WHERE slug=$1", [slug]);
       if (collision.rowCount) slug = `${slug}-${randomToken(4).toLowerCase()}`;
@@ -67,28 +91,28 @@ export async function authRoutes(app: FastifyInstance) {
       await client.query(`
         INSERT INTO tenant_memberships(tenant_id,user_id,role,status)
         VALUES ($1,$2,'OWNER','active')
-      `, [tenant.rows[0].id, user.rows[0].id]);
+      `, [tenant.rows[0].id, userId]);
       await client.query(`
         INSERT INTO email_verification_tokens(user_id,token_hash,expires_at)
         VALUES ($1,$2,now()+interval '24 hours')
-      `, [user.rows[0].id, sha256(token)]);
+      `, [userId, sha256(token)]);
       await client.query(`
         INSERT INTO audit_logs(actor_user_id,tenant_id,action,resource_type,resource_id,safe_diff,ip,user_agent)
         VALUES ($1,$2,'AUTH_SIGNUP','user',$6,$3,$4,$5)
       `, [
-        user.rows[0].id,
+        userId,
         tenant.rows[0].id,
         { email: input.email },
         request.ip,
         request.headers["user-agent"] ?? null,
-        user.rows[0].id,
+        userId,
       ]);
-      return { userId: user.rows[0].id, tenantId: tenant.rows[0].id };
+      return { userId, tenantId: tenant.rows[0].id };
     });
 
     const verifyUrl = `${process.env.CUSTOMER_APP_ORIGIN ?? "http://localhost:3000"}/verify-email?token=${encodeURIComponent(token)}`;
     await sendEmail(input.email, "Verify your account", `Verify your account: ${verifyUrl}`);
-    const session = await createSession(userId, request, reply);
+    const session = await createSession(userId, request, reply, { realm: "customer" });
     reply.code(201).send({
       user: { id: userId, email: input.email, name: input.name, emailVerified: false },
       tenantId,
@@ -101,8 +125,9 @@ export async function authRoutes(app: FastifyInstance) {
     const input = z.object({
       email: z.string().email().transform((v) => v.trim().toLowerCase()),
       password: z.string().min(1).max(200),
+      realm: z.enum(["customer", "admin"]).default("customer"),
     }).parse(request.body);
-    const emailLimitKey=`signin:email:${sha256(input.email)}`;
+    const emailLimitKey=`signin:${input.realm}:email:${sha256(input.email)}`;
     await authRateLimit(emailLimitKey,12,900);
     const result = await query<{
       id: string;
@@ -115,22 +140,24 @@ export async function authRoutes(app: FastifyInstance) {
       admin_mfa_required: boolean;
       admin_mfa_enabled: boolean;
     }>(`
-      SELECT u.id,u.email,u.password_hash,u.name,u.status,u.email_verified_at,
+      SELECT u.id,u.email,c.password_hash,u.name,u.status,u.email_verified_at,
              COALESCE(pa.active,false) AS admin_active,
              COALESCE(pa.mfa_required,false) AS admin_mfa_required,
              COALESCE(pa.mfa_enabled,false) AS admin_mfa_enabled
-      FROM users u LEFT JOIN platform_admins pa ON pa.user_id=u.id
-      WHERE u.email=$1
-    `, [input.email]);
+      FROM auth_credentials c
+      JOIN users u ON u.id=c.user_id
+      LEFT JOIN platform_admins pa ON pa.user_id=u.id
+      WHERE c.email=$1 AND c.realm=$2
+    `, [input.email, input.realm]);
     const user = result.rows[0];
     const valid = user ? await verifyPassword(input.password, user.password_hash) : false;
-    if (!user || !valid || user.status !== "active") {
+    if (!user || !valid || user.status !== "active" || (input.realm === "admin" && !user.admin_active)) {
       throw new ApiError(401, "INVALID_CREDENTIALS", "Email or password is incorrect.");
     }
     await redis().del(redisKey("auth",emailLimitKey)).catch(()=>undefined);
     await query("UPDATE users SET last_login_at=now(), updated_at=now() WHERE id=$1", [user.id]);
 
-    if (user.admin_active && user.admin_mfa_required && user.admin_mfa_enabled) {
+    if (input.realm === "admin" && user.admin_active && user.admin_mfa_required && user.admin_mfa_enabled) {
       const challengeToken = randomToken(32);
       await query(`
         INSERT INTO admin_mfa_challenges(user_id,token_hash,expires_at,ip,user_agent)
@@ -144,12 +171,12 @@ export async function authRoutes(app: FastifyInstance) {
       });
     }
 
-    const session = await createSession(user.id, request, reply);
-    await audit({ actorUserId: user.id, actorType: user.admin_active ? "platform_admin" : "user", action: "AUTH_SIGNIN", resourceType: "user", resourceId: user.id, request });
+    const session = await createSession(user.id, request, reply, { realm: input.realm });
+    await audit({ actorUserId: user.id, actorType: input.realm === "admin" ? "platform_admin" : "user", action: "AUTH_SIGNIN", resourceType: "user", resourceId: user.id, request });
     reply.send({
-      user: { id: user.id, email: user.email, name: user.name, emailVerified: Boolean(user.email_verified_at), platformAdmin: user.admin_active },
+      user: { id: user.id, email: user.email, name: user.name, emailVerified: Boolean(user.email_verified_at), platformAdmin: input.realm === "admin" && user.admin_active },
       csrfToken: session.csrfToken,
-      mfaSetupRequired: Boolean(user.admin_active && user.admin_mfa_required && !user.admin_mfa_enabled),
+      mfaSetupRequired: Boolean(input.realm === "admin" && user.admin_active && user.admin_mfa_required && !user.admin_mfa_enabled),
     });
   });
 
@@ -181,7 +208,7 @@ export async function authRoutes(app: FastifyInstance) {
     const result = await transaction(async (client) => {
       const token = await client.query<{ id: string; user_id: string }>(`
         SELECT id,user_id FROM email_verification_tokens
-        WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now()
+        WHERE token_hash=$1 AND auth_realm='customer' AND used_at IS NULL AND expires_at>now()
         FOR UPDATE
       `, [sha256(input.token)]);
       if (!token.rows[0]) throw new ApiError(400, "VERIFY_TOKEN_INVALID", "Verification token is invalid or expired.");
@@ -194,6 +221,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post("/v1/auth/resend-verification", async (request, reply) => {
     const principal = await requireAuth(request);
+    if (principal.authRealm !== "customer") throw new ApiError(403, "CUSTOMER_SESSION_REQUIRED", "Use the Customer Panel for customer account verification.");
     requireCsrf(request);
     if (principal.emailVerifiedAt) return reply.send({ ok: true });
     const token = randomToken(32);
@@ -208,15 +236,23 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post("/v1/auth/request-password-reset", async (request, reply) => {
     await authRateLimit(`reset:ip:${request.ip}`,20,3600);
-    const input = z.object({ email: z.string().email().transform((v) => v.trim().toLowerCase()) }).parse(request.body);
-    await authRateLimit(`reset:email:${sha256(input.email)}`,5,3600);
-    const user = await query<{ id: string }>("SELECT id FROM users WHERE email=$1 AND status='active'", [input.email]);
+    const input = z.object({
+      email: z.string().email().transform((v) => v.trim().toLowerCase()),
+      realm: z.literal("customer").default("customer"),
+    }).parse(request.body);
+    await authRateLimit(`reset:${input.realm}:email:${sha256(input.email)}`,5,3600);
+    const user = await query<{ id: string }>(`
+      SELECT c.user_id AS id
+        FROM auth_credentials c
+        JOIN users u ON u.id=c.user_id
+       WHERE c.email=$1 AND c.realm=$2 AND u.status='active'
+    `, [input.email, input.realm]);
     if (user.rows[0]) {
       const token = randomToken(32);
       await query(`
-        INSERT INTO password_reset_tokens(user_id,token_hash,expires_at)
-        VALUES ($1,$2,now()+interval '1 hour')
-      `, [user.rows[0].id, sha256(token)]);
+        INSERT INTO password_reset_tokens(user_id,auth_realm,token_hash,expires_at)
+        VALUES ($1,$2,$3,now()+interval '1 hour')
+      `, [user.rows[0].id, input.realm, sha256(token)]);
       const url = `${process.env.CUSTOMER_APP_ORIGIN ?? "http://localhost:3000"}/reset-password?token=${encodeURIComponent(token)}`;
       await sendEmail(input.email, "Reset your password", `Reset your password: ${url}`);
     }
@@ -227,15 +263,20 @@ export async function authRoutes(app: FastifyInstance) {
     const input = z.object({ token: z.string().min(20), password: passwordSchema }).parse(request.body);
     const passwordHash = await hashPassword(input.password);
     await transaction(async (client) => {
-      const token = await client.query<{ id: string; user_id: string }>(`
-        SELECT id,user_id FROM password_reset_tokens
+      const token = await client.query<{ id: string; user_id: string; auth_realm: "customer" | "admin" }>(`
+        SELECT id,user_id,auth_realm FROM password_reset_tokens
         WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now()
         FOR UPDATE
       `, [sha256(input.token)]);
       if (!token.rows[0]) throw new ApiError(400, "RESET_TOKEN_INVALID", "Reset token is invalid or expired.");
-      await client.query("UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1", [token.rows[0].user_id, passwordHash]);
+      const credential = await client.query(
+        "UPDATE auth_credentials SET password_hash=$3,updated_at=now() WHERE user_id=$1 AND realm=$2 RETURNING id",
+        [token.rows[0].user_id, token.rows[0].auth_realm, passwordHash],
+      );
+      if (!credential.rows[0]) throw new ApiError(400, "RESET_TOKEN_INVALID", "Reset token is invalid or expired.");
+      await client.query("UPDATE users SET updated_at=now() WHERE id=$1", [token.rows[0].user_id]);
       await client.query("UPDATE password_reset_tokens SET used_at=now() WHERE id=$1", [token.rows[0].id]);
-      await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL", [token.rows[0].user_id]);
+      await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND auth_realm=$2 AND revoked_at IS NULL", [token.rows[0].user_id, token.rows[0].auth_realm]);
     });
     clearSessionCookie(reply);
     reply.send({ ok: true });
@@ -244,14 +285,15 @@ export async function authRoutes(app: FastifyInstance) {
     const principal=await requireAuth(request);
     requireCsrf(request);
     const input=z.object({currentPassword:z.string().min(1).max(200),newPassword:passwordSchema}).parse(request.body);
-    const user=await query<{password_hash:string}>("SELECT password_hash FROM users WHERE id=$1",[principal.userId]);
+    const user=await query<{password_hash:string}>("SELECT password_hash FROM auth_credentials WHERE user_id=$1 AND realm=$2",[principal.userId,principal.authRealm]);
     if(!user.rows[0] || !(await verifyPassword(input.currentPassword,user.rows[0].password_hash))) {
       throw new ApiError(403,"CURRENT_PASSWORD_INVALID","Current password is incorrect.");
     }
     const passwordHash=await hashPassword(input.newPassword);
     await transaction(async(client)=>{
-      await client.query("UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1",[principal.userId,passwordHash]);
-      await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND id<>$2 AND revoked_at IS NULL",[principal.userId,principal.sessionId]);
+      await client.query("UPDATE auth_credentials SET password_hash=$3,updated_at=now() WHERE user_id=$1 AND realm=$2",[principal.userId,principal.authRealm,passwordHash]);
+      await client.query("UPDATE users SET updated_at=now() WHERE id=$1",[principal.userId]);
+      await client.query("UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND auth_realm=$2 AND id<>$3 AND revoked_at IS NULL",[principal.userId,principal.authRealm,principal.sessionId]);
     });
     await audit({actorUserId:principal.userId,action:"PASSWORD_CHANGED",resourceType:"user",resourceId:principal.userId,request});
     reply.send({ok:true});
