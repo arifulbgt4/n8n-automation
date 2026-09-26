@@ -1,7 +1,7 @@
 "use client";
 
 import {FormEvent,ReactNode,useCallback,useEffect,useState} from "react";
-import {ApiError,api,completeMfa,qs,reauthenticateMfa,signIn,signOut} from "../lib/api";
+import {api,qs,signIn,signOut} from "../lib/api";
 
 type Tab="dashboard"|"tenants"|"queues"|"automation"|"ai-config"|"health"|"audit"|"plans"|"flags";
 const tabs:Array<[Tab,string,string]>=[["dashboard","Platform Dashboard","⌂"],["tenants","Customers / Tenants","◎"],["queues","Queues / Jobs","⇄"],["automation","Automation / n8n","↗"],["ai-config","AI Registry / Templates","◆"],["health","Infrastructure Health","◇"],["audit","Audit / Security","▤"],["plans","Plans / Limits","▦"],["flags","Feature Flags","⚑"]];
@@ -9,39 +9,22 @@ function Badge({children,tone="neutral"}:{children:ReactNode;tone?:string}){retu
 function Card({label,value,note}:{label:string;value:ReactNode;note?:string}){return <div className="card"><span>{label}</span><b>{value}</b>{note&&<small>{note}</small>}</div>}
 function Modal({title,onClose,children}:{title:string;onClose:()=>void;children:ReactNode}){return <div className="modal-bg" onMouseDown={onClose}><div className="modal" onMouseDown={e=>e.stopPropagation()}><header><h3>{title}</h3><button onClick={onClose}>×</button></header>{children}</div></div>}
 async function sensitive<T>(action:()=>Promise<T>):Promise<T>{
- try{return await action()}
- catch(error){
-  if(!(error instanceof ApiError)||!['ADMIN_REAUTH_REQUIRED','ADMIN_MFA_REQUIRED'].includes(error.code))throw error;
-  const code=typeof window==='undefined'?null:window.prompt("Enter your 6-digit authenticator code to continue");
-  if(!code)throw error;
-  await reauthenticateMfa(code);
-  return action();
- }
+ return action();
 }
 function fmt(v:unknown){return new Intl.NumberFormat().format(Number(v||0))} function date(v:any){return v?new Date(v).toLocaleString():"—"}
 
 function Login({done}:{done:()=>void}){
- const [email,setEmail]=useState("");const[password,setPassword]=useState("");const[challengeToken,setChallengeToken]=useState("");const[mfaCode,setMfaCode]=useState("");const[error,setError]=useState("");const[busy,setBusy]=useState(false);
- async function login(e:FormEvent){e.preventDefault();setBusy(true);setError("");try{const r=await signIn(email,password);if(!r.user?.platformAdmin)throw new Error("This account is not a platform administrator.");if(r.mfaRequired){setChallengeToken(r.challengeToken);return}done()}catch(e){setError(e instanceof Error?e.message:"Sign in failed")}finally{setBusy(false)}}
- async function verify(e:FormEvent){e.preventDefault();setBusy(true);setError("");try{await completeMfa(challengeToken,mfaCode);done()}catch(e){setError(e instanceof Error?e.message:"MFA verification failed")}finally{setBusy(false)}}
- return <main className="login-page"><div className="login-box"><div className="admin-mark">A</div><h1>Super Admin</h1>{challengeToken?<><p>Enter the code from your authenticator app. This challenge expires shortly.</p><form onSubmit={verify}><label>Authenticator code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={mfaCode} onChange={e=>setMfaCode(e.target.value.replace(/\D/g,""))}/></label>{error&&<div className="alert bad">{error}</div>}<button className="primary" disabled={busy}>{busy?"Verifying…":"Verify and continue"}</button></form></>:<><p>Sign in with your Super Admin email and password.</p><form onSubmit={login}><label>Email<input type="email" required value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" required value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<div className="alert bad">{error}</div>}<button className="primary" disabled={busy}>{busy?"Signing in…":"Sign in"}</button></form></>}</div></main>
-}
-
-function MfaSetup({onComplete}:{onComplete:()=>Promise<void>}){
- const[status,setStatus]=useState<any>(null);const[secret,setSecret]=useState("");const[uri,setUri]=useState("");const[code,setCode]=useState("");const[recovery,setRecovery]=useState<string[]>([]);const[error,setError]=useState("");const[busy,setBusy]=useState(false);
- useEffect(()=>{api<any>("/v1/admin/mfa/status").then(setStatus).catch(e=>setError(e instanceof Error?e.message:"Unable to load MFA status"))},[]);
- async function setup(){setBusy(true);setError("");try{const r=await api<any>("/v1/admin/mfa/setup",{method:"POST",body:"{}"});setSecret(r.secret);setUri(r.otpauthUri)}catch(e){setError(e instanceof Error?e.message:"Unable to start MFA setup")}finally{setBusy(false)}}
- async function confirm(e:FormEvent){e.preventDefault();setBusy(true);setError("");try{const r=await api<any>("/v1/admin/mfa/confirm",{method:"POST",body:JSON.stringify({code})});setRecovery(r.recoveryCodes||[]);setStatus((value:any)=>({...value,mfa_enabled:true}));}catch(e){setError(e instanceof Error?e.message:"Unable to confirm MFA")}finally{setBusy(false)}}
- if(recovery.length)return <main className="login-page"><div className="login-box security-box"><div className="admin-mark">A</div><h1>Save recovery codes</h1><p>These one-time codes are shown once. Store them in a password manager before continuing.</p><div className="recovery">{recovery.map(value=><code key={value}>{value}</code>)}</div><button className="primary" onClick={()=>void onComplete()}>Continue to Super Admin</button></div></main>;
- return <main className="login-page"><div className="login-box security-box"><div className="admin-mark">A</div><h1>Set up administrator MFA</h1><p>Every platform administrator must enroll an authenticator before using privileged operations.</p>{error&&<div className="alert bad">{error}</div>}{!secret?<><p className="alert info">Use an authenticator app such as 1Password, Google Authenticator or Authy.</p><button className="primary" onClick={setup} disabled={busy}>{busy?"Preparing…":"Generate setup secret"}</button></>:<form onSubmit={confirm}><label>Secret key<span className="secret">{secret}</span></label><label>Authenticator URI<span className="secret">{uri}</span></label><label>6-digit code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,""))}/></label><button className="primary" disabled={busy}>{busy?"Confirming…":"Confirm MFA"}</button></form>}{status?.mfa_enabled&&<p className="alert info">MFA is enabled for this account. Sign out and sign in again if this session needs a fresh challenge.</p>}</div></main>
+ const [email,setEmail]=useState("");const[password,setPassword]=useState("");const[error,setError]=useState("");const[busy,setBusy]=useState(false);
+ async function login(e:FormEvent){e.preventDefault();setBusy(true);setError("");try{const r=await signIn(email,password);if(!r.user?.platformAdmin)throw new Error("This account is not a platform administrator.");done()}catch(e){setError(e instanceof Error?e.message:"Sign in failed")}finally{setBusy(false)}}
+ return <main className="login-page"><div className="login-box"><div className="admin-mark">A</div><h1>Super Admin</h1><p>Sign in with your Super Admin email and password.</p><form onSubmit={login}><label>Email<input type="email" required value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" required value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<div className="alert bad">{error}</div>}<button className="primary" disabled={busy}>{busy?"Signing in…":"Sign in"}</button></form></div></main>
 }
 
 export default function AdminApp(){
  const [me,setMe]=useState<any>(null);const[loading,setLoading]=useState(true);const[tab,setTab]=useState<Tab>("dashboard");const[error,setError]=useState("");
  const loadMe=useCallback(async()=>{setLoading(true);try{const r=await api<any>("/v1/auth/me");if(!r.principal?.platformAdmin)throw new Error("not admin");setMe(r.principal)}catch{setMe(null)}finally{setLoading(false)}},[]);useEffect(()=>{loadMe()},[loadMe]);
- if(loading)return <div className="center">Loading admin console…</div>;if(!me)return <Login done={loadMe}/>;if(me.platformAdminMfaRequired&&!me.platformAdminMfaEnabled)return <MfaSetup onComplete={loadMe}/>;
+ if(loading)return <div className="center">Loading admin console…</div>;if(!me)return <Login done={loadMe}/>;
  async function logout(){await signOut();setMe(null)}
- return <div className="shell"><aside><div className="brand"><div className="admin-mark mini">A</div><div><b>Automation</b><span>Super Admin</span></div></div><nav>{tabs.map(([k,l,i])=><button className={tab===k?"active":""} key={k} onClick={()=>setTab(k)}><span>{i}</span>{l}</button>)}</nav><div className="aside-bottom"><small>{me.email}</small><small><Badge tone="good">{me.platformAdminRole||"ADMIN"}</Badge></small><button onClick={logout}>Sign out</button></div></aside><main><header className="top"><div><small>Platform operator</small><h1>{tabs.find(([k])=>k===tab)?.[1]}</h1></div><Badge tone="good">MFA verified</Badge></header>{error&&<div className="alert bad content-alert">{error}<button onClick={()=>setError("")}>×</button></div>}<section className="content">{tab==="dashboard"&&<Dashboard/>}{tab==="tenants"&&<Tenants/>}{tab==="queues"&&<Queues/>}{tab==="automation"&&<Automation/>}{tab==="ai-config"&&<AiConfig/>}{tab==="health"&&<Health/>}{tab==="audit"&&<Audit/>}{tab==="plans"&&<Plans/>}{tab==="flags"&&<FeatureFlags/>}</section></main></div>
+ return <div className="shell"><aside><div className="brand"><div className="admin-mark mini">A</div><div><b>Automation</b><span>Super Admin</span></div></div><nav>{tabs.map(([k,l,i])=><button className={tab===k?"active":""} key={k} onClick={()=>setTab(k)}><span>{i}</span>{l}</button>)}</nav><div className="aside-bottom"><small>{me.email}</small><small><Badge tone="good">{me.platformAdminRole||"ADMIN"}</Badge></small><button onClick={logout}>Sign out</button></div></aside><main><header className="top"><div><small>Platform operator</small><h1>{tabs.find(([k])=>k===tab)?.[1]}</h1></div><Badge tone="good">Admin session</Badge></header>{error&&<div className="alert bad content-alert">{error}<button onClick={()=>setError("")}>×</button></div>}<section className="content">{tab==="dashboard"&&<Dashboard/>}{tab==="tenants"&&<Tenants/>}{tab==="queues"&&<Queues/>}{tab==="automation"&&<Automation/>}{tab==="ai-config"&&<AiConfig/>}{tab==="health"&&<Health/>}{tab==="audit"&&<Audit/>}{tab==="plans"&&<Plans/>}{tab==="flags"&&<FeatureFlags/>}</section></main></div>
 }
 
 function Dashboard(){

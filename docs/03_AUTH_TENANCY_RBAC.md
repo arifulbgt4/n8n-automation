@@ -17,7 +17,7 @@ Required flows:
 - View/revoke active sessions.
 - Account suspension/disabled-state handling.
 - Invitation acceptance for tenant members.
-- Customer MFA remains a roadmap item; platform administrators require TOTP MFA (or a one-time recovery code) before privileged access.
+- Customer MFA remains a roadmap item. Super Admin and customer access remain separate realms; the current Super Admin deployment does not require MFA.
 
 The implementation may later add social/OAuth login, but email/password must not be coupled to a specific provider choice in the domain model.
 
@@ -36,8 +36,7 @@ same email may have one credential in each realm, but each realm has its own
 password hash, browser session audience, and password-reset token. Customer
 sign-in always creates a `customer` session and never returns platform-admin
 MFA state. Super Admin sign-in must explicitly use the `admin` realm; only an
-`admin` session can satisfy `requirePlatformAdmin` or access platform-admin
-MFA endpoints. A customer password reset therefore cannot change or revoke
+`admin` session can satisfy `requirePlatformAdmin`. A customer password reset therefore cannot change or revoke
 the administrator credential/session.
 
 ## 4. Tenant model
@@ -109,13 +108,11 @@ A super-admin identity must never be created merely by setting a tenant role str
 
 ## 8. Super-admin authentication controls
 
-Production-ready super-admin access should require stronger controls:
+The current product policy intentionally keeps Super Admin sign-in password-only. The realm boundary, role checks, CSRF protection, session controls and audit trail still apply. If MFA is reintroduced later, it must be designed as a versioned policy change rather than inferred from legacy enrollment columns.
 
-- MFA.
-- Shorter idle timeout.
+- Shorter idle timeout where practical.
 - Optional IP/network restrictions where practical.
 - Audit log for every sensitive operation.
-- Re-authentication for dangerous actions.
 - No display of full customer AI/Meta secrets.
 
 ## 9. Admin impersonation / support access
@@ -130,7 +127,7 @@ If support impersonation is implemented:
 
 Prefer scoped support views over unrestricted impersonation whenever possible.
 
-The current repository permits only an MFA-verified, read-only support context through the `x-admin-tenant-access: support` header. It is represented as `VIEWER` access and is rejected for write methods or routes that require an owner/admin role; write-capable impersonation remains disabled until explicitly approved.
+The current repository permits only a read-only support context through the `x-admin-tenant-access: support` header. It is represented as `VIEWER` access and is rejected for write methods or routes that require an owner/admin role; write-capable impersonation remains disabled until explicitly approved.
 
 ## 10. Authorization enforcement
 

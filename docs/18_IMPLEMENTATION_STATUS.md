@@ -11,8 +11,8 @@ The repository now contains:
 - shared TypeScript/core package under `packages/core`.
 - PostgreSQL migrations, pgvector schema, audit/outbox/idempotency, billing-ready records, automation deployment metadata, dynamic data, messaging, media, AI/training, business-action and retention tables.
 - Customer Panel covering authentication, businesses, Meta/WhatsApp channels, dynamic data, inbox/handoff, orders/bookings/leads/quotes/support, AI providers/agents/templates, trainer identities, Training Studio, RAG knowledge, media, analytics, team access, follow-ups, quotas, billing history, retention, export and deletion.
-- Super Admin Panel covering tenants, plans/subscriptions/credits, queue/dead-letter control, n8n bundle/deployment health, infrastructure health, API metrics, AI registry/templates, feature flags, audit/security and MFA re-authentication.
-- server-side secret encryption/masking, CSRF protection, MFA, tenant/business authorization, custom-provider SSRF controls and webhook HMAC verification.
+- Super Admin Panel covering tenants, plans/subscriptions/credits, queue/dead-letter control, n8n bundle/deployment health, infrastructure health, API metrics, AI registry/templates, feature flags and audit/security.
+- server-side secret encryption/masking, CSRF protection, separate customer/admin auth realms, tenant/business authorization, custom-provider SSRF controls and webhook HMAC verification. Super Admin MFA enrollment state is cleared and MFA enforcement is disabled by the current product policy.
 - Redis namespacing, aggregation, locks, atomic rate limiting, queue retry/backoff/jitter, priorities, dead-letter classification, worker heartbeat, outbox recovery and analytics rollups.
 - Media Storage tenant provisioning/mapping, quota reconciliation, private-by-default uploads, visibility/delete/content access, checksum deduplication and provider remote-media cache reuse.
 - Facebook, Instagram and WhatsApp normalized inbound/outbound adapters with delivery state, echo/manual-owner handling, reusable media and reconnect/degraded behavior.
@@ -43,7 +43,7 @@ The following are intentionally not source-code tasks and cannot be completed fr
 6. Verify infrastructure-owned PostgreSQL, n8n and Media Storage backups, off-host policy and restore procedure.
 7. Run staging provider end-to-end, load/burst, restore/failure-injection and controlled pilot tests against the real deployed services.
 8. Select a payment provider before implementing provider-specific checkout/webhook behavior. The application is payment-provider ready but no provider has been selected.
-9. Write-capable super-admin impersonation remains disabled until explicitly approved; the optional support header is MFA-protected and read-only.
+9. Write-capable super-admin impersonation remains disabled until explicitly approved; the optional support header is read-only.
 10. PostgreSQL RLS remains optional defense-in-depth; the current implementation enforces tenant/business authorization in the API and query layer.
 
 These gates must not be bypassed by hard-coding production URLs, credentials, workflow IDs or provider secrets into Git.

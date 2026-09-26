@@ -334,7 +334,7 @@ npm run admin:create
 
 The password must be at least 12 characters and contain letters and numbers.
 
-The command creates or upgrades the account to SUPER_ADMIN. The admin model requires MFA enrollment.
+The command creates or upgrades the account to SUPER_ADMIN. The current admin model uses password-only sign-in; customer and admin credentials remain separate realms.
 
 To intentionally reset an existing local admin password:
 

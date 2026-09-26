@@ -72,8 +72,8 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
            s.mfa_verified_at,
            (s.auth_realm='admin' AND pa.user_id IS NOT NULL AND pa.active=true) AS platform_admin,
            CASE WHEN s.auth_realm='admin' AND pa.user_id IS NOT NULL AND pa.active=true THEN pa.role ELSE NULL END AS platform_admin_role,
-           CASE WHEN s.auth_realm='admin' THEN COALESCE(pa.mfa_required,false) ELSE false END AS platform_admin_mfa_required,
-           CASE WHEN s.auth_realm='admin' THEN COALESCE(pa.mfa_enabled,false) ELSE false END AS platform_admin_mfa_enabled
+           false AS platform_admin_mfa_required,
+           false AS platform_admin_mfa_enabled
       FROM sessions s
       JOIN users u ON u.id=s.user_id
       LEFT JOIN platform_admins pa ON pa.user_id=u.id
@@ -127,14 +127,6 @@ export async function requirePlatformAdmin(request: FastifyRequest, options: Pla
   if (!allowedRoles.includes(principal.platformAdminRole)) {
     throw new ApiError(403, "ADMIN_ROLE_REQUIRED", "This platform-admin role cannot perform the requested operation.");
   }
-  if (principal.platformAdminMfaRequired && !options.allowMfaSetup) {
-    if (!principal.platformAdminMfaEnabled) {
-      throw new ApiError(403, "ADMIN_MFA_SETUP_REQUIRED", "Super-admin MFA must be configured before using platform administration.");
-    }
-    if (!principal.mfaVerifiedAt) {
-      throw new ApiError(401, "ADMIN_MFA_REQUIRED", "Super-admin MFA verification is required for this session.");
-    }
-  }
   return principal;
 }
 
@@ -143,13 +135,6 @@ export async function requireRecentPlatformAdmin(
   options: { maxAgeMinutes?: number; roles?: PlatformAdminRole[] } = {},
 ): Promise<SessionPrincipal> {
   const principal = await requirePlatformAdmin(request, { roles: options.roles });
-  if (!principal.platformAdminMfaRequired) return principal;
-  if (!principal.mfaVerifiedAt) throw new ApiError(401, "ADMIN_REAUTH_REQUIRED", "Recent MFA verification is required for this action.");
-  const verifiedAt = new Date(principal.mfaVerifiedAt).getTime();
-  const maxAgeMinutes = options.maxAgeMinutes ?? 15;
-  if (!Number.isFinite(verifiedAt) || Date.now() - verifiedAt > maxAgeMinutes * 60_000) {
-    throw new ApiError(401, "ADMIN_REAUTH_REQUIRED", `Re-enter an MFA code before this sensitive action. Verification remains valid for ${maxAgeMinutes} minutes.`);
-  }
   return principal;
 }
 
@@ -171,9 +156,6 @@ export async function requireTenant(
     }
     if (!allowedRoles.includes("VIEWER")) {
       throw new ApiError(403, "ADMIN_SUPPORT_SCOPE_REQUIRED", "This support view requires an explicitly scoped tenant membership role.");
-    }
-    if (principal.platformAdminMfaRequired && (!principal.platformAdminMfaEnabled || !principal.mfaVerifiedAt)) {
-      throw new ApiError(401, "ADMIN_MFA_REQUIRED", "MFA-verified platform-admin session is required for support tenant access.");
     }
     request.auth = { principal, tenantId, membershipRole: "VIEWER", businessScope: null };
     return request.auth;

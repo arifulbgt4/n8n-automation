@@ -44,7 +44,7 @@ Do not reconstruct business records from Redis.
 2. identify whether failures are retryable provider/network failures or permanent 4xx/auth/configuration failures.
 3. fix credentials/configuration/provider issue first.
 4. retry individual failed jobs from Super Admin.
-5. remove a job only when it is known to be obsolete; destructive removal requires recent admin MFA.
+5. remove a job only when it is known to be obsolete; destructive removal requires the appropriate Super Admin role and audit trail.
 6. verify transport/business idempotency before bulk replay.
 
 Human replies and active customer responses retain higher delivery priority than follow-ups/background work.

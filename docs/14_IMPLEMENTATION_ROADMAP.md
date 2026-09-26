@@ -71,7 +71,7 @@ This file is the delivery checklist and current implementation status. Repositor
 - [x] Business-level membership restriction support.
 - [x] Server-side permission middleware/policies.
 - [x] Platform admin identities/roles separated from tenant roles.
-- [x] Super-admin stronger session/MFA policy.
+- [x] Super-admin stronger session and realm-boundary policy; MFA is currently disabled by product decision.
 - [x] Security event logging.
 - [x] Tenant-isolation tests.
 
@@ -422,7 +422,7 @@ This file is the delivery checklist and current implementation status. Repositor
 ## Phase 21 — Security hardening
 
 - [x] Secret encryption/key rotation.
-- [x] Super Admin MFA.
+- [x] Super Admin password-only sign-in with customer/admin realm separation.
 - [x] CSRF/security headers.
 - [x] SSRF protection for custom provider URLs.
 - [x] Media upload hardening/policy validation in addition to service validation.
@@ -488,7 +488,7 @@ This file is the delivery checklist and current implementation status. Repositor
 - [ ] Meta production permissions/app review as required.
 - [ ] Infrastructure dependencies pass health/readiness checks.
 - [ ] Backups/alerts verified with infrastructure owners.
-- [x] Super Admin MFA enforcement implemented in the API/panel; production rollout still requires applying migration `012_restore_super_admin_security.sql` and verifying enrollment in the target environment.
+- [x] Super Admin MFA enforcement disabled in the API/panel; production rollout requires applying migration `014_disable_super_admin_mfa.sql` and verifying the admin realm can sign in without a challenge.
 - [ ] Queue/dead-letter recovery verified.
 - [ ] n8n production workflow bundle version verified.
 - [ ] Media Storage tenant mappings/quota behavior verified.

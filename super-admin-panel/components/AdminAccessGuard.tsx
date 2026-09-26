@@ -19,10 +19,6 @@ export default function AdminAccessGuard({ children }: Props) {
           router.replace("/");
           return;
         }
-        if (principal.platformAdminMfaRequired && (!principal.platformAdminMfaEnabled || !principal.mfaVerifiedAt)) {
-          router.replace("/");
-          return;
-        }
         if (active) setState("allowed");
       })
       .catch(() => router.replace("/"));

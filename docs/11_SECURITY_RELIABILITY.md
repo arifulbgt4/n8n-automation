@@ -114,7 +114,7 @@ For Meta/provider callbacks:
 - HttpOnly/Secure/SameSite session cookies where applicable.
 - CSRF protection for cookie sessions.
 - session revocation.
-- MFA for super admins; customer MFA roadmap.
+- Separate admin/customer auth realms; Super Admin MFA remains disabled by the current product policy and customer MFA is a roadmap item.
 - brute-force/login rate limits.
 - security event logging.
 

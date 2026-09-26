@@ -239,7 +239,7 @@ Store timestamps in UTC. Businesses maintain timezone settings for display/sched
 - [ ] app DB migrations verified.
 - [ ] app DB/Redis not exposed to browser/public internet.
 - [ ] secrets rotated from development defaults.
-- [ ] super-admin MFA enabled.
+- [x] Super Admin MFA enforcement disabled according to the current product policy; admin/customer realms remain separate.
 - [ ] webhook verification/signatures enabled.
 - [ ] rate limits configured.
 - [ ] dead-letter/retry tooling available.

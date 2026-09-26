@@ -270,6 +270,6 @@ No production launch until:
 - queue retry/dead-letter tests pass.
 - backup restore demonstrated, including physical media bytes.
 - monitoring/alerts operational.
-- Super Admin MFA enabled.
+- Super Admin can sign in without an MFA challenge, while customer/admin authentication realms remain isolated.
 - high-severity known security issues resolved.
 - pilot tenant acceptance criteria passed.
