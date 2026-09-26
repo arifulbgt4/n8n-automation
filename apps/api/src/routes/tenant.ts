@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { query, transaction } from "@n8n-automation/core";
+import { query, transaction, type MembershipRole } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, slugify } from "../lib.js";
 import { assertTenantCountLimit } from "../limits.js";
 
@@ -33,7 +33,10 @@ export async function tenantRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "TENANT_SCOPE_REQUIRED", "Only the tenant owner or an unrestricted administrator can change workspace-wide settings.");
+    }
     requireCsrf(request);
     const input = z.object({
       name: z.string().trim().min(1).max(160).optional(),
@@ -53,19 +56,22 @@ export async function tenantRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/members", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const result = await query(`
       SELECT tm.user_id,tm.role,tm.status,tm.business_scope,tm.created_at,u.email,u.name,u.last_login_at
       FROM tenant_memberships tm JOIN users u ON u.id=tm.user_id
-      WHERE tm.tenant_id=$1 ORDER BY tm.created_at
-    `, [tenantId]);
+      WHERE tm.tenant_id=$1
+        AND ($2::uuid[] IS NULL OR tm.role='OWNER' OR (tm.business_scope IS NOT NULL AND tm.business_scope && $2::uuid[]))
+      ORDER BY tm.created_at
+    `, [tenantId, scope]);
     reply.send({ members: result.rows });
   });
 
   app.patch("/v1/tenants/:tenantId/members/:userId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), userId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       role: z.enum(tenantRoles).optional(),
@@ -73,13 +79,52 @@ export async function tenantRoutes(app: FastifyInstance) {
       businessScope: z.array(z.string().uuid()).nullable().optional(),
     }).parse(request.body);
     if (params.userId === principal.userId && input.status === "suspended") throw new ApiError(400, "SELF_SUSPEND_FORBIDDEN", "You cannot suspend your own membership.");
+    const target = await query<{ role: MembershipRole; status: string; business_scope: string[] | null }>(
+      "SELECT role,status,business_scope FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2",
+      [params.tenantId, params.userId],
+    );
+    const targetRole = target.rows[0]?.role;
+    if (!targetRole) throw new ApiError(404, "MEMBER_NOT_FOUND", "Member not found.");
+    if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      const targetScope = target.rows[0]?.business_scope;
+      if (!context.businessScope.length || targetScope === null || !targetScope.length || targetScope.some((businessId) => !context.businessScope?.includes(businessId))) {
+        throw new ApiError(403, "BUSINESS_SCOPE_ESCALATION", "A business-scoped administrator cannot manage a member outside their own business scope.");
+      }
+    }
+    if (context.membershipRole !== "OWNER" && targetRole === "OWNER") {
+      throw new ApiError(403, "OWNER_PROTECTED", "Only the tenant owner can change another owner.");
+    }
+    if (input.role === "OWNER" && context.membershipRole !== "OWNER") {
+      throw new ApiError(403, "OWNER_TRANSFER_FORBIDDEN", "Only the tenant owner can transfer ownership.");
+    }
+    if (params.userId === principal.userId && input.role && input.role !== "OWNER") {
+      throw new ApiError(400, "SELF_OWNER_DEMOTION_FORBIDDEN", "The tenant owner cannot demote their own membership.");
+    }
+    if (targetRole === "OWNER" && input.status === "suspended") {
+      throw new ApiError(400, "OWNER_SUSPEND_FORBIDDEN", "A tenant owner cannot be suspended through member management.");
+    }
+    if (input.businessScope !== undefined) {
+      if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+        if (!context.businessScope.length || input.businessScope === null || !input.businessScope.length || input.businessScope.some((businessId) => !context.businessScope?.includes(businessId))) {
+          throw new ApiError(403, "BUSINESS_SCOPE_ESCALATION", "An administrator cannot grant access outside their own business scope.");
+        }
+      }
+      if (Array.isArray(input.businessScope) && input.businessScope.length) {
+        const scoped = await query<{ id: string }>(
+          "SELECT id FROM businesses WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND status<>'archived'",
+          [params.tenantId, input.businessScope],
+        );
+        if (scoped.rowCount !== new Set(input.businessScope).size) {
+          throw new ApiError(400, "BUSINESS_SCOPE_INVALID", "One or more selected businesses are invalid.");
+        }
+      }
+    }
     const result = await query(`
       UPDATE tenant_memberships
-         SET role=COALESCE($3,role),status=COALESCE($4,status),business_scope=COALESCE($5::uuid[],business_scope),updated_at=now()
+         SET role=COALESCE($3,role),status=COALESCE($4,status),business_scope=CASE WHEN $5::boolean THEN $6::uuid[] ELSE business_scope END,updated_at=now()
        WHERE tenant_id=$1 AND user_id=$2
        RETURNING *
-    `, [params.tenantId, params.userId, input.role ?? null, input.status ?? null, input.businessScope ?? null]);
-    if (!result.rows[0]) throw new ApiError(404, "MEMBER_NOT_FOUND", "Member not found.");
+    `, [params.tenantId, params.userId, input.role ?? null, input.status ?? null, Object.prototype.hasOwnProperty.call(input, "businessScope"), input.businessScope ?? null]);
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, action: "MEMBER_UPDATED", resourceType: "tenant_membership", resourceId: params.userId, safeDiff: input, request });
     reply.send({ member: result.rows[0] });
   });
@@ -102,8 +147,11 @@ export async function tenantRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/businesses", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
+    if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A business-scoped administrator cannot create an unscoped business.");
+    }
     await assertTenantCountLimit(tenantId, "businesses", "SELECT count(*) FROM businesses WHERE tenant_id=$1 AND status<>'archived'");
     const input = z.object({
       name: z.string().trim().min(1).max(160),
@@ -137,6 +185,7 @@ export async function tenantRoutes(app: FastifyInstance) {
     const params = z.object({ tenantId: z.string().uuid(), businessId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    await requireBusinessAccess(request, params.tenantId, params.businessId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       name: z.string().trim().min(1).max(160).optional(),

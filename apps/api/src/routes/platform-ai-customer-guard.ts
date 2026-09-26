@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { query } from "@n8n-automation/core";
 import { chat } from "../ai-provider.js";
-import { ApiError, audit, requireAuth, requireCsrf, requireTenant, requestId } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
 import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
 
 const customerProviderModelPattern=/^\/v1\/tenants\/([0-9a-f-]+)\/ai\/(providers|models)(?:\/|$)/i;
@@ -40,6 +40,7 @@ export async function platformAiCustomerGuard(app:FastifyInstance){
     `,[agentId,tenantId]);
     const row=agent.rows[0];
     if(!row) throw new ApiError(404,"AGENT_NOT_FOUND","AI agent not found.");
+    await requireBusinessAccess(request, tenantId, row.business_id, ["OWNER", "ADMIN", "STAFF"]);
     const promptId=input.promptVersionId??row.active_prompt_version_id;
     if(!promptId) throw new ApiError(409,"AGENT_NOT_CONFIGURED","Agent has no active prompt.");
     const prompt=await query<any>("SELECT id,assembled_prompt,status FROM prompt_versions WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3",[promptId,tenantId,agentId]);

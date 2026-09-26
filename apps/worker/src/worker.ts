@@ -190,8 +190,11 @@ async function tenantMediaCredential(tenantId: string): Promise<string> {
   throw new Error("Media credential is not configured");
 }
 
-async function loadAsset(tenantId: string, assetId: string) {
-  const result = await query<any>("SELECT * FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'", [assetId, tenantId]);
+async function loadAsset(tenantId: string, businessId: string, assetId: string) {
+  const result = await query<any>(`SELECT * FROM media_assets
+    WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'
+      AND (business_id IS NULL OR business_id=$3)
+      AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export')`, [assetId, tenantId, businessId]);
   if (!result.rows[0]) throw new Error(`Media asset ${assetId} not found`);
   return result.rows[0];
 }
@@ -205,14 +208,14 @@ async function fetchAssetBytes(tenantId: string, asset: any): Promise<{ bytes: A
 }
 
 
-async function fetchInboundMedia(messageId: string) {
+async function fetchInboundMedia(tenantId: string, messageId: string) {
   const result = await query<any>(`
     SELECT m.id,m.tenant_id,m.business_id,m.channel_account_id,m.conversation_id,m.message_type,m.metadata,
            ca.platform,ca.external_account_id,ca.graph_api_version
       FROM messages m
-      JOIN channel_accounts ca ON ca.id=m.channel_account_id
-     WHERE m.id=$1 AND m.direction='INBOUND'
-  `, [messageId]);
+      JOIN channel_accounts ca ON ca.id=m.channel_account_id AND ca.tenant_id=m.tenant_id AND ca.business_id=m.business_id
+     WHERE m.id=$1 AND m.tenant_id=$2 AND m.direction='INBOUND'
+  `, [messageId, tenantId]);
   const row = result.rows[0];
   if (!row) throw new Error("Inbound message for media ingestion was not found");
   const credentials = await query<{ credential_type: string; encrypted_value: string }>(
@@ -255,14 +258,14 @@ async function fetchInboundMedia(messageId: string) {
 async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
   const messageId = String(job.data.payload.messageId || "");
   if (!messageId) throw new Error("Media ingestion job is missing messageId");
-  const existingLink = await query("SELECT 1 FROM message_media WHERE message_id=$1 LIMIT 1", [messageId]);
+  const existingLink = await query("SELECT 1 FROM message_media WHERE message_id=$1 AND tenant_id=$2 LIMIT 1", [messageId, job.data.tenantId]);
   if (existingLink.rowCount) {
     await query("UPDATE messages SET metadata=metadata||'{\"mediaIngestStatus\":\"ready\"}'::jsonb,updated_at=now() WHERE id=$1", [messageId]);
     return;
   }
 
   try {
-    const { row, bytes, mime, filename } = await fetchInboundMedia(messageId);
+    const { row, bytes, mime, filename } = await fetchInboundMedia(job.data.tenantId, messageId);
     if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
     const credential = await tenantMediaCredential(row.tenant_id);
     const form = new FormData();
@@ -281,8 +284,8 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
     const assetId = await transaction(async (client) => {
       if (file.checksum_sha256) {
         const duplicate = await client.query<{ id: string }>(
-          "SELECT id FROM media_assets WHERE tenant_id=$1 AND content_hash=$2 AND processing_status='ready' ORDER BY created_at LIMIT 1",
-          [row.tenant_id, file.checksum_sha256],
+          "SELECT id FROM media_assets WHERE tenant_id=$1 AND content_hash=$2 AND processing_status='ready' AND (business_id IS NULL OR business_id=$3) ORDER BY created_at LIMIT 1",
+          [row.tenant_id, file.checksum_sha256, row.business_id],
         );
         if (duplicate.rows[0]) return duplicate.rows[0].id;
       }
@@ -335,12 +338,13 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
   }
 }
 
-async function loadChannelRuntime(channelId: string, conversationId: string) {
-  const channel = await query<any>(`
+async function loadChannelRuntime(channelId: string, conversationId: string, tenantId: string, businessId: string) {
+    const channel = await query<any>(`
     SELECT ca.*,cv.mode,cv.status AS conversation_status,cv.state_version,ct.external_contact_id
     FROM channel_accounts ca JOIN conversations cv ON cv.channel_account_id=ca.id JOIN contacts ct ON ct.id=cv.contact_id
-    WHERE ca.id=$1 AND cv.id=$2
-  `, [channelId, conversationId]);
+    WHERE ca.id=$1 AND cv.id=$2 AND ca.tenant_id=$3 AND ca.business_id=$4
+      AND cv.tenant_id=$3 AND cv.business_id=$4
+  `, [channelId, conversationId, tenantId, businessId]);
   if (!channel.rows[0]) throw new Error("Channel/conversation context missing");
   const credentials = await query<{ credential_type: string; encrypted_value: string }>("SELECT credential_type,encrypted_value FROM channel_credentials WHERE channel_account_id=$1", [channelId]);
   return { ...channel.rows[0], credentials: Object.fromEntries(credentials.rows.map((row) => [row.credential_type, decryptSecret(row.encrypted_value)])) };
@@ -416,7 +420,7 @@ async function sendProviderMessage(tenantId: string, channel: any, message: any)
       const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, messaging_type: "RESPONSE", message: { text: message.text } });
       return { providerMessageId: json.message_id ?? null };
     }
-    const asset = await loadAsset(tenantId, message.assetId);
+    const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
     const attachmentId = await facebookAttachment(tenantId, channel, asset);
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : asset.kind === "document" ? "file" : "image";
     try {
@@ -437,7 +441,7 @@ async function sendProviderMessage(tenantId: string, channel: any, message: any)
       const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { text: message.text } });
       return { providerMessageId: json.message_id ?? null };
     }
-    const asset = await loadAsset(tenantId, message.assetId);
+    const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
     if (!asset.public_url) throw new Error("Instagram media delivery requires a provider-accessible public media URL");
     const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { attachment: { type: asset.kind === "video" ? "video" : "image", payload: { url: asset.public_url } } } });
     return { providerMessageId: json.message_id ?? null };
@@ -449,7 +453,7 @@ async function sendProviderMessage(tenantId: string, channel: any, message: any)
       const json = await providerJson(url, token, { messaging_product: "whatsapp", to: channel.external_contact_id, type: "text", text: { body: message.text } });
       return { providerMessageId: json.messages?.[0]?.id ?? null };
     }
-    const asset = await loadAsset(tenantId, message.assetId);
+    const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
     const mediaId = await whatsappMedia(tenantId, channel, asset);
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : asset.kind === "document" ? "document" : "image";
     const json = await providerJson(url, token, { messaging_product: "whatsapp", to: channel.external_contact_id, type, [type]: { id: mediaId, ...(message.caption && ["image","video"].includes(type) ? { caption: message.caption } : {}) } });
@@ -464,7 +468,7 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   if (!businessId || !channelAccountId || !conversationId) throw new Error("Outbound job is missing scope identifiers");
   const existing = await query("SELECT id,delivery_status FROM messages WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2 LIMIT 1", [tenantId,idempotencyKey]);
   if (existing.rows[0]?.delivery_status === "sent") return;
-  const channel = await loadChannelRuntime(channelAccountId, conversationId);
+  const channel = await loadChannelRuntime(channelAccountId, conversationId, tenantId, businessId);
   if (!channel.active || channel.connection_status !== "connected" || channel.conversation_status !== "open") throw new Error("Channel or conversation is not active");
   if (payload.senderType === "AI" && channel.mode !== "AI") return;
   const tenant = await query<{ status: string }>("SELECT status FROM tenants WHERE id=$1", [tenantId]);
@@ -505,6 +509,7 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   }
 
   const message = payload.message;
+  if (message.type === "media") await loadAsset(tenantId, businessId, message.assetId);
   const persisted = await query<any>(`
     INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,direction,sender_type,message_type,text_content,delivery_status,metadata)
     VALUES ($1,$2,$3,$4,'OUTBOUND',$5,$6,$7,'sending',$8::jsonb) RETURNING id

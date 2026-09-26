@@ -69,7 +69,10 @@ async function provisionTenantMediaUser(tenantId: string, name: string) {
 export async function mediaRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/media/storage", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "TENANT_SCOPE_REQUIRED", "A restricted administrator cannot inspect or provision tenant-wide media storage.");
+    }
     let account = await mediaAccount(tenantId);
     if (!account && env().MEDIA_ADMIN_TOKEN) {
       const tenant = await query<{ name: string }>("SELECT name FROM tenants WHERE id=$1", [tenantId]);
@@ -87,7 +90,10 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/media/provision", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "TENANT_SCOPE_REQUIRED", "A restricted administrator cannot provision tenant-wide media storage.");
+    }
     requireCsrf(request);
     if (!env().MEDIA_ADMIN_TOKEN) throw new ApiError(503, "MEDIA_AUTO_PROVISION_DISABLED", "Automatic media user provisioning is not configured.");
     const tenant = await query<{ name: string }>("SELECT name FROM tenants WHERE id=$1", [tenantId]);
@@ -122,30 +128,50 @@ export async function mediaRoutes(app: FastifyInstance) {
         (SELECT count(*)::int FROM collection_item_media cim WHERE cim.media_asset_id=m.id) +
         (SELECT count(*)::int FROM message_media mm WHERE mm.media_asset_id=m.id) AS reference_count
       FROM media_assets m
-      WHERE m.tenant_id=$1 AND m.processing_status<>'deleted' AND ($2::uuid IS NULL OR m.business_id=$2)
+      WHERE m.tenant_id=$1 AND m.processing_status<>'deleted'
+        AND COALESCE(m.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+        AND ($2::uuid IS NULL OR m.business_id=$2)
         AND ($3::uuid[] IS NULL OR m.business_id IS NULL OR m.business_id=ANY($3::uuid[]))
       ORDER BY m.created_at DESC LIMIT $4 OFFSET $5
     `, [tenantId, q.businessId ?? null, scope, q.limit, q.offset]);
-    const count = await query<{ count: string }>("SELECT count(*) FROM media_assets WHERE tenant_id=$1 AND processing_status<>'deleted'", [tenantId]);
+    const count = await query<{ count: string }>(`
+      SELECT count(*)
+      FROM media_assets m
+      WHERE m.tenant_id=$1 AND m.processing_status<>'deleted'
+        AND COALESCE(m.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+        AND ($2::uuid IS NULL OR m.business_id=$2)
+        AND ($3::uuid[] IS NULL OR m.business_id IS NULL OR m.business_id=ANY($3::uuid[]))
+    `, [tenantId, q.businessId ?? null, scope]);
     reply.send({ assets: result.rows, total: Number(count.rows[0]?.count ?? 0), limit: q.limit, offset: q.offset });
   });
 
   app.post("/v1/tenants/:tenantId/media", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN", "STAFF"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const businessIdHeader = request.headers["x-business-id"] as string | undefined;
     const businessId = businessIdHeader ? z.string().uuid().parse(businessIdHeader) : null;
+    if (context.membershipRole !== "OWNER" && !businessId) {
+      throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A non-owner media upload must target a selected business.");
+    }
     if (businessId) {
       await requireBusinessAccess(request, tenantId, businessId, ["OWNER","ADMIN","STAFF"]);
       const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [businessId, tenantId]);
       if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     }
-    const file = await request.file({ limits: { fileSize: 512 * 1024 * 1024, files: 1 } });
+    let file: any;
+    try {
+      file = await request.file({ limits: { fileSize: env().MAX_UPLOAD_BYTES, files: 1 } });
+    } catch {
+      throw new ApiError(413, "MEDIA_FILE_TOO_LARGE", "The uploaded file exceeds the allowed request size.", { limitBytes: env().MAX_UPLOAD_BYTES });
+    }
     if (!file) throw new ApiError(400, "FILE_REQUIRED", "A file is required.");
     const visibilityField = file.fields.visibility;
     const visibility = visibilityField && "value" in visibilityField && visibilityField.value === "public" ? "public" : "private";
+    if (visibility === "public" && context.membershipRole !== "OWNER" && context.membershipRole !== "ADMIN") {
+      throw new ApiError(403, "PUBLIC_MEDIA_FORBIDDEN", "Only an owner or administrator can publish media publicly.");
+    }
     const bytes = await file.toBuffer();
     await assertMediaStorageLimit(tenantId, bytes.length);
     const form = new FormData();
@@ -182,9 +208,12 @@ export async function mediaRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/media/:assetId/content", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), assetId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, params.tenantId);
-    const asset = await query<{ storage_file_id: string; mime_type: string; original_name: string | null; business_id: string | null }>("SELECT storage_file_id,mime_type,original_name,business_id FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status<>'deleted'", [params.assetId, params.tenantId]);
+    const context = await requireTenant(request, params.tenantId);
+    const asset = await query<{ storage_file_id: string; mime_type: string; original_name: string | null; business_id: string | null; metadata: Record<string, unknown> | null }>("SELECT storage_file_id,mime_type,original_name,business_id,metadata FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status<>'deleted'", [params.assetId, params.tenantId]);
     if (!asset.rows[0]) throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    if (String(asset.rows[0].metadata?.source ?? "") === "tenant_export" && context.membershipRole !== "OWNER") {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
     if (asset.rows[0].business_id) await requireBusinessAccess(request, params.tenantId, asset.rows[0].business_id);
     const response = await mediaFetch(params.tenantId, `/api/v1/files/${encodeURIComponent(asset.rows[0].storage_file_id)}/content`);
     if (!response.ok || !response.body) throw new ApiError(502, "MEDIA_DOWNLOAD_FAILED", "Unable to download media content.");
@@ -194,19 +223,49 @@ export async function mediaRoutes(app: FastifyInstance) {
     return reply.send(response.body);
   });
 
+  app.get("/v1/tenants/:tenantId/data-requests/:requestId/download", async (request, reply) => {
+    const params = z.object({ tenantId: z.string().uuid(), requestId: z.string().uuid() }).parse(request.params);
+    await requireTenant(request, params.tenantId, ["OWNER"]);
+    const result = await query<{ storage_file_id: string; mime_type: string; original_name: string | null; metadata: Record<string, unknown> | null }>(`
+      SELECT m.storage_file_id,m.mime_type,m.original_name,m.metadata
+      FROM tenant_data_requests r
+      JOIN media_assets m ON m.id=r.result_media_asset_id
+      WHERE r.id=$1 AND r.tenant_id=$2 AND r.type='export' AND r.status='completed' AND m.processing_status<>'deleted'
+    `, [params.requestId, params.tenantId]);
+    const asset = result.rows[0];
+    if (!asset || !["tenant_export", "collection_export"].includes(String(asset.metadata?.source ?? ""))) {
+      throw new ApiError(404, "EXPORT_NOT_FOUND", "Completed export is not available.");
+    }
+    const response = await mediaFetch(params.tenantId, `/api/v1/files/${encodeURIComponent(asset.storage_file_id)}/content`);
+    if (!response.ok || !response.body) throw new ApiError(502, "MEDIA_DOWNLOAD_FAILED", "Unable to download the export.");
+    reply.header("content-type", response.headers.get("content-type") || asset.mime_type || "application/json");
+    reply.header("cache-control", "private, no-store");
+    reply.header("content-disposition", `attachment; filename="${(asset.original_name || "tenant-export.json").replace(/[\r\n\"]/g, "_")}"`);
+    return reply.send(response.body);
+  });
+
   app.delete("/v1/tenants/:tenantId/media/:assetId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), assetId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
-    const asset = await query<{ storage_file_id: string; business_id: string | null }>(`
-      SELECT m.storage_file_id,m.business_id
+    const context = await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
+    const asset = await query<{ storage_file_id: string; business_id: string | null; metadata: Record<string, unknown> | null }>(`
+      SELECT m.storage_file_id,m.business_id,m.metadata
       FROM media_assets m
       WHERE m.id=$1 AND m.tenant_id=$2 AND m.processing_status<>'deleted'
         AND NOT EXISTS(SELECT 1 FROM collection_item_media x WHERE x.media_asset_id=m.id)
         AND NOT EXISTS(SELECT 1 FROM message_media x WHERE x.media_asset_id=m.id)
     `, [params.assetId, params.tenantId]);
     if (!asset.rows[0]) throw new ApiError(409, "MEDIA_IN_USE_OR_MISSING", "Media is referenced by another record or does not exist.");
+    if (String(asset.rows[0].metadata?.source ?? "") === "tenant_export" && context.membershipRole !== "OWNER") {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
+    if (!asset.rows[0].business_id && context.membershipRole === "STAFF") {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
+    if (!asset.rows[0].business_id && context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
     if (asset.rows[0].business_id) await requireBusinessAccess(request, params.tenantId, asset.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     const response = await mediaFetch(params.tenantId, `/api/v1/files/${encodeURIComponent(asset.rows[0].storage_file_id)}`, { method: "DELETE" });
     if (!response.ok && response.status !== 404) throw new ApiError(502, "MEDIA_DELETE_FAILED", "Media storage deletion failed.");
@@ -218,11 +277,17 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/media/:assetId/visibility", async (request, reply) => {
     const params=z.object({tenantId:z.string().uuid(),assetId:z.string().uuid()}).parse(request.params);
     const principal=await requireAuth(request);
-    await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
+    const context=await requireTenant(request,params.tenantId,["OWNER","ADMIN"]);
     requireCsrf(request);
     const input=z.object({visibility:z.enum(["private","public"])}).parse(request.body);
     const asset=await query<any>("SELECT * FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status<>'deleted'",[params.assetId,params.tenantId]);
     if(!asset.rows[0]) throw new ApiError(404,"MEDIA_NOT_FOUND","Media asset not found.");
+    if (String(asset.rows[0].metadata?.source ?? "") === "tenant_export" && context.membershipRole !== "OWNER") {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
+    if (!asset.rows[0].business_id && context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
     if(asset.rows[0].business_id) await requireBusinessAccess(request,params.tenantId,asset.rows[0].business_id,["OWNER","ADMIN","STAFF"]);
     const response=await mediaFetch(params.tenantId,`/api/v1/files/${encodeURIComponent(asset.rows[0].storage_file_id)}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({visibility:input.visibility})});
     const body=await response.json().catch(()=>({})) as any;
@@ -255,14 +320,23 @@ export async function mediaRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const input = z.object({ assetId: z.string().uuid(), role: z.string().max(40).default("gallery"), displayOrder: z.number().int().min(0).default(0) }).parse(request.body);
-    const scope = await query<{ business_id: string }>(`
-      SELECT i.business_id FROM collection_items i JOIN collections c ON c.id=i.collection_id
+    const scope = await query<{ business_id: string; collection_business_id: string }>(`
+      SELECT i.business_id,c.business_id AS collection_business_id FROM collection_items i JOIN collections c ON c.id=i.collection_id
       WHERE i.id=$1 AND i.collection_id=$2 AND i.tenant_id=$3
     `, [params.itemId, params.collectionId, params.tenantId]);
-    if (!scope.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
+    if (!scope.rows[0] || scope.rows[0].business_id !== scope.rows[0].collection_business_id) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
     await requireBusinessAccess(request, params.tenantId, scope.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
-    const asset = await query("SELECT id FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status<>'deleted'", [input.assetId, params.tenantId]);
+    const asset = await query<{ id: string; business_id: string | null; metadata: Record<string, unknown> | null }>(
+      "SELECT id,business_id,metadata FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'",
+      [input.assetId, params.tenantId],
+    );
     if (!asset.rows[0]) throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    if (["tenant_export", "collection_export"].includes(String(asset.rows[0].metadata?.source ?? ""))) {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
+    if (asset.rows[0].business_id && asset.rows[0].business_id !== scope.rows[0].business_id) {
+      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+    }
     await query(`
       INSERT INTO collection_item_media(collection_item_id,media_asset_id,tenant_id,role,display_order)
       VALUES ($1,$2,$3,$4,$5)

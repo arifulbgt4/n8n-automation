@@ -2,11 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { decryptSecret, query } from "@n8n-automation/core";
 import { assertSafeAiBaseUrl } from "../ai-provider.js";
-import { ApiError, requireTenant } from "../lib.js";
+import { ApiError, requireBusinessAccess, requireTenant } from "../lib.js";
 
 type ProviderRow = {
   id: string;
   tenant_id: string;
+  business_id: string | null;
   provider: "openai" | "anthropic" | "gemini" | "openai_compatible";
   encrypted_api_key: string | null;
   base_url: string | null;
@@ -28,7 +29,7 @@ function keyFor(provider: ProviderRow): string {
 }
 
 async function providerJson(url: string, init: RequestInit): Promise<any> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, { ...init, redirect: "error" });
   const body = await response.json().catch(async () => ({ text: await response.text().catch(() => "") }));
   if (!response.ok) {
     const detail = body?.error?.message || body?.message || body?.text || `Provider returned ${response.status}`;
@@ -41,7 +42,7 @@ async function discoverModels(provider: ProviderRow): Promise<CatalogModel[]> {
   const apiKey = keyFor(provider);
 
   if (provider.provider === "openai" || provider.provider === "openai_compatible") {
-    const base = provider.base_url ? assertSafeAiBaseUrl(provider.base_url) : "https://api.openai.com/v1";
+    const base = provider.base_url ? await assertSafeAiBaseUrl(provider.base_url) : "https://api.openai.com/v1";
     const body = await providerJson(`${base}/models`, {
       headers: { authorization: `Bearer ${apiKey}` },
     });
@@ -98,16 +99,21 @@ async function discoverModels(provider: ProviderRow): Promise<CatalogModel[]> {
 export async function aiModelCatalogRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/ai/providers/:providerId/catalog", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), providerId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
 
     const result = await query<ProviderRow>(
-      `SELECT id,tenant_id,provider,encrypted_api_key,base_url,status
+      `SELECT id,tenant_id,business_id,provider,encrypted_api_key,base_url,status
        FROM ai_provider_connections
        WHERE id=$1 AND tenant_id=$2`,
       [params.providerId, params.tenantId],
     );
     const provider = result.rows[0];
     if (!provider) throw new ApiError(404, "AI_PROVIDER_NOT_FOUND", "AI provider connection not found.");
+    if (provider.business_id) {
+      await requireBusinessAccess(request, params.tenantId, provider.business_id, ["OWNER", "ADMIN"]);
+    } else if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A restricted administrator cannot inspect a tenant-wide AI provider catalog.");
+    }
     if (provider.status === "disabled") throw new ApiError(409, "AI_PROVIDER_DISABLED", "AI provider connection is disabled.");
 
     const models = await discoverModels(provider);

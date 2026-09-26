@@ -1,6 +1,7 @@
 export type Platform = "facebook" | "instagram" | "whatsapp";
 export type ConversationMode = "AI" | "HUMAN" | "PAUSED";
 export type MembershipRole = "OWNER" | "ADMIN" | "STAFF" | "VIEWER";
+export type PlatformAdminRole = "SUPER_ADMIN" | "SUPPORT_ADMIN" | "BILLING_ADMIN" | "OPS_ADMIN" | "READONLY_ADMIN";
 
 export type SessionPrincipal = {
   userId: string;
@@ -10,6 +11,10 @@ export type SessionPrincipal = {
   sessionId: string;
   csrfToken: string;
   platformAdmin: boolean;
+  platformAdminRole: PlatformAdminRole | null;
+  platformAdminMfaRequired: boolean;
+  platformAdminMfaEnabled: boolean;
+  mfaVerifiedAt: string | null;
 };
 
 export type ResponsePlanMessage =

@@ -64,10 +64,11 @@ export async function channelAgentRoutes(app: FastifyInstance) {
            SET agent_profile_id=$3,updated_at=now()
            WHERE tenant_id=$1
              AND channel_account_id=$2
+             AND business_id=$4
              AND status='open'
              AND mode='AI'
              AND agent_profile_id IS NULL`,
-          [params.tenantId, params.channelId, input.agentProfileId],
+          [params.tenantId, params.channelId, input.agentProfileId, channel.business_id],
         );
         backfilled = conversations.rowCount ?? 0;
       }

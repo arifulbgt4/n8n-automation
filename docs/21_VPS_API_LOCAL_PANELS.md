@@ -125,7 +125,7 @@ docker compose run --rm --no-deps \
   automation-api npm run admin:create
 ```
 
-The password must be at least 12 characters and contain letters and numbers. The command marks the user verified and grants `SUPER_ADMIN` access. Super Admin authentication is intentionally email + password only; MFA is disabled.
+The password must be at least 12 characters and contain letters and numbers. The command marks the user verified and grants `SUPER_ADMIN` access. On first sign-in, the administrator must enroll an authenticator app and confirm a TOTP code before the panel becomes available. Recovery codes are shown once during enrollment; store them in a password manager.
 
 To intentionally reset the password for an existing SaaS Super Admin:
 

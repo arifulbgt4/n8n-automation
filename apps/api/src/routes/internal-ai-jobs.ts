@@ -2,12 +2,12 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env, query, transaction } from "@n8n-automation/core";
 import { chat, embedding } from "../ai-provider.js";
-import { ApiError, requestId } from "../lib.js";
+import { ApiError, requestId, safeSecretEqual } from "../lib.js";
 import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (!token || token !== env().INTERNAL_SERVICE_AUTH_SECRET) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Internal service authentication is required.");
+  if (!safeSecretEqual(token, env().INTERNAL_SERVICE_AUTH_SECRET)) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Internal service authentication is required.");
 }
 
 async function resolveTaskModel(tenantId: string, _businessId: string, _agentId: string | null, taskKey: string, _explicitConfigId?: string | null) {
@@ -59,8 +59,9 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
       SELECT c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at,
         COALESCE(jsonb_agg(jsonb_build_object('key',f.key,'label',f.label,'type',f.type,'required',f.required,'aiVisible',f.ai_visible) ORDER BY f.display_order) FILTER(WHERE f.id IS NOT NULL),'[]'::jsonb) AS fields
       FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id LEFT JOIN collection_fields f ON f.collection_id=c.id
-      WHERE acl.agent_profile_id=$1 GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at ORDER BY c.name
-    `, [row.agent_profile_id]);
+      WHERE acl.agent_profile_id=$1 AND acl.tenant_id=$2 AND c.tenant_id=$2 AND c.business_id=$3
+      GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at ORDER BY c.name
+    `, [row.agent_profile_id, row.tenant_id, row.business_id]);
     const capturedVersions=Array.isArray(row.input_snapshot?.collectionVersions)?row.input_snapshot.collectionVersions:[];
     for(const captured of capturedVersions){
       const current=schemas.rows.find((schema:any)=>schema.id===captured.id);
@@ -146,6 +147,12 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
   app.post("/v1/internal/knowledge/search", async (request, reply) => {
     requireInternal(request);
     const input=z.object({tenantId:z.string().uuid(),businessId:z.string().uuid(),agentProfileId:z.string().uuid().nullable().optional(),query:z.string().min(1).max(10000),limit:z.number().int().min(1).max(30).default(8)}).parse(request.body);
+    const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2 AND status<>'archived'", [input.businessId, input.tenantId]);
+    if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
+    if (input.agentProfileId) {
+      const agent = await query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND status<>'archived'", [input.agentProfileId, input.tenantId, input.businessId]);
+      if (!agent.rows[0]) throw new ApiError(400, "AGENT_SCOPE_INVALID", "Agent does not belong to this business.");
+    }
     const model=await resolveTaskModel(input.tenantId,input.businessId,input.agentProfileId ?? null,"EMBEDDINGS",null);
     const embedded=await embedding(model,{model:model.model,parameters:model.parameters ?? {}},input.query);
     await recordPlatformAiUsage({tenantId:input.tenantId,businessId:input.businessId,eventType:"ai_call",unit:"call",taskKey:"EMBEDDINGS",model,usage:embedded.usage,idempotencyKey:`knowledge-search:${requestId(request)}`,correlationId:requestId(request),metadata:{operation:"knowledge_search"}});
@@ -153,7 +160,8 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
     const result=await query(`
       SELECT kc.id,kc.source_id,kc.content,kc.metadata,ks.title,ks.type,1-(kc.embedding <=> $4::vector) AS similarity
       FROM knowledge_chunks kc JOIN knowledge_sources ks ON ks.id=kc.source_id
-      WHERE kc.tenant_id=$1 AND kc.business_id=$2 AND kc.active=true AND ks.status='ready'
+      WHERE kc.tenant_id=$1 AND kc.business_id=$2 AND ks.tenant_id=$1 AND ks.business_id=$2
+        AND kc.active=true AND ks.status='ready'
         AND (ks.agent_profile_id IS NULL OR ks.agent_profile_id=$3)
       ORDER BY kc.embedding <=> $4::vector LIMIT $5
     `,[input.tenantId,input.businessId,input.agentProfileId ?? null,`[${embedded.vector.join(",")}]`,input.limit]);

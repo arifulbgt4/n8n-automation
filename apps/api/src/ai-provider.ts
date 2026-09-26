@@ -1,3 +1,5 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { decryptSecret, env } from "@n8n-automation/core";
 
 export type AiConnection = {
@@ -23,7 +25,22 @@ export type ChatResult = {
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 };
 
-export function assertSafeAiBaseUrl(value: string): string {
+function isPrivateIp(value: string): boolean {
+  const host = value.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isIP(host) === 4) {
+    const octets = host.split(".").map(Number);
+    const [a, b] = octets;
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || (a === 198 && b === 51) || (a === 203 && b === 0) || a >= 224;
+  }
+  if (isIP(host) === 6) {
+    const normalized = host.replace(/^::ffff:/, "");
+    if (normalized !== host && isIP(normalized) === 4) return isPrivateIp(normalized);
+    return host === "::" || host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe8") || host.startsWith("fe9") || host.startsWith("fea") || host.startsWith("feb") || host.startsWith("ff");
+  }
+  return false;
+}
+
+export async function assertSafeAiBaseUrl(value: string): Promise<string> {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("AI provider base URL is invalid"); }
   if (url.protocol !== "https:" && !(env().NODE_ENV !== "production" && url.protocol === "http:")) {
@@ -32,16 +49,13 @@ export function assertSafeAiBaseUrl(value: string): string {
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g,"");
   const blockedNames = new Set(["localhost","localhost.localdomain","metadata.google.internal"]);
   if (blockedNames.has(host) || host.endsWith(".local") || host.endsWith(".internal")) throw new Error("AI provider base URL points to a private hostname");
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const octets = ipv4.slice(1).map(Number);
-    if (octets.some((n) => n < 0 || n > 255)) throw new Error("AI provider base URL contains an invalid IP address");
-    const [a,b] = octets;
-    if (a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) {
-      throw new Error("AI provider base URL points to a private network");
-    }
+  if (isPrivateIp(host)) throw new Error("AI provider base URL points to a private network");
+  if (isIP(host) === 0) {
+    let addresses: Array<{ address: string }>;
+    try { addresses = await lookup(host, { all: true, verbatim: true }); }
+    catch { throw new Error("AI provider base URL hostname could not be resolved"); }
+    if (!addresses.length || addresses.some((entry) => isPrivateIp(entry.address))) throw new Error("AI provider base URL resolves to a private network");
   }
-  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) throw new Error("AI provider base URL points to a private IPv6 address");
   url.username = "";
   url.password = "";
   return url.toString().replace(/\/$/,"");
@@ -66,7 +80,7 @@ async function jsonResponse(response: Response): Promise<any> {
 
 export async function chat(connection: AiConnection, config: AiModelConfig, input: ChatInput): Promise<ChatResult> {
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
+    const base = (connection.base_url ? await assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const messages = [
       ...(input.system ? [{ role: "system", content: input.system }] : []),
       ...input.messages,
@@ -92,6 +106,7 @@ export async function chat(connection: AiConnection, config: AiModelConfig, inpu
       method: "POST",
       headers: { authorization: `Bearer ${apiKey(connection)}`, "content-type": "application/json" },
       body: JSON.stringify(body),
+      redirect: "error",
     });
     const json = await jsonResponse(response);
     return {
@@ -169,11 +184,12 @@ export async function chat(connection: AiConnection, config: AiModelConfig, inpu
 
 export async function embedding(connection: AiConnection, config: AiModelConfig, text: string): Promise<{ vector: number[]; usage: { inputTokens?: number } }> {
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
+    const base = (connection.base_url ? await assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const response = await fetch(`${base}/embeddings`, {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey(connection)}`, "content-type": "application/json" },
       body: JSON.stringify({ model: config.model, input: text }),
+      redirect: "error",
     });
     const json = await jsonResponse(response);
     return { vector: json.data?.[0]?.embedding ?? [], usage: { inputTokens: json.usage?.prompt_tokens } };
@@ -219,7 +235,7 @@ export async function analyzeImages(
   if (!images.length) throw new Error("At least one image is required");
 
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
+    const base = (connection.base_url ? await assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const content: any[] = [{ type: "text", text: prompt }];
     for (const image of images) {
       content.push({
@@ -239,6 +255,7 @@ export async function analyzeImages(
       method: "POST",
       headers: { authorization: `Bearer ${apiKey(connection)}`, "content-type": "application/json" },
       body: JSON.stringify(body),
+      redirect: "error",
     });
     const json = await jsonResponse(response);
     return {
@@ -326,7 +343,7 @@ export async function transcribeAudio(
   audio: BinaryAiInput,
 ): Promise<ChatResult> {
   if (connection.provider === "openai" || connection.provider === "openai_compatible") {
-    const base = (connection.base_url ? assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
+    const base = (connection.base_url ? await assertSafeAiBaseUrl(connection.base_url) : "https://api.openai.com/v1");
     const form = new FormData();
     form.set("model", config.model);
     const audioBuffer = audio.bytes.buffer.slice(audio.bytes.byteOffset, audio.bytes.byteOffset + audio.bytes.byteLength) as ArrayBuffer;
@@ -336,6 +353,7 @@ export async function transcribeAudio(
       method: "POST",
       headers: { authorization: `Bearer ${apiKey(connection)}` },
       body: form,
+      redirect: "error",
     });
     const json = await jsonResponse(response);
     return { text: json.text ?? "", raw: json, usage: json.usage ?? {} };

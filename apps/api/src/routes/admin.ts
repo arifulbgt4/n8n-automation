@@ -123,7 +123,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.post("/v1/admin/queues/:queueName/jobs/:jobId/retry", async (request, reply) => {
-    const principal=await requirePlatformAdmin(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "OPS_ADMIN", "SUPPORT_ADMIN"] });
     requireCsrf(request);
     const params=z.object({queueName:z.string().min(1),jobId:z.string().min(1).max(300)}).parse(request.params);
     if(!(Object.values(QUEUES) as string[]).includes(params.queueName)) throw new ApiError(404,"QUEUE_NOT_FOUND","Queue not found.");
@@ -153,7 +153,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.post("/v1/admin/queues/:queueName/:operation", async (request, reply) => {
-    const principal=await requirePlatformAdmin(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "OPS_ADMIN"] });
     requireCsrf(request);
     const params=z.object({queueName:z.string().min(1),operation:z.enum(["pause","resume"])}).parse(request.params);
     if(!(Object.values(QUEUES) as string[]).includes(params.queueName)) throw new ApiError(404,"QUEUE_NOT_FOUND","Queue not found.");
@@ -266,7 +266,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.put("/v1/admin/feature-flags/:key", async (request, reply) => {
-    const principal = await requirePlatformAdmin(request);
+    const principal = await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "OPS_ADMIN"] });
     requireCsrf(request);
     const { key } = z.object({ key: z.string().regex(/^[a-z0-9_.-]+$/).max(120) }).parse(request.params);
     const input = z.object({ enabled: z.boolean(), description: z.string().max(500).nullable().optional(), rules: z.record(z.string(),z.unknown()).default({}) }).parse(request.body);
@@ -287,7 +287,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   app.post("/v1/admin/plans", async (request, reply) => {
-    const principal = await requireRecentPlatformAdmin(request);
+    const principal = await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });
     requireCsrf(request);
     const input = z.object({ key: z.string().regex(/^[a-z0-9_-]+$/), name: z.string().min(1).max(120), features: z.record(z.string(),z.unknown()).default({}), limits: z.record(z.string(),z.unknown()).default({}), active: z.boolean().default(true) }).parse(request.body);
     const result = await query(`INSERT INTO plans(key,name,features,limits,active) VALUES ($1,$2,$3::jsonb,$4::jsonb,$5) RETURNING *`, [input.key,input.name,JSON.stringify(input.features),JSON.stringify(input.limits),input.active]);

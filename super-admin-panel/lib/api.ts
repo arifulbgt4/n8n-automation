@@ -89,6 +89,22 @@ export async function signIn(email: string, password: string) {
   return result;
 }
 
+export async function completeMfa(challengeToken: string, code: string) {
+  const result = await api<any>("/v1/admin/auth/mfa", {
+    method: "POST",
+    body: JSON.stringify({ challengeToken, code }),
+  });
+  if (result.csrfToken) setCsrf(result.csrfToken);
+  return result;
+}
+
+export async function reauthenticateMfa(code: string) {
+  return api<{ ok: true; mfaVerifiedAt: string }>("/v1/admin/mfa/reauth", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
 export async function signOut() {
   try {
     await api("/v1/auth/signout", { method: "POST" });

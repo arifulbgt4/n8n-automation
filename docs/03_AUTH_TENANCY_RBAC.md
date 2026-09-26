@@ -17,7 +17,7 @@ Required flows:
 - View/revoke active sessions.
 - Account suspension/disabled-state handling.
 - Invitation acceptance for tenant members.
-- Optional MFA as an early post-MVP security enhancement; super admins should support MFA from the initial production-ready release if feasible.
+- Customer MFA remains a roadmap item; platform administrators require TOTP MFA (or a one-time recovery code) before privileged access.
 
 The implementation may later add social/OAuth login, but email/password must not be coupled to a specific provider choice in the domain model.
 
@@ -118,6 +118,8 @@ If support impersonation is implemented:
 - Customer-visible effects should be attributable to the support action.
 
 Prefer scoped support views over unrestricted impersonation whenever possible.
+
+The current repository permits only an MFA-verified, read-only support context through the `x-admin-tenant-access: support` header. It is represented as `VIEWER` access and is rejected for write methods or routes that require an owner/admin role; write-capable impersonation remains disabled until explicitly approved.
 
 ## 10. Authorization enforcement
 

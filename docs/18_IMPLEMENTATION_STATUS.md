@@ -43,7 +43,7 @@ The following are intentionally not source-code tasks and cannot be completed fr
 6. Verify infrastructure-owned PostgreSQL, n8n and Media Storage backups, off-host policy and restore procedure.
 7. Run staging provider end-to-end, load/burst, restore/failure-injection and controlled pilot tests against the real deployed services.
 8. Select a payment provider before implementing provider-specific checkout/webhook behavior. The application is payment-provider ready but no provider has been selected.
-9. Scoped super-admin impersonation remains disabled until explicitly approved.
+9. Write-capable super-admin impersonation remains disabled until explicitly approved; the optional support header is MFA-protected and read-only.
 10. PostgreSQL RLS remains optional defense-in-depth; the current implementation enforces tenant/business authorization in the API and query layer.
 
 These gates must not be bypassed by hard-coding production URLs, credentials, workflow IDs or provider secrets into Git.

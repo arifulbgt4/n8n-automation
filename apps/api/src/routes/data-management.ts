@@ -6,7 +6,7 @@ import { ApiError, audit, requireAuth, requireCsrf, requireTenant } from "../lib
 export async function dataManagementRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/data-requests", async (request, reply) => {
     const { tenantId } = z.object({ tenantId:z.string().uuid() }).parse(request.params);
-    await requireTenant(request,tenantId,["OWNER","ADMIN"]);
+    await requireTenant(request,tenantId,["OWNER"]);
     const result=await query(`
       SELECT r.*,j.status AS job_status,j.progress,j.error_json,m.original_name AS result_filename
       FROM tenant_data_requests r
@@ -20,7 +20,7 @@ export async function dataManagementRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/export", async (request, reply) => {
     const { tenantId }=z.object({tenantId:z.string().uuid()}).parse(request.params);
     const principal=await requireAuth(request);
-    await requireTenant(request,tenantId,["OWNER","ADMIN"]);
+    await requireTenant(request,tenantId,["OWNER"]);
     requireCsrf(request);
     const existing=await query("SELECT 1 FROM tenant_data_requests WHERE tenant_id=$1 AND type='export' AND status IN ('queued','processing')",[tenantId]);
     if(existing.rowCount) throw new ApiError(409,"EXPORT_ALREADY_RUNNING","A tenant export is already in progress.");

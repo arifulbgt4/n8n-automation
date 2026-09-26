@@ -31,6 +31,8 @@ Customer/API usage endpoint:
 GET /v1/tenants/:tenantId/media/limits
 ```
 
+The request-level multipart ceiling is configured with `MAX_UPLOAD_BYTES`, defaults to 50 MiB, and is capped at 64 MiB because the API validates and forwards accepted payloads in memory. The tenant storage quota remains independent of this per-request ceiling.
+
 ## Why more than a megapixel limit is required
 
 A 10-megapixel image does not have a predictable encoded byte size. PNG, JPEG and WebP files with identical pixel dimensions may consume very different storage. Therefore four controls are applied together:

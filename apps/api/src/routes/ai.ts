@@ -35,18 +35,20 @@ async function loadAgent(tenantId: string, agentId: string) {
 export async function aiRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/ai/providers", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId, ["OWNER","ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER","ADMIN"]);
     const result = await query(`
       SELECT id,tenant_id,business_id,name,provider,ownership_mode,key_hint,base_url,status,metadata,last_tested_at,created_at,updated_at
-      FROM ai_provider_connections WHERE tenant_id=$1 ORDER BY created_at DESC
-    `, [tenantId]);
+      FROM ai_provider_connections
+      WHERE tenant_id=$1 AND ($2::uuid[] IS NULL OR business_id IS NULL OR business_id=ANY($2::uuid[]))
+      ORDER BY created_at DESC
+    `, [tenantId, context.membershipRole === "OWNER" ? null : context.businessScope ?? null]);
     reply.send({ providers: result.rows });
   });
 
   app.post("/v1/tenants/:tenantId/ai/providers", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       businessId: z.string().uuid().nullable().optional(),
@@ -58,12 +60,15 @@ export async function aiRoutes(app: FastifyInstance) {
     }).parse(request.body);
     if (input.provider === "openai_compatible" && !input.baseUrl) throw new ApiError(400, "BASE_URL_REQUIRED", "Base URL is required for OpenAI-compatible providers.");
     if (input.baseUrl) {
-      try { input.baseUrl = assertSafeAiBaseUrl(input.baseUrl); }
+      try { input.baseUrl = await assertSafeAiBaseUrl(input.baseUrl); }
       catch (error) { throw new ApiError(400,"BASE_URL_UNSAFE",error instanceof Error ? error.message : "Unsafe base URL."); }
+    }
+    if (!input.businessId && context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A restricted administrator must select a business for this AI provider.");
     }
     if (input.businessId) {
       await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER","ADMIN","STAFF"]);
-    const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
+      const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
       if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     }
     const result = await query(`
@@ -77,10 +82,19 @@ export async function aiRoutes(app: FastifyInstance) {
   app.patch("/v1/tenants/:tenantId/ai/providers/:providerId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), providerId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({ name: z.string().trim().min(1).max(120).optional(), apiKey: z.string().min(6).optional(), baseUrl: z.string().url().nullable().optional(), status: z.enum(["active", "invalid", "disabled"]).optional() }).parse(request.body);
+    if (Object.prototype.hasOwnProperty.call(input, "baseUrl") && input.baseUrl) {
+      try { input.baseUrl = await assertSafeAiBaseUrl(input.baseUrl); }
+      catch (error) { throw new ApiError(400, "BASE_URL_UNSAFE", error instanceof Error ? error.message : "Unsafe base URL."); }
+    }
     const current = await loadProvider(params.tenantId, params.providerId);
+    if (current.business_id) {
+      await requireBusinessAccess(request, params.tenantId, current.business_id, ["OWNER", "ADMIN"]);
+    } else if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A restricted administrator cannot modify a tenant-wide AI provider.");
+    }
     const result = await query(`
       UPDATE ai_provider_connections SET name=COALESCE($3,name),
         encrypted_api_key=CASE WHEN $4::boolean THEN $5 ELSE encrypted_api_key END,
@@ -97,10 +111,15 @@ export async function aiRoutes(app: FastifyInstance) {
   app.post("/v1/tenants/:tenantId/ai/providers/:providerId/test", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), providerId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({ model: z.string().min(1).optional() }).parse(request.body ?? {});
     const provider = await loadProvider(params.tenantId, params.providerId);
+    if (provider.business_id) {
+      await requireBusinessAccess(request, params.tenantId, provider.business_id, ["OWNER", "ADMIN"]);
+    } else if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A restricted administrator cannot test a tenant-wide AI provider.");
+    }
     const test = await testConnection(provider, input.model ? { model: input.model, parameters: {} } : undefined);
     await query("UPDATE ai_provider_connections SET status=$2,last_tested_at=now(),updated_at=now() WHERE id=$1", [params.providerId, test.ok ? "active" : "invalid"]);
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: provider.business_id, action: "AI_PROVIDER_TESTED", resourceType: "ai_provider_connection", resourceId: params.providerId, safeDiff: { ok: test.ok }, request });
@@ -109,19 +128,27 @@ export async function aiRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/ai/models", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId, ["OWNER","ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER","ADMIN"]);
+    const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const result = await query(`
       SELECT m.*, p.name AS provider_name, p.provider
-      FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id
-      WHERE m.tenant_id=$1 ORDER BY m.created_at DESC
-    `, [tenantId]);
+      FROM ai_model_configs m
+      JOIN ai_provider_connections p ON p.id=m.provider_connection_id
+      WHERE m.tenant_id=$1
+        AND ($2::uuid[] IS NULL OR
+          (m.business_id IS NULL OR m.business_id=ANY($2::uuid[]))
+          AND (m.agent_profile_id IS NULL OR EXISTS (SELECT 1 FROM agent_profiles a WHERE a.id=m.agent_profile_id AND a.tenant_id=$1 AND a.business_id=ANY($2::uuid[])))
+          AND (m.channel_account_id IS NULL OR EXISTS (SELECT 1 FROM channel_accounts c WHERE c.id=m.channel_account_id AND c.tenant_id=$1 AND c.business_id=ANY($2::uuid[])))
+          AND (p.business_id IS NULL OR p.business_id=ANY($2::uuid[])))
+      ORDER BY m.created_at DESC
+    `, [tenantId, scope]);
     reply.send({ models: result.rows });
   });
 
   app.post("/v1/tenants/:tenantId/ai/models", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       businessId: z.string().uuid().nullable().optional(),
@@ -132,13 +159,28 @@ export async function aiRoutes(app: FastifyInstance) {
       model: z.string().trim().min(1).max(160),
       parameters: z.record(z.string(), z.unknown()).default({}),
     }).parse(request.body);
+    if ((input.agentProfileId || input.channelAccountId) && !input.businessId) {
+      throw new ApiError(400, "BUSINESS_SCOPE_REQUIRED", "An agent- or channel-scoped model configuration must select its business.");
+    }
+    if (!input.businessId && context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A restricted administrator must select a business for this AI model configuration.");
+    }
     const provider = await loadProvider(tenantId, input.providerConnectionId);
+    if (provider.business_id) await requireBusinessAccess(request, tenantId, provider.business_id, ["OWNER", "ADMIN"]);
+    if (!provider.business_id && context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
+      // Tenant-wide providers are usable for a scoped business, but never for a tenant-wide config.
+      if (!input.businessId) throw new ApiError(403, "BUSINESS_SCOPE_REQUIRED", "A restricted administrator must select a business for this AI model configuration.");
+    }
     if (input.businessId) await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER","ADMIN"]);
-    if (provider.business_id && input.businessId && provider.business_id !== input.businessId) throw new ApiError(400,"PROVIDER_SCOPE_INVALID","AI provider is scoped to another business.");
+    if (provider.business_id && input.businessId !== provider.business_id) throw new ApiError(400,"PROVIDER_SCOPE_INVALID","AI provider scope must match the model business.");
     if (input.agentProfileId) {
       const agent = await loadAgent(tenantId,input.agentProfileId);
       await requireBusinessAccess(request,tenantId,agent.business_id,["OWNER","ADMIN"]);
       if (input.businessId && agent.business_id !== input.businessId) throw new ApiError(400,"AGENT_SCOPE_INVALID","Agent does not belong to the selected business.");
+      if (!input.businessId && input.channelAccountId) {
+        const channel = await query<{ business_id: string }>("SELECT business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [input.channelAccountId, tenantId]);
+        if (channel.rows[0] && channel.rows[0].business_id !== agent.business_id) throw new ApiError(400, "MODEL_SCOPE_INVALID", "Agent and channel must belong to the same business.");
+      }
     }
     if (input.channelAccountId) {
       const channel = await query<{business_id:string}>("SELECT business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2",[input.channelAccountId,tenantId]);
@@ -188,6 +230,7 @@ export async function aiRoutes(app: FastifyInstance) {
       templateKey: z.string().regex(/^[a-z0-9_-]+$/).max(100).optional(),
       initialPrompt: z.record(z.string(), z.unknown()).optional(),
     }).parse(request.body);
+    await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER", "ADMIN", "STAFF"]);
     const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
     if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     const template = input.templateKey
@@ -259,6 +302,10 @@ export async function aiRoutes(app: FastifyInstance) {
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
     const input = z.object({ sections: z.record(z.string(), z.unknown()), source: z.enum(["manual", "training", "template", "migration"]).default("manual"), baseVersionId: z.string().uuid().nullable().optional() }).parse(request.body);
+    if (input.baseVersionId) {
+      const base = await query("SELECT id FROM prompt_versions WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3", [input.baseVersionId, params.tenantId, params.agentId]);
+      if (!base.rows[0]) throw new ApiError(400, "PROMPT_BASE_SCOPE_INVALID", "The base prompt must belong to this agent.");
+    }
     const latest = await query<{ version: number }>("SELECT COALESCE(max(version),0)::int AS version FROM prompt_versions WHERE agent_profile_id=$1", [params.agentId]);
     const version = (latest.rows[0]?.version ?? 0) + 1;
     const assembled = Object.entries(input.sections).map(([key, value]) => `## ${key.replace(/_/g, " ")}\n${typeof value === "string" ? value : JSON.stringify(value, null, 2)}`).join("\n\n");
@@ -308,6 +355,10 @@ export async function aiRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
     const input = z.object({ channelAccountId: z.string().uuid().nullable().optional(), type: z.enum(["facebook_user", "whatsapp_number", "instagram_user", "panel_simulator"]), identifier: z.string().min(1).max(500).optional(), label: z.string().trim().max(120).optional() }).parse(request.body);
     if (input.type !== "panel_simulator" && !input.identifier) throw new ApiError(400, "TRAINER_IDENTIFIER_REQUIRED", "Trainer identifier is required.");
+    if (input.channelAccountId) {
+      const channel = await query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [input.channelAccountId, params.tenantId, agent.business_id]);
+      if (!channel.rows[0]) throw new ApiError(400, "TRAINER_CHANNEL_INVALID", "Trainer channel does not belong to this business.");
+    }
     const result = await query(`
       INSERT INTO trainer_identities(tenant_id,business_id,channel_account_id,agent_profile_id,type,identifier_hash,encrypted_identifier,label)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,business_id,channel_account_id,agent_profile_id,type,label,active,created_at
@@ -398,6 +449,7 @@ export async function aiRoutes(app: FastifyInstance) {
     await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const agent=await loadAgent(params.tenantId,params.agentId);
+    await requireBusinessAccess(request, params.tenantId, agent.business_id, ["OWNER", "ADMIN", "STAFF"]);
     const input=z.object({approvalStatus:z.enum(["pending","approved","rejected"])}).parse(request.body);
     const result=await query<any>("UPDATE training_examples SET approval_status=$4 WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 RETURNING *",[params.exampleId,params.tenantId,params.agentId,input.approvalStatus]);
     if(!result.rows[0]) throw new ApiError(404,"TRAINING_EXAMPLE_NOT_FOUND","Training example not found.");
@@ -411,6 +463,7 @@ export async function aiRoutes(app: FastifyInstance) {
     await requireTenant(request,params.tenantId,["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const agent=await loadAgent(params.tenantId,params.agentId);
+    await requireBusinessAccess(request, params.tenantId, agent.business_id, ["OWNER", "ADMIN", "STAFF"]);
     const result=await query<any>("UPDATE prompt_versions SET status='rejected' WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 AND status IN ('candidate','draft') RETURNING id,version,status",[params.promptId,params.tenantId,params.agentId]);
     if(!result.rows[0]) throw new ApiError(409,"PROMPT_NOT_DISCARDABLE","Prompt version cannot be discarded.");
     await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:agent.business_id,action:"PROMPT_DISCARDED",resourceType:"prompt_version",resourceId:params.promptId,request});
@@ -425,14 +478,48 @@ export async function aiRoutes(app: FastifyInstance) {
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
     const input = z.object({ modelConfigId: z.string().uuid().optional(), exampleIds: z.array(z.string().uuid()).min(1).max(200).optional() }).parse(request.body ?? {});
-    const examples = input.exampleIds ?? (await query<{ id: string }>("SELECT id FROM training_examples WHERE tenant_id=$1 AND agent_profile_id=$2 AND approval_status='approved' ORDER BY created_at", [params.tenantId, params.agentId])).rows.map((row) => row.id);
+    const requestedExamples = input.exampleIds ? [...new Set(input.exampleIds)] : null;
+    const examples = requestedExamples
+      ? (await query<{ id: string }>(
+        "SELECT id FROM training_examples WHERE id=ANY($1::uuid[]) AND tenant_id=$2 AND agent_profile_id=$3 AND approval_status='approved'",
+        [requestedExamples, params.tenantId, params.agentId],
+      )).rows.map((row) => row.id)
+      : (await query<{ id: string }>("SELECT id FROM training_examples WHERE tenant_id=$1 AND agent_profile_id=$2 AND approval_status='approved' ORDER BY created_at", [params.tenantId, params.agentId])).rows.map((row) => row.id);
+    if (requestedExamples && examples.length !== requestedExamples.length) {
+      throw new ApiError(400, "TRAINING_EXAMPLES_INVALID", "Every selected training example must belong to this agent and be approved.");
+    }
     if (!examples.length) throw new ApiError(400, "TRAINING_EXAMPLES_REQUIRED", "At least one approved training example is required.");
+    if (input.modelConfigId) {
+      const modelConfig = await query<{
+        business_id: string | null;
+        agent_profile_id: string | null;
+        channel_business_id: string | null;
+        provider_business_id: string | null;
+        task_key: string;
+      }>(`
+        SELECT m.business_id,m.agent_profile_id,m.task_key,
+          c.business_id AS channel_business_id,
+          p.business_id AS provider_business_id
+        FROM ai_model_configs m JOIN ai_provider_connections p ON p.id=m.provider_connection_id
+        LEFT JOIN channel_accounts c ON c.id=m.channel_account_id AND c.tenant_id=m.tenant_id
+        WHERE m.id=$1 AND m.tenant_id=$2 AND m.active=true
+      `, [input.modelConfigId, params.tenantId]);
+      const config = modelConfig.rows[0];
+      if (!config || config.task_key !== "PROMPT_SYNTHESIS"
+        || (config.business_id && config.business_id !== agent.business_id)
+        || (config.agent_profile_id && config.agent_profile_id !== params.agentId)
+        || (config.channel_business_id && config.channel_business_id !== agent.business_id)
+        || (config.provider_business_id && config.provider_business_id !== agent.business_id)) {
+        throw new ApiError(400, "MODEL_CONFIG_SCOPE_INVALID", "The selected training model is not valid for this agent.");
+      }
+    }
     const collectionVersions=await query<{id:string;schema_version:number;updated_at:Date}>(`
       SELECT c.id,c.schema_version,c.updated_at
       FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id
-      WHERE acl.agent_profile_id=$1 AND c.status='active'
+      WHERE acl.tenant_id=$1 AND c.tenant_id=$1 AND c.business_id=$2
+        AND acl.agent_profile_id=$3 AND c.status='active'
       ORDER BY c.id
-    `,[params.agentId]);
+    `,[params.tenantId, agent.business_id, params.agentId]);
     const snapshot={
       exampleIds:examples,
       basePromptVersionId:agent.active_prompt_version_id ?? null,
@@ -487,6 +574,7 @@ export async function aiRoutes(app: FastifyInstance) {
       WHERE m.tenant_id=$1 AND m.active=true AND p.status='active'
         AND (m.agent_profile_id=$2 OR m.agent_profile_id IS NULL)
         AND (m.business_id=$3 OR m.business_id IS NULL)
+        AND (p.business_id=$3 OR p.business_id IS NULL)
         AND m.task_key='DEFAULT_CHAT'
       ORDER BY (m.agent_profile_id IS NOT NULL) DESC,(m.business_id IS NOT NULL) DESC,m.created_at DESC LIMIT 1
     `, [params.tenantId, params.agentId, agent.business_id]);

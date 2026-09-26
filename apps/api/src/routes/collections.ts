@@ -71,6 +71,17 @@ function validateFieldValue(field: FieldRow, value: unknown) {
   }
 }
 
+async function validateFieldScope(tenantId: string, businessId: string, field: z.input<typeof fieldInput>): Promise<void> {
+  if (field.type !== "relation") return;
+  const targetCollectionId = typeof field.options?.targetCollectionId === "string" ? field.options.targetCollectionId : null;
+  if (!targetCollectionId) throw new ApiError(400, "RELATION_TARGET_REQUIRED", `${field.label} is missing a configured target collection.`, { field: field.key });
+  const target = await query(
+    "SELECT id FROM collections WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND status<>'archived'",
+    [targetCollectionId, tenantId, businessId],
+  );
+  if (!target.rows[0]) throw new ApiError(400, "RELATION_TARGET_SCOPE_INVALID", `${field.label} must target a collection in the same business.`, { field: field.key });
+}
+
 async function loadCollection(tenantId: string, collectionId: string) {
   const result = await query("SELECT * FROM collections WHERE id=$1 AND tenant_id=$2", [collectionId, tenantId]);
   if (!result.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
@@ -78,6 +89,12 @@ async function loadCollection(tenantId: string, collectionId: string) {
 }
 
 async function validateItem(tenantId: string, collectionId: string, data: Record<string, unknown>, currentItemId?: string) {
+  const sourceCollection = await query<{ business_id: string }>(
+    "SELECT business_id FROM collections WHERE id=$1 AND tenant_id=$2",
+    [collectionId, tenantId],
+  );
+  if (!sourceCollection.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
+  const sourceBusinessId = sourceCollection.rows[0].business_id;
   const fieldsResult = await query<FieldRow>(`
     SELECT key,label,type,required,unique_within_collection,validation_json,options_json
     FROM collection_fields WHERE collection_id=$1 AND tenant_id=$2 ORDER BY display_order,id
@@ -90,14 +107,35 @@ async function validateItem(tenantId: string, collectionId: string, data: Record
   for (const field of fields) {
     const value = data[field.key];
     validateFieldValue(field, value);
+    if (field.type === "media" && value !== undefined && value !== null && value !== "") {
+      const ids = Array.isArray(value) ? value : [value];
+      if (ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) {
+        throw new ApiError(400, "MEDIA_INVALID", `${field.label} contains an invalid media asset ID.`, { field: field.key });
+      }
+      const media = await query<{ count: string }>(
+        `SELECT count(*)::text AS count
+         FROM media_assets
+         WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND processing_status='ready'
+           AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export')
+           AND (business_id IS NULL OR business_id=$3)`,
+        [tenantId, [...new Set(ids)], sourceBusinessId],
+      );
+      if (Number(media.rows[0]?.count ?? 0) !== new Set(ids).size) {
+        throw new ApiError(400, "MEDIA_SCOPE_INVALID", `${field.label} references media outside this business.`, { field: field.key });
+      }
+    }
     if (field.type === "relation" && value !== undefined && value !== null && value !== "") {
       const targetCollectionId = typeof field.options_json?.targetCollectionId === "string" ? field.options_json.targetCollectionId : null;
       if (!targetCollectionId) throw new ApiError(400,"RELATION_TARGET_REQUIRED",`${field.label} is missing a configured target collection.`,{field:field.key});
       const ids = Array.isArray(value) ? value : [value];
       if (ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) throw new ApiError(400,"RELATION_INVALID",`${field.label} contains an invalid related item ID.`,{field:field.key});
       const related = await query<{ count: string }>(
-        "SELECT count(*)::text AS count FROM collection_items WHERE tenant_id=$1 AND collection_id=$2 AND id=ANY($3::uuid[]) AND status<>'deleted'",
-        [tenantId,targetCollectionId,ids],
+        `SELECT count(*)::text AS count
+         FROM collection_items ci
+         JOIN collections target ON target.id=ci.collection_id AND target.tenant_id=ci.tenant_id
+         WHERE ci.tenant_id=$1 AND ci.collection_id=$2 AND target.business_id=$3
+           AND target.status<>'archived' AND ci.id=ANY($4::uuid[]) AND ci.status<>'deleted'`,
+        [tenantId,targetCollectionId,sourceBusinessId,ids],
       );
       if (Number(related.rows[0]?.count ?? 0) !== new Set(ids).size) throw new ApiError(400,"RELATION_TARGET_INVALID",`${field.label} references an item outside the configured collection.`,{field:field.key});
     }
@@ -217,12 +255,12 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId);
     const collection = await loadCollection(params.tenantId, params.collectionId);
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
-    const fields = await query("SELECT * FROM collection_fields WHERE collection_id=$1 ORDER BY display_order,id", [params.collectionId]);
+    const fields = await query("SELECT * FROM collection_fields WHERE collection_id=$1 AND tenant_id=$2 ORDER BY display_order,id", [params.collectionId, params.tenantId]);
     const channels = await query(`
       SELECT ca.id,ca.platform,ca.name,ca.external_account_id,l.settings_json
       FROM collection_channel_links l JOIN channel_accounts ca ON ca.id=l.channel_account_id
-      WHERE l.collection_id=$1 AND l.active=true
-    `, [params.collectionId]);
+      WHERE l.collection_id=$1 AND l.tenant_id=$2 AND ca.tenant_id=$2 AND ca.business_id=$3 AND l.active=true
+    `, [params.collectionId, params.tenantId, collection.business_id]);
     reply.send({ collection, fields: fields.rows, channels: channels.rows });
   });
 
@@ -235,6 +273,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const fieldBody = z.object({ field: fieldInput, expectedSchemaVersion: z.number().int().positive().optional() }).safeParse(request.body);
     const input = fieldBody.success ? fieldBody.data.field : fieldInput.parse(request.body);
+    await validateFieldScope(params.tenantId, collection.business_id, input);
     const expectedSchemaVersion = fieldBody.success ? fieldBody.data.expectedSchemaVersion : undefined;
     if (expectedSchemaVersion !== undefined && Number(collection.schema_version) !== expectedSchemaVersion) throw new ApiError(409,"SCHEMA_VERSION_CONFLICT","Collection schema changed. Reload before editing.");
     const result = await transaction(async (client) => {
@@ -278,6 +317,7 @@ export async function collectionRoutes(app: FastifyInstance) {
       options: input.options ?? current.rows[0].options_json,
       displayOrder: input.displayOrder ?? current.rows[0].display_order,
     });
+    await validateFieldScope(params.tenantId, collection.business_id, merged);
     const result = await transaction(async (client) => {
       const updated = await client.query(`
         UPDATE collection_fields SET key=$3,label=$4,type=$5,required=$6,unique_within_collection=$7,
@@ -318,7 +358,10 @@ export async function collectionRoutes(app: FastifyInstance) {
       SELECT i.*,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',m.id,'url',m.public_url,'mimeType',m.mime_type,'role',cim.role,'order',cim.display_order) ORDER BY cim.display_order)
                   FROM collection_item_media cim JOIN media_assets m ON m.id=cim.media_asset_id
-                  WHERE cim.collection_item_id=i.id),'[]'::jsonb) AS media
+                  WHERE cim.collection_item_id=i.id AND cim.tenant_id=$1 AND m.tenant_id=$1
+                    AND m.processing_status='ready'
+                    AND COALESCE(m.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+                    AND (m.business_id IS NULL OR m.business_id=i.business_id)),'[]'::jsonb) AS media
       FROM collection_items i
       WHERE i.tenant_id=$1 AND i.collection_id=$2 AND i.status<>'deleted'
         AND ($3::text IS NULL OR i.title ILIKE '%'||$3||'%' OR i.data_jsonb::text ILIKE '%'||$3||'%')
@@ -422,9 +465,12 @@ export async function collectionRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/jobs/:jobId", async (request, reply) => {
     const params=z.object({tenantId:z.string().uuid(),jobId:z.string().uuid()}).parse(request.params);
-    await requireTenant(request,params.tenantId);
+    const context = await requireTenant(request,params.tenantId);
     const result=await query<any>("SELECT id,business_id,type,status,progress,result_json,error_json,started_at,completed_at,created_at,updated_at FROM job_records WHERE id=$1 AND tenant_id=$2",[params.jobId,params.tenantId]);
     if(!result.rows[0]) throw new ApiError(404,"JOB_NOT_FOUND","Job not found.");
+    if (["tenant_export", "tenant_delete"].includes(String(result.rows[0].type)) && context.membershipRole !== "OWNER") {
+      throw new ApiError(404, "JOB_NOT_FOUND", "Job not found.");
+    }
     if(result.rows[0].business_id) await requireBusinessAccess(request,params.tenantId,result.rows[0].business_id);
     reply.send({job:result.rows[0]});
   });
@@ -434,11 +480,18 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireTenant(request,params.tenantId);
     const collection=await loadCollection(params.tenantId,params.collectionId);
     await requireBusinessAccess(request,params.tenantId,collection.business_id);
+    const item = await query<{ business_id: string }>(
+      "SELECT business_id FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted'",
+      [params.itemId, params.collectionId, params.tenantId],
+    );
+    if (!item.rows[0] || item.rows[0].business_id !== collection.business_id) {
+      throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
+    }
     const result=await query(`
       SELECT o.*,ca.platform,ca.name AS channel_name
       FROM collection_item_channel_overrides o JOIN channel_accounts ca ON ca.id=o.channel_account_id
-      WHERE o.tenant_id=$1 AND o.collection_item_id=$2 ORDER BY ca.platform,ca.name
-    `,[params.tenantId,params.itemId]);
+      WHERE o.tenant_id=$1 AND o.collection_item_id=$2 AND ca.tenant_id=$1 AND ca.business_id=$3 ORDER BY ca.platform,ca.name
+    `,[params.tenantId,params.itemId,collection.business_id]);
     reply.send({overrides:result.rows});
   });
 
@@ -474,7 +527,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const input = z.object({ channelIds: z.array(z.string().uuid()).max(100) }).parse(request.body);
     await transaction(async (client) => {
-      await client.query("DELETE FROM collection_channel_links WHERE collection_id=$1", [params.collectionId]);
+      await client.query("DELETE FROM collection_channel_links WHERE collection_id=$1 AND tenant_id=$2", [params.collectionId, params.tenantId]);
       for (const channelId of input.channelIds) {
         const channel = await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [channelId, params.tenantId, collection.business_id]);
         if (!channel.rows[0]) throw new ApiError(400, "CHANNEL_SCOPE_INVALID", "A selected channel does not belong to this business.");

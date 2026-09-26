@@ -54,21 +54,22 @@ export async function invitationRoutes(app: FastifyInstance) {
 
   app.get("/v1/tenants/:tenantId/invitations", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
     const result = await query(`
       SELECT id,email,role,business_scope,status,expires_at,accepted_at,created_at
         FROM tenant_invitations
        WHERE tenant_id=$1
+         AND ($2::uuid[] IS NULL OR (business_scope IS NOT NULL AND business_scope && $2::uuid[]))
        ORDER BY created_at DESC
        LIMIT 200
-    `, [tenantId]);
+    `, [tenantId, context.membershipRole === "OWNER" ? null : context.businessScope ?? null]);
     reply.send({ invitations: result.rows });
   });
 
   app.post("/v1/tenants/:tenantId/invitations", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
     const input = z.object({
       email: z.string().email().transform((v) => v.trim().toLowerCase()),
@@ -77,6 +78,9 @@ export async function invitationRoutes(app: FastifyInstance) {
       expiresInDays: z.number().int().min(1).max(30).default(7),
     }).parse(request.body);
 
+    if (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope) && (!context.businessScope.length || input.businessScope === undefined || input.businessScope === null || !input.businessScope.length || input.businessScope.some((businessId) => !context.businessScope?.includes(businessId)))) {
+      throw new ApiError(403, "BUSINESS_SCOPE_ESCALATION", "An administrator cannot invite access outside their own business scope.");
+    }
     if (input.businessScope?.length) {
       const scoped = await query<{ id: string }>(
         "SELECT id FROM businesses WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND status<>'archived'",
@@ -110,9 +114,15 @@ export async function invitationRoutes(app: FastifyInstance) {
   app.delete("/v1/tenants/:tenantId/invitations/:invitationId", async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid(), invitationId: z.string().uuid() }).parse(request.params);
     const principal = await requireAuth(request);
-    await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
+    const context = await requireTenant(request, params.tenantId, ["OWNER", "ADMIN"]);
     requireCsrf(request);
-    const result = await query("UPDATE tenant_invitations SET status='revoked',updated_at=now() WHERE id=$1 AND tenant_id=$2 AND status='pending' RETURNING id", [params.invitationId, params.tenantId]);
+    const result = await query(`
+      UPDATE tenant_invitations
+         SET status='revoked',updated_at=now()
+       WHERE id=$1 AND tenant_id=$2 AND status='pending'
+         AND ($3::uuid[] IS NULL OR (business_scope IS NOT NULL AND business_scope && $3::uuid[]))
+       RETURNING id
+    `, [params.invitationId, params.tenantId, context.membershipRole === "OWNER" ? null : context.businessScope ?? null]);
     if (!result.rows[0]) throw new ApiError(404, "INVITATION_NOT_FOUND", "Pending invitation not found.");
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, action: "TENANT_INVITATION_REVOKED", resourceType: "tenant_invitation", resourceId: params.invitationId, request });
     reply.send({ ok: true });

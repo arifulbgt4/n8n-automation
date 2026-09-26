@@ -12,7 +12,7 @@ import {
   sha256,
   transaction,
 } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, safeSecretEqual } from "../lib.js";
 import { assertChannelOverrideWithinPlan, assertTenantCountLimit } from "../limits.js";
 import { ensureMetaPageSubscription, type MetaPageSubscriptionResult } from "../meta-page-subscription.js";
 
@@ -350,6 +350,10 @@ export async function channelRoutes(app: FastifyInstance) {
       settings: z.record(z.string(), z.unknown()).optional(),
       credentials: credentialInput.optional(),
     }).parse(request.body);
+    if (input.defaultAgentProfileId) {
+      const agent = await query("SELECT 1 FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND status<>'archived'", [input.defaultAgentProfileId, params.tenantId, existingChannel.rows[0].business_id]);
+      if (!agent.rows[0]) throw new ApiError(400, "AGENT_SCOPE_INVALID", "Selected AI agent does not belong to this business.");
+    }
     const result = await query(`
       UPDATE channel_accounts SET
         name=COALESCE($3,name),
@@ -484,7 +488,7 @@ export async function channelRoutes(app: FastifyInstance) {
 
   app.get("/v1/internal/channels/:channelId/credentials", async (request, reply) => {
     const secret = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    if (!secret || sha256(secret) !== sha256(env().INTERNAL_SERVICE_AUTH_SECRET)) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Unauthorized.");
+    if (!safeSecretEqual(secret, env().INTERNAL_SERVICE_AUTH_SECRET)) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Unauthorized.");
     const { channelId } = z.object({ channelId: z.string().uuid() }).parse(request.params);
     const result = await query<{ credential_type: string; encrypted_value: string }>("SELECT credential_type,encrypted_value FROM channel_credentials WHERE channel_account_id=$1", [channelId]);
     const credentials = Object.fromEntries(result.rows.map((row) => [row.credential_type, decryptSecret(row.encrypted_value)]));

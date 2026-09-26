@@ -10,13 +10,13 @@ import {
   type ResponsePlan,
 } from "@n8n-automation/core";
 import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
-import { ApiError, requestId } from "../lib.js";
+import { ApiError, requestId, safeSecretEqual } from "../lib.js";
 import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
 import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (!token || token !== env().INTERNAL_SERVICE_AUTH_SECRET) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Internal service authentication is required.");
+  if (!safeSecretEqual(token, env().INTERNAL_SERVICE_AUTH_SECRET)) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Internal service authentication is required.");
 }
 
 async function runtimeContext(turnId: string) {
@@ -37,29 +37,32 @@ async function runtimeContext(turnId: string) {
   if (!row) throw new ApiError(404, "TURN_NOT_FOUND", "Conversation turn not found.");
   const messages = await query(`
     SELECT id,sender_type,message_type,text_content,metadata,created_at
-    FROM messages WHERE turn_id=$1 ORDER BY created_at
-  `, [turnId]);
+    FROM messages WHERE turn_id=$1 AND tenant_id=$2 ORDER BY created_at
+  `, [turnId, row.tenant_id]);
   const recent = await query(`
     SELECT sender_type,text_content,message_type,created_at
-    FROM messages WHERE conversation_id=$1 AND created_at < $2
+    FROM messages WHERE conversation_id=$1 AND tenant_id=$3 AND created_at < $2
     ORDER BY created_at DESC LIMIT 20
-  `, [row.conversation_id, row.created_at]);
+  `, [row.conversation_id, row.created_at, row.tenant_id]);
   const schemas = row.agent_profile_id ? await query(`
     SELECT c.id,c.name,c.key,c.purpose,c.schema_version,
       COALESCE(jsonb_agg(jsonb_build_object('key',f.key,'label',f.label,'type',f.type,'required',f.required,'aiVisible',f.ai_visible,'options',f.options_json) ORDER BY f.display_order) FILTER (WHERE f.id IS NOT NULL),'[]'::jsonb) AS fields
     FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id
     LEFT JOIN collection_fields f ON f.collection_id=c.id
-    WHERE acl.agent_profile_id=$1 AND c.status='active'
+    WHERE acl.agent_profile_id=$1 AND acl.tenant_id=$2 AND c.tenant_id=$2 AND c.business_id=$3 AND c.status='active'
     GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version ORDER BY max(acl.priority) DESC
-  `, [row.agent_profile_id]) : { rows: [] } as any;
+  `, [row.agent_profile_id, row.tenant_id, row.business_id]) : { rows: [] } as any;
   const media = await query<any>(`
     SELECT mm.message_id,ma.id AS asset_id,ma.storage_file_id,ma.original_name,ma.mime_type,ma.kind,ma.size_bytes,ma.visibility
     FROM message_media mm
     JOIN media_assets ma ON ma.id=mm.media_asset_id
     JOIN messages m ON m.id=mm.message_id
-    WHERE m.turn_id=$1 AND ma.processing_status='ready'
+    WHERE m.turn_id=$1 AND m.tenant_id=$2 AND ma.tenant_id=$2
+      AND ma.processing_status='ready'
+      AND COALESCE(ma.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+      AND (ma.business_id IS NULL OR ma.business_id=$3)
     ORDER BY m.created_at,mm.display_order
-  `, [turnId]);
+  `, [turnId, row.tenant_id, row.business_id]);
   return { row, messages: messages.rows, recent: recent.rows.reverse(), schemas: schemas.rows, media: media.rows };
 }
 
@@ -73,7 +76,8 @@ async function findRelevantItems(tenantId: string, businessId: string, agentId: 
     FROM collection_items i
     JOIN collections c ON c.id=i.collection_id
     JOIN agent_collection_links acl ON acl.collection_id=c.id AND acl.agent_profile_id=$3
-    WHERE i.tenant_id=$1 AND i.business_id=$2 AND i.status='active'
+    WHERE i.tenant_id=$1 AND i.business_id=$2 AND c.tenant_id=$1 AND c.business_id=$2
+      AND acl.tenant_id=$1 AND i.status='active'
       AND (i.title ILIKE '%'||$4||'%' OR i.data_jsonb::text ILIKE '%'||$4||'%' OR EXISTS (
         SELECT 1 FROM unnest(string_to_array($4,' ')) w WHERE length(w)>=3 AND (i.title ILIKE '%'||w||'%' OR i.data_jsonb::text ILIKE '%'||w||'%')
       ))
@@ -96,7 +100,8 @@ async function findKnowledge(tenantId: string, businessId: string, agentId: stri
                  1-(kc.embedding <=> $4::vector) AS similarity
           FROM knowledge_chunks kc
           JOIN knowledge_sources ks ON ks.id=kc.source_id
-          WHERE kc.tenant_id=$1 AND kc.business_id=$2 AND kc.active=true AND ks.status='ready'
+          WHERE kc.tenant_id=$1 AND kc.business_id=$2 AND ks.tenant_id=$1 AND ks.business_id=$2
+            AND kc.active=true AND ks.status='ready'
             AND (ks.agent_profile_id IS NULL OR ks.agent_profile_id=$3)
           ORDER BY kc.embedding <=> $4::vector
           LIMIT 8
@@ -293,7 +298,12 @@ export async function internalRoutes(app: FastifyInstance) {
     }).parse(request.body);
     const conversation = await query<any>("SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND channel_account_id=$4", [input.conversationId, input.tenantId, input.businessId, input.channelAccountId]);
     if (!conversation.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
-    const agent = conversation.rows[0].agent_profile_id ? await query<{ capabilities: string[] }>("SELECT capabilities FROM agent_profiles WHERE id=$1", [conversation.rows[0].agent_profile_id]) : { rows: [] } as any;
+    const agent = conversation.rows[0].agent_profile_id
+      ? await query<{ capabilities: string[] }>(
+        "SELECT capabilities FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3",
+        [conversation.rows[0].agent_profile_id, input.tenantId, input.businessId],
+      )
+      : { rows: [] } as any;
     const capabilityMap: Record<string, string> = { create_order: "ORDER_CREATE", create_booking: "BOOKING_CREATE", create_lead: "LEAD_CAPTURE", create_quote_request: "QUOTE_REQUEST", create_support_case: "SUPPORT_CASE", schedule_followup: "FOLLOW_UP", handoff_conversation: "HUMAN_HANDOFF" };
     if (!agent.rows[0]?.capabilities?.includes(capabilityMap[input.tool])) throw new ApiError(403, "CAPABILITY_DISABLED", `Capability ${capabilityMap[input.tool]} is not enabled.`);
     const existing = await query<{ response_json: any; status: string }>("SELECT response_json,status FROM idempotency_keys WHERE tenant_id=$1 AND scope='agent_action' AND key=$2", [input.tenantId, input.idempotencyKey]);
@@ -343,13 +353,20 @@ export async function internalRoutes(app: FastifyInstance) {
       senderType: z.enum(["AI", "HUMAN", "SYSTEM"]).default("AI"),
       logicalResponseId: z.string().min(1).max(200).optional(),
     }).parse(request.body);
-    const cv = await query<any>("SELECT mode,state_version FROM conversations WHERE id=$1 AND tenant_id=$2 AND channel_account_id=$3", [input.conversationId, input.tenantId, input.channelAccountId]);
+    const cv = await query<any>("SELECT mode,state_version,business_id FROM conversations WHERE id=$1 AND tenant_id=$2 AND channel_account_id=$3", [input.conversationId, input.tenantId, input.channelAccountId]);
     if (!cv.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
+    if (cv.rows[0].business_id !== input.businessId) throw new ApiError(400, "BUSINESS_SCOPE_INVALID", "Conversation does not belong to the selected business.");
     if (input.senderType === "AI" && cv.rows[0].mode !== "AI") throw new ApiError(409, "AI_SUPPRESSED_BY_MODE", "AI delivery is blocked because the conversation is not in AI mode.");
     if (input.stateVersion && Number(cv.rows[0].state_version) !== input.stateVersion) throw new ApiError(409, "CONVERSATION_VERSION_CHANGED", "Conversation state changed while the response was being generated.");
     const logicalResponseId = input.logicalResponseId ?? randomToken(18);
     let i = 0;
     for (const message of input.messages) {
+      if (message.type === "media") {
+        const asset = await query<{ business_id: string | null; metadata: Record<string, unknown> | null }>("SELECT business_id,metadata FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'", [message.assetId, input.tenantId]);
+        if (!asset.rows[0] || ["tenant_export", "collection_export"].includes(String(asset.rows[0].metadata?.source ?? "")) || (asset.rows[0].business_id && asset.rows[0].business_id !== input.businessId)) {
+          throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset is unavailable for this business.");
+        }
+      }
       const jobId = `outbound:${logicalResponseId}:${i++}`;
       const priorityMap={HUMAN:1,TRANSACTIONAL:2,CUSTOMER_ACTIVE:3,NORMAL:5,FOLLOWUP:8} as const;
       await enqueue(QUEUES.outbound, {

@@ -40,6 +40,11 @@ export async function knowledgeRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER","ADMIN","STAFF"]);
     const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
     if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
+    if (input.mediaAssetId) {
+      const media = await query<{ business_id: string | null }>("SELECT business_id FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready' AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export')", [input.mediaAssetId, tenantId]);
+      if (!media.rows[0]) throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+      if (media.rows[0].business_id && media.rows[0].business_id !== input.businessId) throw new ApiError(400, "MEDIA_SCOPE_INVALID", "Media asset does not belong to this business.");
+    }
     if (input.agentProfileId) {
       const agent = await query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [input.agentProfileId, tenantId, input.businessId]);
       if (!agent.rows[0]) throw new ApiError(400, "AGENT_SCOPE_INVALID", "Agent does not belong to this business.");
@@ -101,6 +106,9 @@ export async function knowledgeRoutes(app: FastifyInstance) {
     const principal = await requireAuth(request);
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
+    const current = await query<{ business_id: string }>("SELECT business_id FROM knowledge_sources WHERE id=$1 AND tenant_id=$2", [params.sourceId, params.tenantId]);
+    if (!current.rows[0]) throw new ApiError(404, "KNOWLEDGE_NOT_FOUND", "Knowledge source not found.");
+    await requireBusinessAccess(request, params.tenantId, current.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
     const result = await query("UPDATE knowledge_sources SET status='archived',updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING business_id", [params.sourceId, params.tenantId]);
     if (!result.rows[0]) throw new ApiError(404, "KNOWLEDGE_NOT_FOUND", "Knowledge source not found.");
     await query("UPDATE knowledge_chunks SET active=false WHERE source_id=$1", [params.sourceId]);

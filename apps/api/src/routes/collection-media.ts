@@ -23,16 +23,17 @@ export async function collectionMediaRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, params.tenantId, collection.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
 
     const item = await query<any>(
-      "SELECT id FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted'",
+      "SELECT id,business_id FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted'",
       [params.itemId, params.collectionId, params.tenantId],
     );
-    if (!item.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Collection item not found.");
+    if (!item.rows[0] || item.rows[0].business_id !== collection.rows[0].business_id) throw new ApiError(404, "ITEM_NOT_FOUND", "Collection item not found.");
 
     const ids = [...new Set(input.mediaAssetIds)];
     if (ids.length) {
       const assets = await query<any>(`
         SELECT id FROM media_assets
         WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND processing_status='ready'
+          AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export')
           AND (business_id IS NULL OR business_id=$3)
       `, [params.tenantId, ids, collection.rows[0].business_id]);
       if (assets.rows.length !== ids.length) {

@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { enqueue, env, query, QUEUES, randomToken, transaction } from "@n8n-automation/core";
-import { ApiError, requestId } from "../lib.js";
+import { ApiError, requestId, safeSecretEqual } from "../lib.js";
 
 const NON_RETRYABLE_TURN_CODES = new Set([
   "AGENT_NOT_CONFIGURED",
@@ -13,7 +13,7 @@ const NON_RETRYABLE_TURN_CODES = new Set([
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (!token || token !== env().INTERNAL_SERVICE_AUTH_SECRET) {
+  if (!safeSecretEqual(token, env().INTERNAL_SERVICE_AUTH_SECRET)) {
     throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Internal service authentication is required.");
   }
 }

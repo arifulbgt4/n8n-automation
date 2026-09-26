@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 import {
   env,
@@ -6,6 +7,7 @@ import {
   randomToken,
   sha256,
   type MembershipRole,
+  type PlatformAdminRole,
   type SessionPrincipal,
 } from "@n8n-automation/core";
 
@@ -18,6 +20,13 @@ export class ApiError extends Error {
   ) {
     super(message);
   }
+}
+
+export function safeSecretEqual(actual: string | undefined, expected: string): boolean {
+  if (!actual) return false;
+  const actualBytes = Buffer.from(actual);
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
 export type RequestContext = {
@@ -50,10 +59,18 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
     name: string | null;
     email_verified_at: Date | null;
     platform_admin: boolean;
+    platform_admin_role: PlatformAdminRole | null;
+    platform_admin_mfa_required: boolean;
+    platform_admin_mfa_enabled: boolean;
+    mfa_verified_at: Date | null;
   }>(`
     SELECT s.id AS session_id, s.csrf_token, u.id AS user_id, u.email, u.name,
            u.email_verified_at,
-           (pa.user_id IS NOT NULL AND pa.active=true) AS platform_admin
+           s.mfa_verified_at,
+           (pa.user_id IS NOT NULL AND pa.active=true) AS platform_admin,
+           CASE WHEN pa.user_id IS NOT NULL AND pa.active=true THEN pa.role ELSE NULL END AS platform_admin_role,
+           COALESCE(pa.mfa_required,false) AS platform_admin_mfa_required,
+           COALESCE(pa.mfa_enabled,false) AS platform_admin_mfa_enabled
       FROM sessions s
       JOIN users u ON u.id=s.user_id
       LEFT JOIN platform_admins pa ON pa.user_id=u.id
@@ -73,6 +90,10 @@ export async function loadPrincipal(request: FastifyRequest): Promise<SessionPri
     sessionId: row.session_id,
     csrfToken: row.csrf_token,
     platformAdmin: row.platform_admin,
+    platformAdminRole: row.platform_admin_role,
+    platformAdminMfaRequired: row.platform_admin_mfa_required,
+    platformAdminMfaEnabled: row.platform_admin_mfa_enabled,
+    mfaVerifiedAt: row.mfa_verified_at?.toISOString() ?? null,
   };
 }
 
@@ -83,16 +104,49 @@ export async function requireAuth(request: FastifyRequest): Promise<SessionPrinc
   return principal;
 }
 
-export async function requirePlatformAdmin(request: FastifyRequest): Promise<SessionPrincipal> {
+const ALL_PLATFORM_ADMIN_ROLES: PlatformAdminRole[] = ["SUPER_ADMIN", "SUPPORT_ADMIN", "BILLING_ADMIN", "OPS_ADMIN", "READONLY_ADMIN"];
+
+type PlatformAdminOptions = {
+  allowMfaSetup?: boolean;
+  roles?: PlatformAdminRole[];
+};
+
+export async function requirePlatformAdmin(request: FastifyRequest, options: PlatformAdminOptions = {}): Promise<SessionPrincipal> {
   const principal = await requireAuth(request);
-  if (!principal.platformAdmin) throw new ApiError(403, "ADMIN_REQUIRED", "Platform administrator access is required.");
+  if (!principal.platformAdmin || !principal.platformAdminRole) throw new ApiError(403, "ADMIN_REQUIRED", "Platform administrator access is required.");
+  const safeMethod = ["GET", "HEAD", "OPTIONS"].includes(request.method);
+  // Read operations may be viewed by any active platform-admin role. Any
+  // mutation must opt into an explicit role list; the safe default is the
+  // full-control role so a newly added mutation cannot silently become
+  // available to READONLY_ADMIN.
+  const allowedRoles = options.roles ?? (safeMethod ? ALL_PLATFORM_ADMIN_ROLES : ["SUPER_ADMIN"]);
+  if (!allowedRoles.includes(principal.platformAdminRole)) {
+    throw new ApiError(403, "ADMIN_ROLE_REQUIRED", "This platform-admin role cannot perform the requested operation.");
+  }
+  if (principal.platformAdminMfaRequired && !options.allowMfaSetup) {
+    if (!principal.platformAdminMfaEnabled) {
+      throw new ApiError(403, "ADMIN_MFA_SETUP_REQUIRED", "Super-admin MFA must be configured before using platform administration.");
+    }
+    if (!principal.mfaVerifiedAt) {
+      throw new ApiError(401, "ADMIN_MFA_REQUIRED", "Super-admin MFA verification is required for this session.");
+    }
+  }
   return principal;
 }
 
-// Kept as a compatibility alias for privileged routes. Password-authenticated
-// Super Admin sessions are sufficient; there is no secondary re-auth gate.
-export async function requireRecentPlatformAdmin(request: FastifyRequest, _maxAgeMinutes = 15): Promise<SessionPrincipal> {
-  return requirePlatformAdmin(request);
+export async function requireRecentPlatformAdmin(
+  request: FastifyRequest,
+  options: { maxAgeMinutes?: number; roles?: PlatformAdminRole[] } = {},
+): Promise<SessionPrincipal> {
+  const principal = await requirePlatformAdmin(request, { roles: options.roles });
+  if (!principal.platformAdminMfaRequired) return principal;
+  if (!principal.mfaVerifiedAt) throw new ApiError(401, "ADMIN_REAUTH_REQUIRED", "Recent MFA verification is required for this action.");
+  const verifiedAt = new Date(principal.mfaVerifiedAt).getTime();
+  const maxAgeMinutes = options.maxAgeMinutes ?? 15;
+  if (!Number.isFinite(verifiedAt) || Date.now() - verifiedAt > maxAgeMinutes * 60_000) {
+    throw new ApiError(401, "ADMIN_REAUTH_REQUIRED", `Re-enter an MFA code before this sensitive action. Verification remains valid for ${maxAgeMinutes} minutes.`);
+  }
+  return principal;
 }
 
 export async function requireTenant(
@@ -102,7 +156,19 @@ export async function requireTenant(
 ): Promise<RequestContext> {
   const principal = request.auth?.principal ?? await requireAuth(request);
   if (principal.platformAdmin && request.headers["x-admin-tenant-access"] === "support") {
-    request.auth = { principal, tenantId, membershipRole: "OWNER", businessScope: null };
+    if (!principal.platformAdminRole || !["SUPER_ADMIN", "SUPPORT_ADMIN"].includes(principal.platformAdminRole)) {
+      throw new ApiError(403, "ADMIN_ROLE_REQUIRED", "Support tenant access is restricted to support administrators.");
+    }
+    if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+      throw new ApiError(403, "ADMIN_SUPPORT_READ_ONLY", "Support tenant access is read-only until scoped impersonation is explicitly enabled.");
+    }
+    if (!allowedRoles.includes("VIEWER")) {
+      throw new ApiError(403, "ADMIN_SUPPORT_SCOPE_REQUIRED", "This support view requires an explicitly scoped tenant membership role.");
+    }
+    if (principal.platformAdminMfaRequired && (!principal.platformAdminMfaEnabled || !principal.mfaVerifiedAt)) {
+      throw new ApiError(401, "ADMIN_MFA_REQUIRED", "MFA-verified platform-admin session is required for support tenant access.");
+    }
+    request.auth = { principal, tenantId, membershipRole: "VIEWER", businessScope: null };
     return request.auth;
   }
   const membership = await query<{ role: MembershipRole; status: string; business_scope: string[] | null }>(
@@ -143,7 +209,7 @@ export function requireCsrf(request: FastifyRequest): void {
   if (!principal) throw new ApiError(401, "AUTH_REQUIRED", "Authentication is required.");
   const headerName = env().CSRF_HEADER_NAME.toLowerCase();
   const supplied = request.headers[headerName] as string | undefined;
-  if (!supplied || sha256(supplied) !== principal.csrfToken) {
+  if (!safeSecretEqual(supplied && sha256(supplied), principal.csrfToken)) {
     throw new ApiError(403, "CSRF_INVALID", "CSRF token is missing or invalid.");
   }
 }
@@ -152,15 +218,24 @@ export async function createSession(
   userId: string,
   request: FastifyRequest,
   reply: FastifyReply,
+  options: { mfaVerified?: boolean; client?: pg.PoolClient } = {},
 ): Promise<{ csrfToken: string }> {
   const token = randomToken(32);
   const csrfRaw = randomToken(24);
   const csrfHash = sha256(csrfRaw);
   const days = env().SESSION_TTL_DAYS;
-  await query(`
-    INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at)
-    VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval)
-  `, [userId, sha256(token), csrfHash, request.ip || null, request.headers["user-agent"] || null, String(days)]);
+  const values = [userId, sha256(token), csrfHash, request.ip || null, request.headers["user-agent"] || null, String(days), Boolean(options.mfaVerified)];
+  if (options.client) {
+    await options.client.query(`
+      INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
+      VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval,CASE WHEN $7 THEN now() ELSE NULL END)
+    `, values);
+  } else {
+    await query(`
+    INSERT INTO sessions(user_id, token_hash, csrf_token, ip, user_agent, expires_at, mfa_verified_at)
+    VALUES ($1,$2,$3,$4,$5,now()+($6 || ' days')::interval,CASE WHEN $7 THEN now() ELSE NULL END)
+    `, values);
+  }
   reply.setCookie("n8nauto_csrf", csrfRaw, {
     httpOnly: false,
     secure: env().NODE_ENV === "production",
@@ -217,7 +292,7 @@ export async function audit(input: {
 export async function sendEmail(to: string, subject: string, text: string): Promise<void> {
   const hook = env().EMAIL_DELIVERY_WEBHOOK_URL;
   if (!hook) {
-    if (env().NODE_ENV !== "production") console.info("EMAIL_DELIVERY_WEBHOOK_URL not configured", { to, subject, text });
+    if (env().NODE_ENV !== "production") console.info("EMAIL_DELIVERY_WEBHOOK_URL not configured", { to, subject, bodyLength: text.length });
     return;
   }
   const response = await fetch(hook, {

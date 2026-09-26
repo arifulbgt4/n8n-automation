@@ -19,7 +19,7 @@ async function validatePolicyScope(tenantId:string,businessId:string,agentProfil
 export async function platformConfigRoutes(app:FastifyInstance){
   app.get("/v1/tenants/:tenantId/billing",async(request,reply)=>{
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
-    await requireTenant(request,tenantId,["OWNER","ADMIN"]);
+    await requireTenant(request,tenantId,["OWNER"]);
     const [tenant,subscription,prices,records,credits,invoices]=await Promise.all([
       query(`SELECT t.id,t.name,t.status,t.plan_id,p.key AS plan_key,p.name AS plan_name,p.features,p.limits
              FROM tenants t LEFT JOIN plans p ON p.id=t.plan_id WHERE t.id=$1`,[tenantId]),
@@ -34,7 +34,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
 
   app.get("/v1/tenants/:tenantId/retention",async(request,reply)=>{
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
-    await requireTenant(request,tenantId,["OWNER","ADMIN"]);
+    await requireTenant(request,tenantId,["OWNER"]);
     const result=await query("SELECT * FROM retention_policies WHERE tenant_id=$1",[tenantId]);
     reply.send({policy:result.rows[0]??{tenant_id:tenantId,conversation_days:null,media_days:null,audit_days:null,training_days:null,hard_delete_after_days:null}});
   });
@@ -73,8 +73,8 @@ export async function platformConfigRoutes(app:FastifyInstance){
     const result=await query(`
       SELECT fp.*,a.name AS agent_name,c.name AS channel_name,c.platform
       FROM followup_policies fp
-      LEFT JOIN agent_profiles a ON a.id=fp.agent_profile_id
-      LEFT JOIN channel_accounts c ON c.id=fp.channel_account_id
+      LEFT JOIN agent_profiles a ON a.id=fp.agent_profile_id AND a.tenant_id=fp.tenant_id AND a.business_id=fp.business_id
+      LEFT JOIN channel_accounts c ON c.id=fp.channel_account_id AND c.tenant_id=fp.tenant_id AND c.business_id=fp.business_id
       WHERE fp.tenant_id=$1 AND ($2::uuid IS NULL OR fp.business_id=$2)
         AND ($3::uuid[] IS NULL OR fp.business_id=ANY($3::uuid[]))
       ORDER BY fp.created_at DESC
@@ -144,7 +144,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
 
   app.get("/v1/tenants/:tenantId/quota-alerts",async(request,reply)=>{
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
-    await requireTenant(request,tenantId,["OWNER","ADMIN"]);
+    await requireTenant(request,tenantId,["OWNER"]);
     const result=await query("SELECT * FROM quota_alerts WHERE tenant_id=$1 ORDER BY key,threshold_percent",[tenantId]);
     reply.send({alerts:result.rows});
   });
@@ -152,7 +152,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   app.post("/v1/tenants/:tenantId/quota-alerts",async(request,reply)=>{
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
     const principal=await requireAuth(request);
-    await requireTenant(request,tenantId,["OWNER","ADMIN"]);
+    await requireTenant(request,tenantId,["OWNER"]);
     requireCsrf(request);
     const input=z.object({key:z.string().min(1).max(120),thresholdPercent:z.number().min(1).max(100),channel:z.enum(["in_app","email"]).default("in_app"),recipients:z.array(z.string().email()).max(20).default([]),active:z.boolean().default(true)}).parse(request.body);
     const row=await query<any>(`
@@ -168,7 +168,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   app.delete("/v1/tenants/:tenantId/quota-alerts/:alertId",async(request,reply)=>{
     const params=z.object({tenantId:z.string().uuid(),alertId:z.string().uuid()}).parse(request.params);
     const principal=await requireAuth(request);
-    await requireTenant(request,params.tenantId,["OWNER","ADMIN"]);
+    await requireTenant(request,params.tenantId,["OWNER"]);
     requireCsrf(request);
     const row=await query("DELETE FROM quota_alerts WHERE id=$1 AND tenant_id=$2 RETURNING id",[params.alertId,params.tenantId]);
     if(!row.rows[0]) throw new ApiError(404,"QUOTA_ALERT_NOT_FOUND","Quota alert not found.");
@@ -205,7 +205,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   });
 
   app.put("/v1/admin/tenants/:tenantId/subscription",async(request,reply)=>{
-    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });requireCsrf(request);
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
     const input=z.object({
       planId:z.string().uuid(),
@@ -234,7 +234,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   });
 
   app.post("/v1/admin/tenants/:tenantId/credits",async(request,reply)=>{
-    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });requireCsrf(request);
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
     const input=z.object({amount:z.number(),currency:z.string().length(3).transform(v=>v.toUpperCase()),reason:z.string().max(1000).nullable().optional(),expiresAt:z.string().datetime().nullable().optional()}).parse(request.body);
     const tenant=await query("SELECT id FROM tenants WHERE id=$1",[tenantId]);if(!tenant.rows[0])throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
@@ -244,7 +244,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   });
 
   app.post("/v1/admin/tenants/:tenantId/invoices",async(request,reply)=>{
-    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });requireCsrf(request);
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
     const input=z.object({
       provider:z.string().max(80).nullable().optional(),externalInvoiceId:z.string().max(240).nullable().optional(),
@@ -269,7 +269,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   });
 
   app.put("/v1/admin/ai-model-registry/:provider/:model",async(request,reply)=>{
-    const principal=await requirePlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
     const params=z.object({provider:z.string().min(1).max(80),model:z.string().min(1).max(200)}).parse(request.params);
     const input=z.object({displayName:z.string().max(200).nullable().optional(),capabilities:z.array(z.string().max(80)).max(30).default([]),contextWindow:z.number().int().positive().nullable().optional(),maxOutputTokens:z.number().int().positive().nullable().optional(),pricing:z.record(z.string(),z.unknown()).default({}),metadata:z.record(z.string(),z.unknown()).default({}),active:z.boolean().default(true)}).parse(request.body);
     const row=await query<any>(`
@@ -291,7 +291,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   });
 
   app.post("/v1/admin/prompt-templates",async(request,reply)=>{
-    const principal=await requirePlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
     const input=z.object({key:z.string().regex(/^[a-z0-9_-]+$/).max(100),name:z.string().min(1).max(160),description:z.string().max(1000).nullable().optional(),capabilities:z.array(z.string().max(80)).max(50).default([]),sections:z.record(z.string(),z.unknown()).default({}),active:z.boolean().default(true)}).parse(request.body);
     const row=await query<any>(`
       INSERT INTO prompt_templates(key,name,description,capabilities,sections_json,active,created_by,updated_by)
@@ -302,7 +302,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   });
 
   app.patch("/v1/admin/prompt-templates/:templateId",async(request,reply)=>{
-    const principal=await requirePlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
     const {templateId}=z.object({templateId:z.string().uuid()}).parse(request.params);
     const input=z.object({name:z.string().min(1).max(160).optional(),description:z.string().max(1000).nullable().optional(),capabilities:z.array(z.string().max(80)).max(50).optional(),sections:z.record(z.string(),z.unknown()).optional(),active:z.boolean().optional()}).parse(request.body);
     const row=await query<any>(`
@@ -322,7 +322,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
   });
 
   app.put("/v1/admin/plans/:planId/prices",async(request,reply)=>{
-    const principal=await requirePlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });requireCsrf(request);
     const {planId}=z.object({planId:z.string().uuid()}).parse(request.params);
     const input=z.object({billingInterval:z.enum(["month","year","one_time"]),currency:z.string().length(3).transform(v=>v.toUpperCase()),unitAmount:z.number().nonnegative(),provider:z.string().max(80).nullable().optional(),externalPriceId:z.string().max(240).nullable().optional(),active:z.boolean().default(true),metadata:z.record(z.string(),z.unknown()).default({})}).parse(request.body);
     const plan=await query("SELECT id FROM plans WHERE id=$1",[planId]);if(!plan.rows[0])throw new ApiError(404,"PLAN_NOT_FOUND","Plan not found.");

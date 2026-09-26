@@ -1,11 +1,11 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env, query, transaction } from "@n8n-automation/core";
-import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant } from "../lib.js";
+import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, safeSecretEqual } from "../lib.js";
 
 async function internalOrTenant(request: FastifyRequest, tenantId: string, roles: Array<"OWNER" | "ADMIN" | "STAFF" | "VIEWER"> = ["OWNER","ADMIN","STAFF"]) {
   const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (bearer && bearer === env().INTERNAL_SERVICE_AUTH_SECRET) return { internal: true, userId: null as string | null };
+  if (safeSecretEqual(bearer, env().INTERNAL_SERVICE_AUTH_SECRET)) return { internal: true, userId: null as string | null };
   const principal = await requireAuth(request);
   await requireTenant(request, tenantId, roles);
   requireCsrf(request);
@@ -54,6 +54,31 @@ async function ensureBusiness(tenantId: string, businessId: string) {
   return business.rows[0];
 }
 
+async function ensureScopedReferences(
+  tenantId: string,
+  businessId: string,
+  refs: { channelAccountId?: string | null; conversationId?: string | null; contactId?: string | null; collectionItemId?: string | null },
+): Promise<void> {
+  const [channel, conversation, contact, collectionItem] = await Promise.all([
+    refs.channelAccountId
+      ? query("SELECT 1 FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [refs.channelAccountId, tenantId, businessId])
+      : Promise.resolve({ rows: [{}] }),
+    refs.conversationId
+      ? query("SELECT 1 FROM conversations WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [refs.conversationId, tenantId, businessId])
+      : Promise.resolve({ rows: [{}] }),
+    refs.contactId
+      ? query("SELECT 1 FROM contacts WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [refs.contactId, tenantId, businessId])
+      : Promise.resolve({ rows: [{}] }),
+    refs.collectionItemId
+      ? query("SELECT 1 FROM collection_items WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND status='active'", [refs.collectionItemId, tenantId, businessId])
+      : Promise.resolve({ rows: [{}] }),
+  ]);
+  if (!channel.rows[0]) throw new ApiError(400, "CHANNEL_SCOPE_INVALID", "Channel does not belong to this business.");
+  if (!conversation.rows[0]) throw new ApiError(400, "CONVERSATION_SCOPE_INVALID", "Conversation does not belong to this business.");
+  if (!contact.rows[0]) throw new ApiError(400, "CONTACT_SCOPE_INVALID", "Contact does not belong to this business.");
+  if (!collectionItem.rows[0]) throw new ApiError(400, "COLLECTION_ITEM_SCOPE_INVALID", "Collection item does not belong to this business.");
+}
+
 export async function actionRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/orders", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
@@ -88,6 +113,7 @@ export async function actionRoutes(app: FastifyInstance) {
     }).parse(request.body);
     if (!auth.internal) await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER","ADMIN","STAFF"]);
     const business = await ensureBusiness(tenantId, input.businessId);
+    await ensureScopedReferences(tenantId, input.businessId, input);
     const idem = request.headers["idempotency-key"] as string | undefined;
     const result = await idempotent(tenantId, "create_order", idem, async () => {
       return transaction(async (client) => {
@@ -149,6 +175,7 @@ export async function actionRoutes(app: FastifyInstance) {
     const input = z.object({ businessId: z.string().uuid(), channelAccountId: z.string().uuid().nullable().optional(), conversationId: z.string().uuid().nullable().optional(), contactId: z.string().uuid().nullable().optional(), collectionItemId: z.string().uuid().nullable().optional(), startsAt: z.string().datetime(), endsAt: z.string().datetime().nullable().optional(), timezone: z.string().min(1).max(80), customer: z.record(z.string(), z.unknown()).default({}), metadata: z.record(z.string(), z.unknown()).default({}) }).parse(request.body);
     if(!auth.internal) await requireBusinessAccess(request,tenantId,input.businessId,["OWNER","ADMIN","STAFF"]);
     await ensureBusiness(tenantId, input.businessId);
+    await ensureScopedReferences(tenantId, input.businessId, input);
     await assertBookingAvailability({tenantId,businessId:input.businessId,collectionItemId:input.collectionItemId,startsAt:input.startsAt,endsAt:input.endsAt});
     const idem = request.headers["idempotency-key"] as string | undefined;
     const result = await idempotent(tenantId, "create_booking", idem, async () => {
@@ -195,7 +222,9 @@ export async function actionRoutes(app: FastifyInstance) {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const auth = await internalOrTenant(request, tenantId);
     const input = z.object({ businessId: z.string().uuid(), channelAccountId: z.string().uuid().nullable().optional(), conversationId: z.string().uuid().nullable().optional(), contactId: z.string().uuid().nullable().optional(), interest: z.string().max(5000).optional(), stage: z.string().max(60).default("new"), metadata: z.record(z.string(), z.unknown()).default({}) }).parse(request.body);
+    if (!auth.internal) await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER", "ADMIN", "STAFF"]);
     await ensureBusiness(tenantId, input.businessId);
+    await ensureScopedReferences(tenantId, input.businessId, input);
     const idem = request.headers["idempotency-key"] as string | undefined;
     const result = await idempotent(tenantId, "create_lead", idem, async () => {
       const row = await query<any>("INSERT INTO leads(tenant_id,business_id,channel_account_id,conversation_id,contact_id,stage,interest,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *", [tenantId, input.businessId, input.channelAccountId ?? null, input.conversationId ?? null, input.contactId ?? null, input.stage, input.interest ?? null, JSON.stringify(input.metadata)]);
@@ -238,6 +267,7 @@ export async function actionRoutes(app: FastifyInstance) {
     const input=z.object({businessId:z.string().uuid(),channelAccountId:z.string().uuid().nullable().optional(),conversationId:z.string().uuid().nullable().optional(),contactId:z.string().uuid().nullable().optional(),request:z.record(z.string(),z.unknown()).default({})}).parse(request.body);
     if(!auth.internal) await requireBusinessAccess(request,tenantId,input.businessId,["OWNER","ADMIN","STAFF"]);
     await ensureBusiness(tenantId,input.businessId);
+    await ensureScopedReferences(tenantId, input.businessId, input);
     const idem=request.headers["idempotency-key"] as string|undefined;
     const result=await idempotent(tenantId,"create_quote",idem,async()=> {
       const row=await query<any>("INSERT INTO quote_requests(tenant_id,business_id,channel_account_id,conversation_id,contact_id,request_json) VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,JSON.stringify(input.request)]);
@@ -253,6 +283,10 @@ export async function actionRoutes(app: FastifyInstance) {
     if(!target.rows[0]) throw new ApiError(404,"QUOTE_NOT_FOUND","Quote request not found.");
     if(!auth.internal) await requireBusinessAccess(request,params.tenantId,target.rows[0].business_id,["OWNER","ADMIN","STAFF"]);
     const input=z.object({status:z.string().max(60).optional(),quote:z.record(z.string(),z.unknown()).optional(),assignedUserId:z.string().uuid().nullable().optional()}).parse(request.body);
+    if (input.assignedUserId) {
+      const member = await query("SELECT 1 FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 AND status='active'", [params.tenantId, input.assignedUserId]);
+      if (!member.rows[0]) throw new ApiError(400, "ASSIGNEE_INVALID", "Quote assignee must be an active tenant member.");
+    }
     const row=await query<any>("UPDATE quote_requests SET status=COALESCE($3,status),quote_json=CASE WHEN $4::jsonb IS NULL THEN quote_json ELSE $4::jsonb END,assigned_user_id=CASE WHEN $5::boolean THEN $6::uuid ELSE assigned_user_id END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *",[params.quoteId,params.tenantId,input.status??null,input.quote?JSON.stringify(input.quote):null,Object.prototype.hasOwnProperty.call(input,"assignedUserId"),input.assignedUserId??null]);
     reply.send({quote:row.rows[0]});
   });
@@ -272,6 +306,7 @@ export async function actionRoutes(app: FastifyInstance) {
     const input=z.object({businessId:z.string().uuid(),channelAccountId:z.string().uuid().nullable().optional(),conversationId:z.string().uuid().nullable().optional(),contactId:z.string().uuid().nullable().optional(),subject:z.string().max(300).nullable().optional(),description:z.string().max(20000).nullable().optional(),priority:z.enum(["low","normal","high","urgent"]).default("normal"),metadata:z.record(z.string(),z.unknown()).default({})}).parse(request.body);
     if(!auth.internal) await requireBusinessAccess(request,tenantId,input.businessId,["OWNER","ADMIN","STAFF"]);
     await ensureBusiness(tenantId,input.businessId);
+    await ensureScopedReferences(tenantId, input.businessId, input);
     const idem=request.headers["idempotency-key"] as string|undefined;
     const result=await idempotent(tenantId,"create_support_case",idem,async()=> {
       const row=await query<any>("INSERT INTO support_cases(tenant_id,business_id,channel_account_id,conversation_id,contact_id,subject,description,priority,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,input.subject??null,input.description??null,input.priority,JSON.stringify(input.metadata)]);
@@ -287,6 +322,10 @@ export async function actionRoutes(app: FastifyInstance) {
     if(!target.rows[0]) throw new ApiError(404,"SUPPORT_CASE_NOT_FOUND","Support case not found.");
     if(!auth.internal) await requireBusinessAccess(request,params.tenantId,target.rows[0].business_id,["OWNER","ADMIN","STAFF"]);
     const input=z.object({status:z.string().max(60).optional(),priority:z.enum(["low","normal","high","urgent"]).optional(),assignedUserId:z.string().uuid().nullable().optional()}).parse(request.body);
+    if (input.assignedUserId) {
+      const member = await query("SELECT 1 FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 AND status='active'", [params.tenantId, input.assignedUserId]);
+      if (!member.rows[0]) throw new ApiError(400, "ASSIGNEE_INVALID", "Support-case assignee must be an active tenant member.");
+    }
     const row=await query<any>("UPDATE support_cases SET status=COALESCE($3,status),priority=COALESCE($4,priority),assigned_user_id=CASE WHEN $5::boolean THEN $6::uuid ELSE assigned_user_id END,updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *",[params.caseId,params.tenantId,input.status??null,input.priority??null,Object.prototype.hasOwnProperty.call(input,"assignedUserId"),input.assignedUserId??null]);
     reply.send({case:row.rows[0]});
   });

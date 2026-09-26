@@ -112,9 +112,13 @@ export async function authRoutes(app: FastifyInstance) {
       status: string;
       email_verified_at: Date | null;
       admin_active: boolean;
+      admin_mfa_required: boolean;
+      admin_mfa_enabled: boolean;
     }>(`
       SELECT u.id,u.email,u.password_hash,u.name,u.status,u.email_verified_at,
-             COALESCE(pa.active,false) AS admin_active
+             COALESCE(pa.active,false) AS admin_active,
+             COALESCE(pa.mfa_required,false) AS admin_mfa_required,
+             COALESCE(pa.mfa_enabled,false) AS admin_mfa_enabled
       FROM users u LEFT JOIN platform_admins pa ON pa.user_id=u.id
       WHERE u.email=$1
     `, [input.email]);
@@ -126,11 +130,26 @@ export async function authRoutes(app: FastifyInstance) {
     await redis().del(redisKey("auth",emailLimitKey)).catch(()=>undefined);
     await query("UPDATE users SET last_login_at=now(), updated_at=now() WHERE id=$1", [user.id]);
 
+    if (user.admin_active && user.admin_mfa_required && user.admin_mfa_enabled) {
+      const challengeToken = randomToken(32);
+      await query(`
+        INSERT INTO admin_mfa_challenges(user_id,token_hash,expires_at,ip,user_agent)
+        VALUES ($1,$2,now()+interval '5 minutes',$3,$4)
+      `, [user.id, sha256(challengeToken), request.ip ?? null, request.headers["user-agent"] ?? null]);
+      await audit({ actorUserId: user.id, actorType: "platform_admin", action: "ADMIN_PASSWORD_VERIFIED_MFA_PENDING", resourceType: "user", resourceId: user.id, request });
+      return reply.send({
+        mfaRequired: true,
+        challengeToken,
+        user: { id: user.id, email: user.email, name: user.name, emailVerified: Boolean(user.email_verified_at), platformAdmin: true },
+      });
+    }
+
     const session = await createSession(user.id, request, reply);
     await audit({ actorUserId: user.id, actorType: user.admin_active ? "platform_admin" : "user", action: "AUTH_SIGNIN", resourceType: "user", resourceId: user.id, request });
     reply.send({
       user: { id: user.id, email: user.email, name: user.name, emailVerified: Boolean(user.email_verified_at), platformAdmin: user.admin_active },
       csrfToken: session.csrfToken,
+      mfaSetupRequired: Boolean(user.admin_active && user.admin_mfa_required && !user.admin_mfa_enabled),
     });
   });
 

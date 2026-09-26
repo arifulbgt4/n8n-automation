@@ -10,7 +10,7 @@ import {
   transaction,
   type NormalizedInboundMessage,
 } from "@n8n-automation/core";
-import { ApiError, requestId } from "../lib.js";
+import { ApiError, requestId, safeSecretEqual } from "../lib.js";
 
 function verifyMetaSignature(request: FastifyRequest): boolean {
   const secret = env().META_APP_SECRET;
@@ -28,14 +28,19 @@ async function applyProviderDeliveryEvents(payload:any,correlationId:string){
   if(payload?.object==="whatsapp_business_account"){
     for(const entry of payload.entry??[]){
       for(const change of entry.changes??[]){
+        const channelExternalId = String(change.value?.metadata?.phone_number_id ?? "");
+        const channel = channelExternalId
+          ? await query<{ id: string }>("SELECT id FROM channel_accounts WHERE platform='whatsapp' AND external_account_id=$1", [channelExternalId])
+          : { rows: [] as Array<{ id: string }> };
+        if (!channel.rows[0]) continue;
         for(const status of change.value?.statuses??[]){
           const providerId=String(status.id??"");if(!providerId)continue;
           const mapped=status.status==="read"?"read":status.status==="delivered"?"delivered":status.status==="sent"?"sent":status.status==="failed"?"failed":String(status.status||"sent");
           const updated=await query<any>(`
             UPDATE messages SET delivery_status=$2,metadata=metadata||$3::jsonb,updated_at=now()
-            WHERE platform_message_id=$1 AND direction='OUTBOUND'
+            WHERE platform_message_id=$1 AND channel_account_id=$4 AND direction='OUTBOUND'
             RETURNING tenant_id,business_id,channel_account_id,conversation_id,id
-          `,[providerId,mapped,JSON.stringify({providerStatus:status.status,providerStatusAt:status.timestamp?new Date(Number(status.timestamp)*1000).toISOString():null,providerErrors:status.errors??null})]);
+          `,[providerId,mapped,JSON.stringify({providerStatus:status.status,providerStatusAt:status.timestamp?new Date(Number(status.timestamp)*1000).toISOString():null,providerErrors:status.errors??null}),channel.rows[0].id]);
           for(const row of updated.rows){
             await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
               VALUES ($1,$2,$3,$4,'delivery_status',1,'event',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`,
@@ -55,8 +60,8 @@ async function applyProviderDeliveryEvents(payload:any,correlationId:string){
         const channel=await query<any>("SELECT id,tenant_id,business_id FROM channel_accounts WHERE platform=$1 AND external_account_id=$2",[platform,receivingId]);
         if(!channel.rows[0])continue;
         if(event.delivery?.mids?.length){
-          await query("UPDATE messages SET delivery_status='delivered',metadata=metadata||$3::jsonb,updated_at=now() WHERE channel_account_id=$1 AND platform_message_id=ANY($2::text[]) AND direction='OUTBOUND'",
-            [channel.rows[0].id,event.delivery.mids,JSON.stringify({deliveredAt:event.delivery.watermark?new Date(Number(event.delivery.watermark)).toISOString():null})]);
+          await query("UPDATE messages SET delivery_status='delivered',metadata=metadata||$3::jsonb,updated_at=now() WHERE tenant_id=$4 AND channel_account_id=$1 AND platform_message_id=ANY($2::text[]) AND direction='OUTBOUND'",
+            [channel.rows[0].id,event.delivery.mids,JSON.stringify({deliveredAt:event.delivery.watermark?new Date(Number(event.delivery.watermark)).toISOString():null}),channel.rows[0].tenant_id]);
         }
         if(event.read?.watermark){
           const contact=await query<any>("SELECT id FROM contacts WHERE channel_account_id=$1 AND external_contact_id=$2",[channel.rows[0].id,String(event.sender?.id??"")]);
@@ -64,9 +69,9 @@ async function applyProviderDeliveryEvents(payload:any,correlationId:string){
             await query(`
               UPDATE messages m SET delivery_status='read',metadata=metadata||$3::jsonb,updated_at=now()
               FROM conversations cv
-              WHERE m.conversation_id=cv.id AND cv.contact_id=$1 AND m.channel_account_id=$2 AND m.direction='OUTBOUND'
+              WHERE m.tenant_id=$5 AND cv.tenant_id=$5 AND m.conversation_id=cv.id AND cv.contact_id=$1 AND m.channel_account_id=$2 AND m.direction='OUTBOUND'
                 AND m.created_at<=to_timestamp($4::double precision/1000.0) AND m.delivery_status IN ('sent','delivered')
-            `,[contact.rows[0].id,channel.rows[0].id,JSON.stringify({readAt:new Date(Number(event.read.watermark)).toISOString()}),Number(event.read.watermark)]);
+            `,[contact.rows[0].id,channel.rows[0].id,JSON.stringify({readAt:new Date(Number(event.read.watermark)).toISOString()}),Number(event.read.watermark),channel.rows[0].tenant_id]);
           }
         }
       }
@@ -294,7 +299,7 @@ export async function webhookRoutes(app: FastifyInstance) {
 
   app.post("/v1/internal/meta/events", async (request, reply) => {
     const auth = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-    if (!auth || auth !== env().INTERNAL_SERVICE_AUTH_SECRET) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Unauthorized.");
+    if (!safeSecretEqual(auth, env().INTERNAL_SERVICE_AUTH_SECRET)) throw new ApiError(401, "INTERNAL_AUTH_REQUIRED", "Unauthorized.");
     const correlationId = requestId(request);
     const normalized = normalizeMetaPayload(request.body);
     const results = [];

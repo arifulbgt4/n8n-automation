@@ -6,6 +6,7 @@ import { assertDatabaseReady, env, redis, redisKey } from "@n8n-automation/core"
 import { ApiError, jsonError, requestId } from "./lib.js";
 import { ephemeralConversationLifecycle } from "./ephemeral-conversations.js";
 import { authRoutes } from "./routes/auth.js";
+import { adminAuthRoutes } from "./routes/admin-auth.js";
 import { tenantRoutes } from "./routes/tenant.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { channelRoutes } from "./routes/channels.js";
@@ -59,7 +60,7 @@ await app.register(cors, {
   allowedHeaders: ["content-type", "authorization", "idempotency-key", config.CSRF_HEADER_NAME, "x-business-id", "x-admin-tenant-access"],
 });
 await app.register(multipart, {
-  limits: { files: 1, fileSize: 512 * 1024 * 1024, fields: 20 },
+  limits: { files: 1, fileSize: config.MAX_UPLOAD_BYTES, fields: 20 },
 });
 
 app.addHook("onRequest", async (request, reply) => {
@@ -114,6 +115,7 @@ app.get("/readyz", async (_request, reply) => {
 await ephemeralConversationLifecycle(app);
 await platformAiCustomerGuard(app);
 await authRoutes(app);
+await adminAuthRoutes(app);
 await tenantRoutes(app);
 await invitationRoutes(app);
 await channelRoutes(app);

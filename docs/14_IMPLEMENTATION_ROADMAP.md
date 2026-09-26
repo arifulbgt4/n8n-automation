@@ -488,7 +488,7 @@ This file is the delivery checklist and current implementation status. Repositor
 - [ ] Meta production permissions/app review as required.
 - [ ] Infrastructure dependencies pass health/readiness checks.
 - [ ] Backups/alerts verified with infrastructure owners.
-- [ ] Super Admin MFA enforced.
+- [x] Super Admin MFA enforcement implemented in the API/panel; production rollout still requires applying migration `012_restore_super_admin_security.sql` and verifying enrollment in the target environment.
 - [ ] Queue/dead-letter recovery verified.
 - [ ] n8n production workflow bundle version verified.
 - [ ] Media Storage tenant mappings/quota behavior verified.

@@ -5,7 +5,7 @@ import { ApiError, audit, requireCsrf, requireRecentPlatformAdmin } from "../lib
 
 export async function aiPlanAdminRoutes(app:FastifyInstance){
   app.patch("/v1/admin/plans/:planId/ai-allowance",async(request,reply)=>{
-    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });requireCsrf(request);
     const {planId}=z.object({planId:z.string().uuid()}).parse(request.params);
     const input=z.object({monthlyAiTokens:z.number().int().nonnegative(),monthlyAiCredits:z.number().nonnegative(),active:z.boolean().optional()}).parse(request.body);
     const result=await query<any>(`
@@ -21,7 +21,7 @@ export async function aiPlanAdminRoutes(app:FastifyInstance){
   });
 
   app.patch("/v1/admin/plans/:planId/media-allowance",async(request,reply)=>{
-    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const principal=await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });requireCsrf(request);
     const {planId}=z.object({planId:z.string().uuid()}).parse(request.params);
     const input=z.object({
       maxImageMegapixels:z.number().positive().max(100),

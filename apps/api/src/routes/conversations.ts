@@ -18,8 +18,8 @@ export async function conversationRoutes(app: FastifyInstance) {
     }).parse(request.query);
     const result = await query(`
       SELECT cv.*,ct.external_contact_id,ct.display_name,ca.platform,ca.name AS channel_name,b.name AS business_name,
-        (SELECT m.text_content FROM messages m WHERE m.conversation_id=cv.id ORDER BY m.created_at DESC LIMIT 1) AS last_message_text,
-        (SELECT m.sender_type FROM messages m WHERE m.conversation_id=cv.id ORDER BY m.created_at DESC LIMIT 1) AS last_sender_type
+        (SELECT m.text_content FROM messages m WHERE m.conversation_id=cv.id AND m.tenant_id=cv.tenant_id ORDER BY m.created_at DESC LIMIT 1) AS last_message_text,
+        (SELECT m.sender_type FROM messages m WHERE m.conversation_id=cv.id AND m.tenant_id=cv.tenant_id ORDER BY m.created_at DESC LIMIT 1) AS last_sender_type
       FROM conversations cv
       JOIN contacts ct ON ct.id=cv.contact_id
       JOIN channel_accounts ca ON ca.id=cv.channel_account_id
@@ -48,13 +48,19 @@ export async function conversationRoutes(app: FastifyInstance) {
     const messages = await query(`
       SELECT m.*,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',ma.id,'mimeType',ma.mime_type,'kind',ma.kind,'publicUrl',ma.public_url,'originalName',ma.original_name) ORDER BY mm.display_order)
-                  FROM message_media mm JOIN media_assets ma ON ma.id=mm.media_asset_id WHERE mm.message_id=m.id),'[]'::jsonb) AS media
-      FROM messages m WHERE m.conversation_id=$1 ORDER BY m.created_at ASC LIMIT 500
-    `, [params.conversationId]);
+                  FROM message_media mm JOIN media_assets ma ON ma.id=mm.media_asset_id
+                  WHERE mm.message_id=m.id AND mm.tenant_id=$2 AND ma.tenant_id=$2
+                    AND ma.processing_status='ready'
+                    AND COALESCE(ma.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+                    AND (ma.business_id IS NULL OR ma.business_id=conversation_business.business_id)),'[]'::jsonb) AS media
+      FROM messages m
+      JOIN conversations conversation_business ON conversation_business.id=m.conversation_id AND conversation_business.tenant_id=$2
+      WHERE m.conversation_id=$1 AND m.tenant_id=$2 ORDER BY m.created_at ASC LIMIT 500
+    `, [params.conversationId, params.tenantId]);
     const related = await Promise.all([
-      query("SELECT * FROM orders WHERE conversation_id=$1 ORDER BY created_at DESC LIMIT 20", [params.conversationId]),
-      query("SELECT * FROM bookings WHERE conversation_id=$1 ORDER BY created_at DESC LIMIT 20", [params.conversationId]),
-      query("SELECT * FROM leads WHERE conversation_id=$1 ORDER BY created_at DESC LIMIT 20", [params.conversationId]),
+      query("SELECT * FROM orders WHERE conversation_id=$1 AND tenant_id=$2 AND business_id=$3 ORDER BY created_at DESC LIMIT 20", [params.conversationId, params.tenantId, conversation.rows[0].business_id]),
+      query("SELECT * FROM bookings WHERE conversation_id=$1 AND tenant_id=$2 AND business_id=$3 ORDER BY created_at DESC LIMIT 20", [params.conversationId, params.tenantId, conversation.rows[0].business_id]),
+      query("SELECT * FROM leads WHERE conversation_id=$1 AND tenant_id=$2 AND business_id=$3 ORDER BY created_at DESC LIMIT 20", [params.conversationId, params.tenantId, conversation.rows[0].business_id]),
     ]);
     reply.send({ conversation: conversation.rows[0], messages: messages.rows, orders: related[0].rows, bookings: related[1].rows, leads: related[2].rows });
   });
@@ -91,8 +97,10 @@ export async function conversationRoutes(app: FastifyInstance) {
     const messages: Array<Record<string, unknown>> = [];
     if (input.text?.trim()) messages.push({ type: "text", text: input.text.trim() });
     for (const assetId of input.assetIds) {
-      const asset = await query("SELECT id FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'", [assetId, params.tenantId]);
+      const asset = await query<{ id: string; business_id: string | null; metadata: Record<string, unknown> | null }>("SELECT id,business_id,metadata FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'", [assetId, params.tenantId]);
       if (!asset.rows[0]) throw new ApiError(404, "MEDIA_NOT_FOUND", `Media asset ${assetId} not found.`);
+      if (["tenant_export", "collection_export"].includes(String(asset.rows[0].metadata?.source ?? ""))) throw new ApiError(404, "MEDIA_NOT_FOUND", `Media asset ${assetId} not found.`);
+      if (asset.rows[0].business_id) await requireBusinessAccess(request, params.tenantId, asset.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
       messages.push({ type: "media", assetId });
     }
     const logicalResponseId = randomToken(18);
@@ -126,7 +134,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     const cvScope = await query<{ business_id: string }>("SELECT business_id FROM conversations WHERE id=$1 AND tenant_id=$2", [params.conversationId,params.tenantId]);
     if (!cvScope.rows[0]) throw new ApiError(404,"CONVERSATION_NOT_FOUND","Conversation not found.");
     await requireBusinessAccess(request, params.tenantId, cvScope.rows[0].business_id);
-    const result = await query("SELECT * FROM followup_jobs WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY due_at DESC LIMIT 100", [params.tenantId,params.conversationId]);
+    const result = await query("SELECT * FROM followup_jobs WHERE tenant_id=$1 AND conversation_id=$2 AND business_id=$3 ORDER BY due_at DESC LIMIT 100", [params.tenantId,params.conversationId,cvScope.rows[0].business_id]);
     reply.send({ followups: result.rows });
   });
 
