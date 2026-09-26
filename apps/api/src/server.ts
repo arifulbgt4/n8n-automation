@@ -29,6 +29,7 @@ import { orchestrationRoutes } from "./routes/orchestration.js";
 import { internalAiJobRoutes } from "./routes/internal-ai-jobs.js";
 import { adminRoutes } from "./routes/admin.js";
 import { platformConfigRoutes } from "./routes/platform-config.js";
+import { resourceCrudRoutes } from "./routes/resource-crud.js";
 
 const config = env();
 const app = Fastify({
@@ -135,6 +136,7 @@ await orchestrationRoutes(app);
 await internalAiJobRoutes(app);
 await adminRoutes(app);
 await platformConfigRoutes(app);
+await resourceCrudRoutes(app);
 
 const port = Number(process.env.PORT || 4000);
 const host = process.env.HOST || "0.0.0.0";
