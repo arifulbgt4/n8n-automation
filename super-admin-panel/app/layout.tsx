@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Automation SaaS",
-  description: "Multi-tenant AI automation platform",
+  title: "Super Admin | Automation SaaS",
+  description: "Platform administration for Automation SaaS.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

@@ -53,7 +53,39 @@ function AuthView({ onAuthenticated }: { onAuthenticated: () => void }) {
     if (!form.email) return setError("Enter your email first.");
     try { await api("/v1/auth/request-password-reset", { method:"POST", body:JSON.stringify({email:form.email}) }); setNotice("If the account exists, a password-reset email has been sent."); } catch (err) { setError(err instanceof Error ? err.message : "Request failed"); }
   }
-  return <main className="auth-shell"><div className="auth-brand"><div className="brand-mark">A</div><div><strong>Automation SaaS</strong><span>AI business operations across every channel</span></div></div><div className="auth-grid"><section className="auth-copy"><Badge tone="brand">Multi-channel AI automation</Badge><h1>Operate conversations, sales and services from one place.</h1><p>Connect Facebook, Instagram and WhatsApp. Build your own product or service data, train AI behavior, and manage orders, bookings and leads with a shared source of truth.</p><div className="feature-grid"><div><b>Dynamic data</b><span>Products, services, properties or any custom schema.</span></div><div><b>Agent training</b><span>Teach AI from example conversations and publish versioned prompts.</span></div><div><b>Unified inbox</b><span>AI and human handoff across connected channels.</span></div><div><b>Measured usage</b><span>Messages, AI calls, media and outcomes per channel.</span></div></div></section><section className="auth-card"><div className="tabs"><button className={mode==="signin"?"active":""} onClick={()=>setMode("signin")}>Sign in</button><button className={mode==="signup"?"active":""} onClick={()=>setMode("signup")}>Create account</button></div><form onSubmit={submit} className="stack">{mode==="signup" && <><Field label="Your name"><input required value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></Field><Field label="Organization / account name"><input required value={form.organizationName} onChange={e=>setForm({...form,organizationName:e.target.value})}/></Field></>}<Field label="Email"><input type="email" required value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/></Field><Field label="Password" hint={mode==="signup"?"At least 10 characters with letters and numbers":undefined}><input type="password" required value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/></Field>{error && <div className="alert error">{error}</div>}{notice && <div className="alert success">{notice}</div>}<button className="button primary" disabled={busy}>{busy?"Working…":mode==="signin"?"Sign in":"Create account"}</button>{mode==="signin" && <button type="button" className="link-button" onClick={requestReset}>Forgot password?</button>}</form></section></div></main>;
+  return (
+    <main className="auth-shell">
+      <section className="auth-card auth-login-card" aria-labelledby="customer-auth-title">
+        <div className="auth-card-brand auth-brand">
+          <div className="brand-mark">A</div>
+          <div>
+            <strong>Automation SaaS</strong>
+            <span>Customer Panel</span>
+          </div>
+        </div>
+        <div className="auth-heading">
+          <h1 id="customer-auth-title">{mode === "signin" ? "Welcome back" : "Create your account"}</h1>
+          <p>{mode === "signin" ? "Sign in to continue to your workspace." : "Create a customer workspace to get started."}</p>
+        </div>
+        <div className="tabs" role="tablist" aria-label="Authentication mode">
+          <button type="button" role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "active" : ""} onClick={() => setMode("signin")}>Sign in</button>
+          <button type="button" role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "active" : ""} onClick={() => setMode("signup")}>Create account</button>
+        </div>
+        <form onSubmit={submit} className="stack">
+          {mode === "signup" && <>
+            <Field label="Your name"><input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></Field>
+            <Field label="Organization / account name"><input required value={form.organizationName} onChange={e => setForm({ ...form, organizationName: e.target.value })} /></Field>
+          </>}
+          <Field label="Email"><input type="email" required value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></Field>
+          <Field label="Password" hint={mode === "signup" ? "At least 10 characters with letters and numbers" : undefined}><input type="password" required value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /></Field>
+          {error && <div className="alert error">{error}</div>}
+          {notice && <div className="alert success">{notice}</div>}
+          <button className="button primary" disabled={busy}>{busy ? "Working…" : mode === "signin" ? "Sign in" : "Create account"}</button>
+          {mode === "signin" && <button type="button" className="link-button" onClick={requestReset}>Forgot password?</button>}
+        </form>
+      </section>
+    </main>
+  );
 }
 
 export default function CustomerApp() {
