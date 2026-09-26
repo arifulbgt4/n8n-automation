@@ -34,14 +34,18 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
 
 function AuthView({ onAuthenticated }: { onAuthenticated: () => void }) {
   const [mode, setMode] = useState<"signin"|"signup">("signin");
-  const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [noticeTone, setNoticeTone] = useState<"success"|"warn">("success");
   const [form, setForm] = useState({ email:"", password:"", name:"", organizationName:"" });
   async function submit(e: FormEvent) {
-    e.preventDefault(); setBusy(true); setError(""); setNotice("");
+    e.preventDefault(); setBusy(true); setError(""); setNotice(""); setNoticeTone("success");
     try {
       if (mode === "signin") {
         const result = await signIn(form.email, form.password);
-        if (result.mfaRequired || result.mfaSetupRequired) throw new Error("This account is a platform administrator. Please use the Super Admin Panel to complete MFA.");
+        if (result.mfaRequired || result.mfaSetupRequired) {
+          setNoticeTone("warn");
+          setNotice("This is a platform administrator account. Use the Super Admin Panel to complete MFA.");
+          return;
+        }
       } else {
         await signUp(form); setNotice("Account created. Check your email to verify the address.");
       }
@@ -50,8 +54,9 @@ function AuthView({ onAuthenticated }: { onAuthenticated: () => void }) {
     finally { setBusy(false); }
   }
   async function requestReset() {
-    if (!form.email) return setError("Enter your email first.");
-    try { await api("/v1/auth/request-password-reset", { method:"POST", body:JSON.stringify({email:form.email}) }); setNotice("If the account exists, a password-reset email has been sent."); } catch (err) { setError(err instanceof Error ? err.message : "Request failed"); }
+    if (!form.email) { setNotice(""); return setError("Enter your email first."); }
+    setError(""); setNotice(""); setNoticeTone("success");
+    try { await api("/v1/auth/request-password-reset", { method:"POST", body:JSON.stringify({email:form.email}) }); setNotice("If the account exists, a password-reset email has been sent."); } catch (err) { setNotice(""); setError(err instanceof Error ? err.message : "Request failed"); }
   }
   return (
     <main className="auth-shell">
@@ -79,7 +84,7 @@ function AuthView({ onAuthenticated }: { onAuthenticated: () => void }) {
           <Field label="Email"><input type="email" required value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></Field>
           <Field label="Password" hint={mode === "signup" ? "At least 10 characters with letters and numbers" : undefined}><input type="password" required value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /></Field>
           {error && <div className="alert error">{error}</div>}
-          {notice && <div className="alert success">{notice}</div>}
+          {notice && <div className={`alert ${noticeTone}`}>{notice}</div>}
           <button className="button primary" disabled={busy}>{busy ? "Working…" : mode === "signin" ? "Sign in" : "Create account"}</button>
           {mode === "signin" && <button type="button" className="link-button" onClick={requestReset}>Forgot password?</button>}
         </form>
