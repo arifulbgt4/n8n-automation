@@ -10,7 +10,10 @@ import { useEffect } from "react";
 export default function PlatformManagedAiUi() {
   useEffect(() => {
     const routeTargets: Array<[string, string]> = [
+      ["Businesses", "/businesses"],
+      ["Channels", "/channels"],
       ["Data / Catalogs", "/catalogs"],
+      ["AI Agents", "/agents"],
       ["Media", "/media-library"],
     ];
 
