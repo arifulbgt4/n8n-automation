@@ -106,9 +106,19 @@ export async function platformAiRoutes(app:FastifyInstance){
   app.patch("/v1/admin/platform-ai/models/:modelId",async(request,reply)=>{
     const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
     const {modelId}=z.object({modelId:z.string().uuid()}).parse(request.params);
-    const input=z.object({priority:z.number().int().min(0).max(10000).optional(),active:z.boolean().optional(),parameters:z.record(z.string(),z.unknown()).optional(),inputCreditsPer1kTokens:z.number().nonnegative().optional(),outputCreditsPer1kTokens:z.number().nonnegative().optional(),requestCredits:z.number().nonnegative().optional()}).parse(request.body);
-    const result=await query<any>(`UPDATE platform_ai_model_routes SET priority=COALESCE($2,priority),active=COALESCE($3,active),parameters=CASE WHEN $4::jsonb IS NULL THEN parameters ELSE $4::jsonb END,input_credits_per_1k_tokens=COALESCE($5,input_credits_per_1k_tokens),output_credits_per_1k_tokens=COALESCE($6,output_credits_per_1k_tokens),request_credits=COALESCE($7,request_credits),updated_at=now() WHERE id=$1 RETURNING *`,[modelId,input.priority??null,input.active??null,input.parameters?JSON.stringify(input.parameters):null,input.inputCreditsPer1kTokens??null,input.outputCreditsPer1kTokens??null,input.requestCredits??null]);
-    if(!result.rows[0]) throw new ApiError(404,"PLATFORM_AI_MODEL_NOT_FOUND","Platform AI model route not found.");
+    const input=z.object({providerConnectionId:z.string().uuid().optional(),taskKey:taskSchema.optional(),model:z.string().trim().min(1).max(160).optional(),priority:z.number().int().min(0).max(10000).optional(),active:z.boolean().optional(),parameters:z.record(z.string(),z.unknown()).optional(),inputCreditsPer1kTokens:z.number().nonnegative().optional(),outputCreditsPer1kTokens:z.number().nonnegative().optional(),requestCredits:z.number().nonnegative().optional()}).parse(request.body);
+    const current=await query<any>("SELECT * FROM platform_ai_model_routes WHERE id=$1",[modelId]);
+    if(!current.rows[0]) throw new ApiError(404,"PLATFORM_AI_MODEL_NOT_FOUND","Platform AI model route not found.");
+    const providerConnectionId=input.providerConnectionId??current.rows[0].provider_connection_id;
+    const taskKey=input.taskKey??current.rows[0].task_key;
+    const model=input.model??current.rows[0].model;
+    const parameters=input.parameters??current.rows[0].parameters??{};
+    const provider=await providerById(providerConnectionId);
+    if(input.providerConnectionId||input.model||input.taskKey){
+      const test=await testConnection(provider,{model,parameters});
+      if(!test.ok&&taskKey==="DEFAULT_CHAT") throw new ApiError(400,"PLATFORM_AI_MODEL_TEST_FAILED",test.detail);
+    }
+    const result=await query<any>(`UPDATE platform_ai_model_routes SET provider_connection_id=$2,task_key=$3,model=$4,priority=COALESCE($5,priority),active=COALESCE($6,active),parameters=CASE WHEN $7::jsonb IS NULL THEN parameters ELSE $7::jsonb END,input_credits_per_1k_tokens=COALESCE($8,input_credits_per_1k_tokens),output_credits_per_1k_tokens=COALESCE($9,output_credits_per_1k_tokens),request_credits=COALESCE($10,request_credits),updated_at=now() WHERE id=$1 RETURNING *`,[modelId,providerConnectionId,taskKey,model,input.priority??null,input.active??null,input.parameters?JSON.stringify(input.parameters):null,input.inputCreditsPer1kTokens??null,input.outputCreditsPer1kTokens??null,input.requestCredits??null]);
     await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"PLATFORM_AI_MODEL_UPDATED",resourceType:"platform_ai_model_route",resourceId:modelId,safeDiff:input,request});
     reply.send({model:result.rows[0]});
   });
