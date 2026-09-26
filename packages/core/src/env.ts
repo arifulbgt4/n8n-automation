@@ -18,6 +18,8 @@ const schema = z.object({
   ADMIN_APP_ALLOWED_ORIGINS: z.string().default(""),
   API_PUBLIC_ORIGIN: z.string().url().default("http://localhost:4000"),
   INTERNAL_SERVICE_AUTH_SECRET: z.string().min(24),
+  RESEND_API_KEY: z.string().default(""),
+  RESEND_API_URL: z.string().url().default("https://api.resend.com"),
   EMAIL_DELIVERY_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
   EMAIL_FROM: z.string().default("no-reply@example.com"),
   MEDIA_BASE_URL: z.string().url().optional().or(z.literal("")),

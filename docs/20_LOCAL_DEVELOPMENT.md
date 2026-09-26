@@ -140,6 +140,11 @@ CUSTOMER_APP_ORIGIN=http://localhost:3000
 ADMIN_APP_ORIGIN=http://localhost:3001
 API_PUBLIC_ORIGIN=http://localhost:4000
 
+# Optional Resend delivery. Resend is preferred when RESEND_API_KEY is set.
+RESEND_API_KEY=
+RESEND_API_URL=https://api.resend.com
+
+# Optional legacy webhook fallback.
 EMAIL_DELIVERY_WEBHOOK_URL=
 EMAIL_FROM=no-reply@example.com
 
@@ -309,7 +314,7 @@ If healthz succeeds and readyz fails, check PostgreSQL and Redis first.
 
 Open the Customer Panel and sign up with email, password, user name, and organization name.
 
-If EMAIL_DELIVERY_WEBHOOK_URL is blank in development, the API logs the verification email text and verification URL to stdout instead of sending it. Use that URL/token for local verification.
+If neither `RESEND_API_KEY` nor `EMAIL_DELIVERY_WEBHOOK_URL` is configured in development, the API skips delivery and logs safe mail metadata to stdout. Use a local webhook or a Resend test sender when you need to exercise delivery.
 
 ## 12. Create a local Super Admin
 
@@ -411,9 +416,19 @@ Real callback testing normally requires a public HTTPS endpoint. Tunnel local AP
 
 Never commit app secrets, access tokens, page tokens, WhatsApp tokens, or webhook secrets.
 
-## 16. Optional email integration
+## 16. Email integration
 
-EMAIL_DELIVERY_WEBHOOK_URL can point to an HTTP service that accepts:
+Resend is the preferred provider. Configure a Resend API key and a sender address from a domain verified in Resend:
+
+~~~dotenv
+RESEND_API_KEY=re_...
+RESEND_API_URL=https://api.resend.com
+EMAIL_FROM=Automation SaaS <no-reply@verified.example.com>
+~~~
+
+The API sends `POST /emails` with the sender, one recipient, subject, and plain-text body. Keep `RESEND_API_KEY` server-side; never expose it through `NEXT_PUBLIC_*` variables or commit it.
+
+For local development or an existing mail gateway, `EMAIL_DELIVERY_WEBHOOK_URL` remains supported as a fallback when `RESEND_API_KEY` is blank. The endpoint accepts:
 
 ~~~json
 {
@@ -424,7 +439,7 @@ EMAIL_DELIVERY_WEBHOOK_URL can point to an HTTP service that accepts:
 }
 ~~~
 
-When it is blank and NODE_ENV is not production, email content is logged to API stdout.
+When both providers are blank and `NODE_ENV` is not production, delivery is skipped and only safe mail metadata is logged to API stdout.
 
 ## 17. AI provider development
 
@@ -562,7 +577,7 @@ Authenticate through the panel so the CSRF token is stored, or supply the curren
 
 ### Verification email never arrives
 
-With no email webhook in development, read the verification URL from API logs.
+Check that `RESEND_API_KEY` is loaded by the API process, `EMAIL_FROM` uses a verified Resend sender domain, and the recipient is allowed by the Resend account. For development without a provider, use a local webhook or the API's safe delivery log; no verification token is printed by the delivery layer.
 
 ### Media operations fail
 

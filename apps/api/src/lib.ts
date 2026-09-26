@@ -290,15 +290,29 @@ export async function audit(input: {
 }
 
 export async function sendEmail(to: string, subject: string, text: string): Promise<void> {
-  const hook = env().EMAIL_DELIVERY_WEBHOOK_URL;
+  const config = env();
+  if (config.RESEND_API_KEY) {
+    const response = await fetch(`${config.RESEND_API_URL.replace(/\/+$/, "")}/emails`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.RESEND_API_KEY}`,
+      },
+      body: JSON.stringify({ from: config.EMAIL_FROM, to: [to], subject, text }),
+    });
+    if (!response.ok) throw new Error(`Resend email delivery failed: ${response.status}`);
+    return;
+  }
+
+  const hook = config.EMAIL_DELIVERY_WEBHOOK_URL;
   if (!hook) {
-    if (env().NODE_ENV !== "production") console.info("EMAIL_DELIVERY_WEBHOOK_URL not configured", { to, subject, bodyLength: text.length });
+    if (config.NODE_ENV !== "production") console.info("Email delivery provider not configured", { to, subject, bodyLength: text.length });
     return;
   }
   const response = await fetch(hook, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ from: env().EMAIL_FROM, to, subject, text }),
+    body: JSON.stringify({ from: config.EMAIL_FROM, to, subject, text }),
   });
   if (!response.ok) throw new Error(`Email delivery webhook failed: ${response.status}`);
 }
