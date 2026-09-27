@@ -770,7 +770,7 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
       } else {
         const tenant = await query("SELECT id,name,slug,status,settings_json,created_at FROM tenants WHERE id=$1",[job.data.tenantId]);
         if (!tenant.rows[0]) throw new Error("Tenant not found");
-        const [businesses,channels,collections,fields,items,orders,bookings,leads,quotes,cases,agents,prompts,knowledge] = await Promise.all([
+        const [businesses,channels,collections,fields,items,orders,bookings,leads,quotes,cases,agents,prompts,knowledge,contacts,conversations,messages,mediaAssets,messageMedia,collectionItemMedia] = await Promise.all([
           query("SELECT * FROM businesses WHERE tenant_id=$1",[job.data.tenantId]),
           query("SELECT id,business_id,platform,name,external_account_id,public_identifier,connection_status,settings_json,created_at FROM channel_accounts WHERE tenant_id=$1",[job.data.tenantId]),
           query("SELECT * FROM collections WHERE tenant_id=$1",[job.data.tenantId]),
@@ -784,8 +784,38 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
           query("SELECT * FROM agent_profiles WHERE tenant_id=$1",[job.data.tenantId]),
           query("SELECT * FROM prompt_versions WHERE tenant_id=$1",[job.data.tenantId]),
           query("SELECT id,business_id,agent_profile_id,type,title,content,status,source_version,metadata,created_at,updated_at FROM knowledge_sources WHERE tenant_id=$1",[job.data.tenantId]),
+          query("SELECT id,business_id,channel_account_id,external_contact_id,display_name,phone,email,created_at,updated_at FROM contacts WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
+          query("SELECT id,business_id,channel_account_id,contact_id,mode,status,assigned_user_id,agent_profile_id,last_message_at,last_turn_at,created_at,updated_at FROM conversations WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
+          query("SELECT id,business_id,channel_account_id,conversation_id,turn_id,platform_message_id,direction,sender_type,message_type,text_content,provider_timestamp,delivery_status,reply_to_message_id,created_at,updated_at FROM messages WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
+          query("SELECT id,business_id,original_name,mime_type,kind,size_bytes,width,height,duration_ms,visibility,processing_status,created_at,updated_at FROM media_assets WHERE tenant_id=$1 AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export') ORDER BY created_at,id",[job.data.tenantId]),
+          query("SELECT mm.message_id,mm.media_asset_id,mm.display_order,mm.created_at FROM message_media mm WHERE mm.tenant_id=$1 ORDER BY mm.message_id,mm.display_order,mm.media_asset_id",[job.data.tenantId]),
+          query("SELECT cim.collection_item_id,cim.media_asset_id,cim.role,cim.display_order,cim.created_at FROM collection_item_media cim WHERE cim.tenant_id=$1 ORDER BY cim.collection_item_id,cim.display_order,cim.media_asset_id",[job.data.tenantId]),
         ]);
-        exportPayload={exportedAt:new Date().toISOString(),tenant:tenant.rows[0],businesses:businesses.rows,channels:channels.rows,collections:collections.rows,fields:fields.rows,items:items.rows,orders:orders.rows,bookings:bookings.rows,leads:leads.rows,quoteRequests:quotes.rows,supportCases:cases.rows,agents:agents.rows,prompts:prompts.rows,knowledge:knowledge.rows};
+        exportPayload={
+          exportedAt:new Date().toISOString(),
+          formatVersion:2,
+          mediaFileBytesIncluded:false,
+          tenant:tenant.rows[0],
+          businesses:businesses.rows,
+          channels:channels.rows,
+          collections:collections.rows,
+          fields:fields.rows,
+          items:items.rows,
+          orders:orders.rows,
+          bookings:bookings.rows,
+          leads:leads.rows,
+          quoteRequests:quotes.rows,
+          supportCases:cases.rows,
+          agents:agents.rows,
+          prompts:prompts.rows,
+          knowledge:knowledge.rows,
+          contacts:contacts.rows,
+          conversations:conversations.rows,
+          messages:messages.rows,
+          mediaAssets:mediaAssets.rows,
+          messageMedia:messageMedia.rows,
+          collectionItemMedia:collectionItemMedia.rows,
+        };
       }
 
       if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
