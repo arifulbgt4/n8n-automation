@@ -110,7 +110,7 @@ Customer:
 - monthly tokens used / remaining;
 - monthly credits used / remaining.
 
-`/ai-models` is informational only and no longer exposes provider/model configuration.
+The Customer Panel has no AI models page or provider/model configuration.
 
 ## API boundary
 
@@ -120,7 +120,7 @@ Customer provider/model mutation endpoints are blocked with:
 403 PLATFORM_AI_MANAGED
 ```
 
-The legacy Customer AI Agent screen may temporarily read an empty provider/model collection for UI compatibility, but it never receives platform secrets or platform route configuration.
+The Customer AI Agent screen does not request provider/model configuration or receive platform secrets.
 
 Admin endpoints:
 

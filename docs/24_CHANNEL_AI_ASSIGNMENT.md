@@ -6,29 +6,20 @@ A connected social channel is transport-only until an active AI agent is selecte
 
 New inbound conversations inherit `channel_accounts.default_agent_profile_id`. The selected agent must belong to the same tenant/business, have `status='active'`, and have an active prompt version.
 
-AI response generation also requires a resolvable active `DEFAULT_CHAT` model configuration backed by an active AI provider connection.
+AI response generation also requires an active platform-managed `DEFAULT_CHAT` model route backed by an active provider connection.
 
 ## Customer setup order
 
-1. Connect and test the Facebook/Instagram/WhatsApp channel.
-2. Add an AI provider connection.
-3. Open Customer Panel → **AI provider models** (`/ai-models`). Select the provider, load the model catalog exposed to that provider API key, choose or manually enter a provider model ID, and save a `DEFAULT_CHAT` route. `DEFAULT_CHAT` is tested against the provider before the route is saved.
-4. Create an AI agent. Agent creation publishes an initial prompt version automatically.
-5. Open Customer Panel → **AI Channel Setup** (`/channel-ai`).
-6. Select the default agent for the channel and save.
-7. Send a new customer message and verify the conversation/outbound delivery.
+1. Super Admin configures and tests an active platform `DEFAULT_CHAT` route in the Super Admin Panel.
+2. Connect and test the Facebook/Instagram/WhatsApp channel in the Customer Panel.
+3. Create an AI agent. Agent creation publishes an initial prompt version automatically.
+4. Open Customer Panel → **AI Channel Setup** (`/channel-ai`).
+5. Select the default agent for the channel and save.
+6. Send a new customer message and verify the conversation/outbound delivery.
 
 ## Provider model discovery
 
-The model identifier is owned by the AI provider; the SaaS does not invent a model ID. The discovery page calls:
-
-```text
-GET /v1/tenants/:tenantId/ai/providers/:providerId/catalog
-```
-
-The API retrieves the available model catalog using the provider credential already stored by the SaaS. It supports OpenAI, Anthropic, Gemini, and OpenAI-compatible providers. OpenAI-compatible providers can still use a manually entered model ID when their `/models` endpoint is unavailable or incomplete.
-
-No provider API key is returned to the browser. The browser receives only model catalog metadata such as the model ID, display label, owner, or supported methods when the upstream provider supplies them.
+Super Admin discovers provider model IDs and configures task routes through the platform AI controls. Customer workspaces do not manage provider credentials or model IDs.
 
 ## Assignment API
 
@@ -73,10 +64,10 @@ After agent assignment, a missing model is reported separately as:
 
 ```text
 409 AI_MODEL_MISSING
-No DEFAULT_CHAT model is configured for this agent.
+No active DEFAULT_CHAT model configuration is available.
 ```
 
-Configure a provider/model route instead of treating that as a Meta or n8n webhook failure.
+Configure a platform provider/model route in the Super Admin Panel instead of treating that as a Meta or n8n webhook failure.
 
 ## n8n multimodal parser compatibility
 
