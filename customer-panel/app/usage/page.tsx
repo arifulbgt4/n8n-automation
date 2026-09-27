@@ -19,21 +19,23 @@ type Allowance={
 function pct(used:number,limit:number|null){return limit&&limit>0?Math.min(100,(used/limit)*100):0;}
 function num(value:number|null,digits=0){if(value===null)return "Unlimited";return new Intl.NumberFormat(undefined,{maximumFractionDigits:digits}).format(value);}
 
-export default function UsagePage(){
+export default function UsagePage({ embedded = false, workspaceId }: { embedded?: boolean; workspaceId?: string } = {}){
   const[memberships,setMemberships]=useState<Membership[]>([]);
-  const[tenantId,setTenantId]=useState("");
-  const[data,setData]=useState<Allowance|null>(null);
+  const[selectedTenantId,setSelectedTenantId]=useState("");
+  const tenantId=workspaceId??selectedTenantId;
+  const[loaded,setLoaded]=useState<{tenantId:string;data:Allowance}|null>(null);
+  const data=loaded?.tenantId===tenantId?loaded.data:null;
   const[error,setError]=useState("");
-  useEffect(()=>{api<any>("/v1/auth/me").then(result=>{const rows=result?.memberships??[];setMemberships(rows);setTenantId(rows[0]?.tenant_id??"");}).catch(e=>setError(e instanceof Error?e.message:"Unable to load account."));},[]);
-  useEffect(()=>{if(!tenantId)return;setError("");api<Allowance>(`/v1/tenants/${tenantId}/ai/allowance`).then(setData).catch(e=>setError(e instanceof Error?e.message:"Unable to load AI allowance."));},[tenantId]);
+  useEffect(()=>{if(workspaceId!==undefined)return;api<{memberships?:Membership[]}>("/v1/auth/me").then(result=>{const rows=result.memberships??[];setMemberships(rows);setSelectedTenantId(rows[0]?.tenant_id??"");}).catch(e=>setError(e instanceof Error?e.message:"Unable to load account."));},[workspaceId]);
+  useEffect(()=>{if(!tenantId)return;api<Allowance>(`/v1/tenants/${tenantId}/ai/allowance`).then(result=>{setLoaded({tenantId,data:result});setError("");}).catch(e=>setError(e instanceof Error?e.message:"Unable to load AI allowance."));},[tenantId]);
   const tokenPct=useMemo(()=>data?pct(data.tokensUsed,data.tokenLimit):0,[data]);
   const creditPct=useMemo(()=>data?pct(data.creditsUsed,data.creditLimit):0,[data]);
-  return <main style={{maxWidth:980,margin:"0 auto",padding:"36px 24px",fontFamily:"Inter,system-ui,sans-serif"}}>
+  return <main style={{maxWidth:980,margin:"0 auto",padding:embedded?"0":"36px 24px",fontFamily:"Inter,system-ui,sans-serif"}}>
     <div style={{display:"flex",justifyContent:"space-between",gap:16,alignItems:"center",marginBottom:24}}>
-      <div><div style={{color:"#6b7280",fontSize:13,fontWeight:700,textTransform:"uppercase",letterSpacing:".08em"}}>Customer Panel</div><h1 style={{margin:"6px 0"}}>Monthly AI usage</h1><p style={{color:"#6b7280",margin:0}}>Chat, training, embeddings, image analysis and audio processing all consume the same monthly package allowance.</p></div>
-      <div style={{display:"flex",gap:14}}><Link href="/channel-ai" style={{color:"#4f46e5",fontWeight:700,textDecoration:"none"}}>Channel AI setup</Link><Link href="/" style={{color:"#4f46e5",fontWeight:700,textDecoration:"none"}}>← Dashboard</Link></div>
+      <div>{!embedded&&<div style={{color:"#6b7280",fontSize:13,fontWeight:700,textTransform:"uppercase",letterSpacing:".08em"}}>Customer Panel</div>}<h1 style={{margin:"6px 0"}}>Monthly AI usage</h1><p style={{color:"#6b7280",margin:0}}>Chat, training, embeddings, image analysis and audio processing all consume the same monthly package allowance.</p></div>
+      {!embedded&&<div style={{display:"flex",gap:14}}><Link href="/channel-ai" style={{color:"#4f46e5",fontWeight:700,textDecoration:"none"}}>Channel AI setup</Link><Link href="/" style={{color:"#4f46e5",fontWeight:700,textDecoration:"none"}}>← Dashboard</Link></div>}
     </div>
-    <label style={{display:"grid",gap:6,maxWidth:460,marginBottom:20}}><span style={{fontSize:13,color:"#6b7280"}}>Workspace</span><select value={tenantId} onChange={e=>setTenantId(e.target.value)} style={{padding:10,borderRadius:8,border:"1px solid #d1d5db"}}>{memberships.map(m=><option key={m.tenant_id} value={m.tenant_id}>{m.tenant_name} · {m.role}</option>)}</select></label>
+    {!embedded&&<label style={{display:"grid",gap:6,maxWidth:460,marginBottom:20}}><span style={{fontSize:13,color:"#6b7280"}}>Workspace</span><select value={tenantId} onChange={e=>setSelectedTenantId(e.target.value)} style={{padding:10,borderRadius:8,border:"1px solid #d1d5db"}}>{memberships.map(m=><option key={m.tenant_id} value={m.tenant_id}>{m.tenant_name} · {m.role}</option>)}</select></label>}
     {error&&<div style={{padding:12,marginBottom:16,borderRadius:8,background:"#fef2f2",color:"#991b1b"}}>{error}</div>}
     {data&&<>
       <section style={{border:"1px solid #e5e7eb",borderRadius:14,padding:20,background:"white",marginBottom:18}}><div style={{fontSize:13,color:"#6b7280",textTransform:"uppercase",fontWeight:700}}>Current package</div><div style={{fontSize:28,fontWeight:800,marginTop:5}}>{data.plan.name||data.plan.key||"Unassigned"}</div><div style={{color:"#6b7280",marginTop:4}}>Monthly cycle starting {new Date(data.periodStart).toLocaleDateString()} · payment checkout is not enabled.</div></section>

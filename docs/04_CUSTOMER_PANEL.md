@@ -20,7 +20,8 @@ Proposed top-level navigation:
 - Training
 - Knowledge
 - Media
-- Analytics / Usage
+- Analytics
+- Usage
 - Team
 - Settings
 - Plan / Billing (when enabled)
@@ -37,7 +38,7 @@ Navigation adapts to enabled capabilities. A service business may emphasize Book
 6. Connect Facebook/Instagram/WhatsApp or skip.
 7. Create/import first data collection or choose template.
 8. Create/select an AI agent template.
-9. Configure platform AI or BYOK provider.
+9. Review the platform-provided AI allowance and train the business agent.
 10. Test in simulator.
 11. Publish/activate automation.
 
@@ -69,7 +70,7 @@ Customers can:
 - rename/archive businesses.
 - configure timezone, currency, language/locale, contact information, delivery/payment defaults, and general settings.
 - assign team members to businesses.
-- set default AI agent/model/data/limits.
+- set the default AI agent, data, and business limits.
 - view connected channels.
 
 Destructive operations require confirmation and retention/history rules.
@@ -131,6 +132,8 @@ These are application schema definitions, not raw SQL columns.
 
 Customers can add/edit/delete/archive items, bulk edit where safe, search/filter/sort, upload one/many files, reorder gallery media, import/export in later phases, and view validation errors.
 
+The customer sidebar opens the schema-driven catalog editor. Add/Edit Item displays a normal form for the collection's fields, including product name, price, description, stock, category, and images for the Product template. Individual items do not require raw JSON.
+
 ### Channel linking
 
 A collection can link to one or many channels; customer sees where changes take effect.
@@ -191,7 +194,6 @@ Agent editor includes:
 - enabled capabilities.
 - default collections.
 - knowledge sources.
-- AI provider/model config.
 - tone/behavior.
 - escalation rules.
 - follow-up behavior.
@@ -236,23 +238,9 @@ Supports:
 
 Training is behavior/prompt synthesis by default, not foundation-model fine-tuning.
 
-## 13. AI provider configuration
+## 13. AI model ownership
 
-Customer can use platform AI or BYOK if plan allows.
-
-Configuration:
-
-- provider type.
-- API key/secret.
-- compatible-provider base URL.
-- connection test.
-- model selection.
-- task-specific assignment.
-- supported parameters.
-
-After save, show masked metadata only. Provide replace/revoke, not reveal.
-
-Task keys may include default conversation, intent, image analysis, transcription, prompt synthesis, embeddings, and specialized extraction.
+The Super Admin Panel manages provider credentials, approved task models, and routing. The Customer Panel manages agents, training, channel assignment, business data, and monthly token/credit usage. It does not expose provider keys or model configuration.
 
 ## 14. Knowledge/RAG
 
