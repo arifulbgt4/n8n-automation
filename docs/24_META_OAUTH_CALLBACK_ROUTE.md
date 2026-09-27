@@ -10,4 +10,4 @@ The root Customer Panel opens the selected business and its embedded Channels se
 
 `/channels` remains only as a compatibility return route for OAuth attempts started before this change or old bookmarks. It resolves the discovery to a tenant and business, then redirects to the unified Business & Channels screen. It is no longer a separate management page or sidebar item.
 
-Discovery state expires after 15 minutes. If it is missing or does not belong to the authenticated customer, the panel shows an error and the user can restart the connection from their business. The API callback URI itself must exactly match the URI configured in Meta's Facebook Login for Business settings.
+Discovery state expires after 15 minutes. An expired or missing OAuth state redirects to the Customer Panel with a restart message instead of rendering a raw API error. If discovery is missing or does not belong to the authenticated customer, the panel also shows an error and the user can restart the connection from their business. The API callback URI itself must exactly match the URI configured in Meta's Facebook Login for Business settings.

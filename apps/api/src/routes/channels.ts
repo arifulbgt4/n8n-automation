@@ -117,8 +117,8 @@ type MetaDiscovery = {
 function metaCustomerReturn(origin: string, tenantId: string, businessId: string, key: "metaConnection" | "metaError", value: string) {
   const destination = new URL("/", origin);
   destination.searchParams.set("view", "businesses");
-  destination.searchParams.set("tenantId", tenantId);
-  destination.searchParams.set("businessId", businessId);
+  if (tenantId) destination.searchParams.set("tenantId", tenantId);
+  if (businessId) destination.searchParams.set("businessId", businessId);
   destination.searchParams.set(key, value);
   return destination.toString();
 }
@@ -152,12 +152,13 @@ export async function channelRoutes(app: FastifyInstance) {
   });
 
   app.get("/v1/channels/meta/oauth/callback", async (request, reply) => {
-    const q = z.object({ code: z.string().min(1).optional(), state: z.string().min(20), error: z.string().optional(), error_description: z.string().optional() }).parse(request.query);
+    const q = z.object({ code: z.string().min(1).optional(), state: z.string().min(20).optional(), error: z.string().optional(), error_description: z.string().optional() }).parse(request.query);
     const config = await metaOAuthConfig();
+    if (!q.state) return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, "", "", "metaError", "Meta connection expired. Please start again from your business."));
     const key = redisKey("meta-oauth","state",q.state);
     const raw = await redis().get(key);
     await redis().del(key);
-    if (!raw) throw new ApiError(400,"META_OAUTH_STATE_INVALID","Meta OAuth state is invalid or expired.");
+    if (!raw) return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, "", "", "metaError", "Meta connection expired. Please start again from your business."));
     const state = JSON.parse(raw) as { tenantId: string; businessId: string; userId: string; requestedPlatform: "facebook"|"instagram" };
     if (q.error || !q.code) {
       return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, state.tenantId, state.businessId, "metaError", q.error_description || q.error || "Meta authorization was cancelled."));
