@@ -274,7 +274,7 @@ The existing Media Storage service owns the physical bytes and storage-level use
 
 ### `tenant_media_accounts`
 
-Preferred model: one Media Storage user/account per SaaS tenant.
+Legacy-only mapping for files uploaded before the shared application Media Storage account cutover. New files are tenant-scoped through `media_assets`; the app and worker keep the shared credential outside `app_db`.
 
 Suggested fields:
 

@@ -94,7 +94,7 @@ Separate:
 - session/auth secrets.
 - app DB credential.
 - Redis credential.
-- tenant Media Storage credentials/references.
+- one private shared Media Storage credential and legacy credential references for pre-cutover files.
 - internal service authentication.
 - Meta secrets.
 - AI provider secrets.
@@ -243,7 +243,7 @@ Store timestamps in UTC. Businesses maintain timezone settings for display/sched
 - [ ] webhook verification/signatures enabled.
 - [ ] rate limits configured.
 - [ ] dead-letter/retry tooling available.
-- [ ] tenant Media Storage user mapping/credentials tested.
+- [ ] shared Media Storage credential and tenant-scoped media isolation tested.
 - [ ] Media Storage private/public behavior tested.
 - [ ] n8n workflow bundle imported/configured/tested while inactive.
 - [ ] duplicate webhook/schedule bundle conflict eliminated.

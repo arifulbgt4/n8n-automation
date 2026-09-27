@@ -84,7 +84,7 @@ The Media Storage service already performs MIME/extension validation, safe stora
 
 Requirements:
 
-- keep tenant Media Storage bearer keys server-side.
+- keep the shared application Media Storage bearer key and legacy keys server-side.
 - default screenshots, conversations, training files, and sensitive documents to private.
 - use public visibility only for approved catalog/business media when required.
 - never trust filename alone for policy decisions.
@@ -163,7 +163,7 @@ Audit at minimum:
 - tenant/member/role changes.
 - channel connect/disconnect/credential replacement.
 - AI provider credential changes.
-- tenant Media Storage account/key lifecycle where application-managed.
+- shared Media Storage account/key lifecycle and legacy-file access.
 - prompt publish/rollback.
 - training auto-publish changes.
 - plan/limit changes.
@@ -297,7 +297,7 @@ Define retention for:
 - audit logs.
 - usage events.
 
-Tenant deletion respects legal/retention policy while revoking access immediately according to product rules, and eventually deletes/revokes tenant Media Storage content/account according to approved lifecycle.
+Tenant deletion respects legal/retention policy while revoking access immediately according to product rules, and eventually deletes the tenant's files. It must not delete the shared Media Storage account used by other tenants.
 
 ## 21. Data export/deletion
 

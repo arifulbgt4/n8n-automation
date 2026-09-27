@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   enqueue,
   env,
+  mediaApiKeyForAsset,
   query,
   QUEUES,
   randomToken,
@@ -53,7 +54,7 @@ async function runtimeContext(turnId: string) {
     GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version ORDER BY max(acl.priority) DESC
   `, [row.agent_profile_id, row.tenant_id, row.business_id]) : { rows: [] } as any;
   const media = await query<any>(`
-    SELECT mm.message_id,ma.id AS asset_id,ma.storage_file_id,ma.original_name,ma.mime_type,ma.kind,ma.size_bytes,ma.visibility
+    SELECT mm.message_id,ma.id AS asset_id,ma.storage_file_id,ma.storage_user_id,ma.original_name,ma.mime_type,ma.kind,ma.size_bytes,ma.visibility
     FROM message_media mm
     JOIN media_assets ma ON ma.id=mm.media_asset_id
     JOIN messages m ON m.id=mm.message_id
@@ -124,25 +125,11 @@ async function findKnowledge(tenantId: string, businessId: string, agentId: stri
   return result.rows;
 }
 
-async function mediaCredential(tenantId: string): Promise<string> {
-  const result = await query<{ encrypted_api_key: string | null }>(
-    "SELECT encrypted_api_key FROM tenant_media_accounts WHERE tenant_id=$1 AND status='active'",
-    [tenantId],
-  );
-  if (result.rows[0]?.encrypted_api_key) {
-    const { decryptSecret } = await import("@n8n-automation/core");
-    return decryptSecret(result.rows[0].encrypted_api_key);
-  }
-  const config = env();
-  if (config.MEDIA_API_KEY) return config.MEDIA_API_KEY;
-  throw new Error("Media credential is not configured");
-}
-
 async function readMedia(tenantId: string, item: any): Promise<BinaryAiInput> {
   const mediaBaseUrl = env().MEDIA_BASE_URL;
   if (!mediaBaseUrl) throw new Error("MEDIA_BASE_URL is not configured");
   if (Number(item.size_bytes ?? 0) > 25 * 1024 * 1024) throw new Error("AI media input exceeds the 25 MiB runtime limit");
-  const credential = await mediaCredential(tenantId);
+  const credential = await mediaApiKeyForAsset(tenantId, item.storage_user_id);
   const response = await fetch(`${mediaBaseUrl.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(item.storage_file_id)}/content`, {
     headers: { authorization: `Bearer ${credential}` },
   });

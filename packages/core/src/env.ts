@@ -24,7 +24,6 @@ const schema = z.object({
   EMAIL_FROM: z.string().default("no-reply@example.com"),
   MEDIA_BASE_URL: z.string().url().optional().or(z.literal("")),
   MEDIA_API_KEY: z.string().optional(),
-  MEDIA_ADMIN_TOKEN: z.string().optional(),
   N8N_TURN_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
   N8N_TRAINING_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
   N8N_HEALTH_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),

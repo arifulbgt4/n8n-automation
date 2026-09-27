@@ -113,10 +113,10 @@ This file is the delivery checklist and current implementation status. Repositor
 
 ### Tenant storage identity
 - [x] Implement `tenant_media_accounts`.
-- [x] Define automated/internal provisioning flow for one Media Storage user per SaaS tenant.
-- [x] Encrypt/reference tenant Media Storage bearer credentials.
-- [x] Map plan/storage quota policy to Media Storage user quota where applicable.
-- [x] Implement credential rotation/revocation handling.
+- [x] Replace per-tenant Media Storage provisioning with one server-only application credential.
+- [x] Retain encrypted legacy tenant credentials solely for existing files.
+- [x] Enforce a hard 512 MiB per-tenant quota in the SaaS database and a shared service-wide cap.
+- [x] Keep shared credential rotation in platform operations, not customer APIs.
 
 ### Storage adapter
 - [x] Implement usage call.

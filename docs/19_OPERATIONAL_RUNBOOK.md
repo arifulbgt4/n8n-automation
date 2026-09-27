@@ -92,9 +92,9 @@ Rollback uses the previous compatible Git bundle; do not treat the n8n internal 
 
 ## 8. Media Storage incident
 
-1. check Media Storage health and tenant media-account status.
+1. check Media Storage health, the shared application account, and tenant usage in `media_assets`.
 2. distinguish quota, authentication, not-found and service-availability failures.
-3. rotate/reprovision the tenant Media Storage credential when revoked.
+3. rotate the shared application Media Storage credential through platform operations when revoked; keep historical tenant keys only for legacy-file recovery.
 4. do not expose bearer credentials to browsers.
 5. private files remain private unless explicitly published for provider fetching.
 6. remote provider media IDs are a cache; stale IDs may be refreshed/re-uploaded from the canonical Media Storage asset.

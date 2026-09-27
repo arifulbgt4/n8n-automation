@@ -113,7 +113,7 @@ No infrastructure task in the application roadmap should say “install Redis”
 
 ## 6. Media Storage service contract
 
-The existing Media Storage service is a production-oriented multi-user file store. Physical bytes are stored by the media service; ownership/quota/file metadata are managed by that service. The SaaS also stores its own tenant-facing media metadata and relationships in `app_db`.
+The existing Media Storage service is a production-oriented multi-user file store. The SaaS uses one shared application Media Storage account for new files; physical bytes are stored by that service, while tenant ownership, authorization, and the 512 MiB workspace quota are enforced in `app_db`. A separate service-wide cap protects total storage.
 
 The Media Storage service supports:
 
@@ -133,17 +133,18 @@ The SaaS must consume the user API, not the infrastructure admin UI.
 
 ## 7. Media user mapping
 
-Preferred isolation model:
+Current application model:
 
 ```text
-SaaS tenant
-    -> one Media Storage user/account
+All SaaS tenants
+    -> one Media Storage application account
     -> one server-side Media API credential
+    -> tenant-scoped media_assets and quota enforcement in app_db
 ```
 
-This gives storage-level separation and allows plan/tenant quota mapping.
+The shared key is never exposed to browsers. Every read, update, and delete must first resolve a tenant-owned asset in the SaaS database. Customer uploads and worker uploads are serialized by tenant for quota enforcement.
 
-Store the relationship in application data, conceptually:
+Historical storage mapping remains in application data only for pre-cutover files:
 
 ### `tenant_media_accounts`
 
@@ -158,7 +159,7 @@ Store the relationship in application data, conceptually:
 
 The credential is never returned to customer browser code.
 
-A single shared platform media account may be used only as an explicitly approved temporary implementation, because it weakens infrastructure-level tenant isolation. The target design is tenant-scoped media users.
+The legacy account/key is selected only when an existing asset's `storage_user_id` matches that account (or a historical row has no storage user ID). No new tenant-specific Media Storage account is created on signup, page load, or upload.
 
 ## 8. Media API calls used by the SaaS
 
@@ -535,7 +536,7 @@ Existing infrastructure integration is accepted when:
 - application deployment does not attempt to install Redis, n8n, or Media Storage.
 - no infrastructure admin URL/repository path is required in application code or canonical docs.
 - Media Storage API key remains server-side.
-- a tenant's media is storage-isolated according to the approved media-user mapping.
+- a tenant's media is isolated through tenant-scoped asset queries and authorization before the shared Media Storage key is used.
 - media upload/download/delete works through the adapter.
 - private and public media policies are enforced.
 - n8n can retrieve required media without admin credentials.

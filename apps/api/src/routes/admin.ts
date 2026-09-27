@@ -79,6 +79,9 @@ export async function adminRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const input = z.record(z.string().min(1).max(100), z.number().nonnegative()).parse(request.body);
+    if ((input.mediaStorageBytes ?? 0) > 512 * 1024 * 1024) {
+      throw new ApiError(400, "MEDIA_STORAGE_CEILING", "Workspace media storage cannot exceed 512 MiB.");
+    }
     for (const [key,value] of Object.entries(input)) {
       await query(`INSERT INTO tenant_limit_overrides(tenant_id,key,value,created_by) VALUES ($1,$2,$3,$4) ON CONFLICT(tenant_id,key) DO UPDATE SET value=EXCLUDED.value,reason='admin update',expires_at=NULL,created_by=EXCLUDED.created_by,created_at=now()`, [tenantId,key,value,principal.userId]);
     }

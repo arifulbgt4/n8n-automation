@@ -149,8 +149,8 @@ EMAIL_DELIVERY_WEBHOOK_URL=
 EMAIL_FROM=no-reply@example.com
 
 MEDIA_BASE_URL=
+# One private application credential shared by API and worker.
 MEDIA_API_KEY=
-MEDIA_ADMIN_TOKEN=
 
 N8N_TURN_WEBHOOK_URL=
 N8N_TRAINING_WEBHOOK_URL=
@@ -401,10 +401,9 @@ To test media features:
 ~~~dotenv
 MEDIA_BASE_URL=https://media-service.example
 MEDIA_API_KEY=...
-MEDIA_ADMIN_TOKEN=...
 ~~~
 
-Credentials must remain server-side. Never expose them through NEXT_PUBLIC variables.
+The one application credential must remain server-side in both API and worker. Never expose it through NEXT_PUBLIC variables. Customer signup and media upload do not provision Media Storage users.
 
 Without Media Storage configuration, the core application can run, but media operations that require the external service will not be fully functional.
 

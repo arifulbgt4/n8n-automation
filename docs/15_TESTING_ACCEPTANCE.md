@@ -93,7 +93,7 @@ Against an isolated/test media user:
 - list pagination works.
 - visibility update works.
 - hard delete removes file and updates usage/quota accounting.
-- tenant Media Storage credential cannot list/read another tenant media user's files.
+- the shared Media Storage credential is server-only, and a customer cannot list/read another tenant's asset through any SaaS API route.
 - bearer key never appears in browser payload/log snapshots.
 - quota exceeded is a structured non-infinite-retry error.
 - inactive/revoked storage user fails safely.

@@ -1,4 +1,4 @@
-import { query } from "@n8n-automation/core";
+import { cappedCustomerMediaLimit, query } from "@n8n-automation/core";
 import { ApiError } from "./lib.js";
 
 export async function tenantLimit(tenantId: string, key: string): Promise<number | null> {
@@ -48,8 +48,7 @@ export async function assertMonthlyUsageLimit(tenantId: string, eventType: strin
 }
 
 export async function assertMediaStorageLimit(tenantId: string, incomingBytes: number): Promise<void> {
-  const limit = await tenantLimit(tenantId,"mediaStorageBytes");
-  if (limit === null || !Number.isFinite(limit)) return;
+  const limit = await customerMediaStorageLimit(tenantId);
   const result = await query<{ used: string }>(`
     SELECT COALESCE(sum(size_bytes),0)::text AS used
     FROM media_assets
@@ -59,6 +58,11 @@ export async function assertMediaStorageLimit(tenantId: string, incomingBytes: n
   if (used + incomingBytes > limit) {
     throw new ApiError(402, "MEDIA_STORAGE_LIMIT_REACHED", "The media storage plan limit would be exceeded.", { limit, used, incomingBytes });
   }
+}
+
+export async function customerMediaStorageLimit(tenantId: string): Promise<number> {
+  const planLimit = await tenantLimit(tenantId, "mediaStorageBytes");
+  return cappedCustomerMediaLimit(planLimit);
 }
 
 export async function maxImagesPerResponse(tenantId: string): Promise<number> {

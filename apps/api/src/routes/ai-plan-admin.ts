@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { query } from "@n8n-automation/core";
+import { CUSTOMER_MEDIA_STORAGE_BYTES, query } from "@n8n-automation/core";
 import { ApiError, audit, requireCsrf, requireRecentPlatformAdmin } from "../lib.js";
 
 export async function aiPlanAdminRoutes(app:FastifyInstance){
@@ -27,7 +27,7 @@ export async function aiPlanAdminRoutes(app:FastifyInstance){
       maxImageMegapixels:z.number().positive().max(100),
       maxImageAssets:z.number().int().nonnegative().max(100000),
       maxImageBytes:z.number().int().positive().max(512*1024*1024),
-      mediaStorageBytes:z.number().int().nonnegative(),
+      mediaStorageBytes:z.number().int().nonnegative().max(CUSTOMER_MEDIA_STORAGE_BYTES),
     }).parse(request.body);
     const result=await query<any>(`
       UPDATE plans SET

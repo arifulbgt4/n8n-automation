@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { decryptSecret, env, query, transaction } from "@n8n-automation/core";
+import { env, mediaApiKeyForAsset, query, transaction } from "@n8n-automation/core";
 
 const STALE_MEDIA_AGE_MINUTES = 15;
 const PURGE_BATCH_SIZE = 200;
@@ -8,20 +8,12 @@ type ConversationAsset = {
   id: string;
   tenant_id: string;
   storage_file_id: string;
+  storage_user_id: string | null;
 };
-
-async function tenantMediaCredential(tenantId: string): Promise<string | null> {
-  const result = await query<{ encrypted_api_key: string | null }>(
-    "SELECT encrypted_api_key FROM tenant_media_accounts WHERE tenant_id=$1 AND status='active'",
-    [tenantId],
-  );
-  if (result.rows[0]?.encrypted_api_key) return decryptSecret(result.rows[0].encrypted_api_key);
-  return env().MEDIA_API_KEY || null;
-}
 
 async function removePhysicalAsset(asset: ConversationAsset): Promise<boolean> {
   const base = env().MEDIA_BASE_URL?.replace(/\/$/, "");
-  const credential = await tenantMediaCredential(asset.tenant_id).catch(() => null);
+  const credential = await mediaApiKeyForAsset(asset.tenant_id, asset.storage_user_id).catch(() => null);
   if (!base || !credential) return false;
 
   const response = await fetch(`${base}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`, {
@@ -57,7 +49,7 @@ async function purgeAssets(assets: ConversationAsset[]) {
 
 async function purgeTurnConversationMedia(turnId: string) {
   const assets = await query<ConversationAsset>(`
-    SELECT DISTINCT ma.id,ma.tenant_id,ma.storage_file_id
+    SELECT DISTINCT ma.id,ma.tenant_id,ma.storage_file_id,ma.storage_user_id
     FROM messages m
     JOIN message_media mm ON mm.message_id=m.id
     JOIN media_assets ma ON ma.id=mm.media_asset_id
@@ -86,7 +78,7 @@ async function purgeTurnConversationMedia(turnId: string) {
 
 async function purgeStaleConversationMedia() {
   const assets = await query<ConversationAsset>(`
-    SELECT ma.id,ma.tenant_id,ma.storage_file_id
+    SELECT ma.id,ma.tenant_id,ma.storage_file_id,ma.storage_user_id
     FROM media_assets ma
     WHERE ma.metadata->>'source'='inbound_message'
       AND ma.created_at < now()-($1||' minutes')::interval

@@ -1,6 +1,6 @@
 # Media upload limits and VPS storage protection
 
-Customer media uploads are constrained by the tenant package. Limits are enforced by the API before a new file is written to Media Storage.
+Customer media uploads are constrained by the tenant package and a non-overridable 512 MiB workspace ceiling. One shared Media Storage service and one application API key back all new uploads. The key remains server-side; workspace and business isolation is enforced through tenant-scoped asset records and API authorization.
 
 ## Default package policy
 
@@ -9,9 +9,9 @@ Customer media uploads are constrained by the tenant package. Limits are enforce
 | Max image resolution | 10 MP | 10 MP |
 | Max stored images | 100 | 300 |
 | Max encoded image size | 10 MB | 10 MB |
-| Total media storage | 512 MB | 2 GB |
+| Total media storage | 512 MiB | 512 MiB |
 
-These values are operational defaults and can be changed by Super Admin without a payment integration.
+Image limits can be changed by Super Admin without a payment integration. Storage can be lowered per plan, but cannot be raised above 512 MiB per workspace.
 
 Super Admin page:
 
@@ -40,7 +40,7 @@ A 10-megapixel image does not have a predictable encoded byte size. PNG, JPEG an
 1. `maxImageMegapixels` limits decoded image dimensions.
 2. `maxImageBytes` limits the encoded image payload.
 3. `maxImageAssets` limits the number of managed images stored by a tenant.
-4. `mediaStorageBytes` caps all active media bytes for the tenant.
+4. `mediaStorageBytes` caps all active media bytes for the tenant. The API and worker check before upload, and a database trigger serializes asset inserts and enforces the limit again at commit time.
 
 The package belongs to the tenant/workspace, so the quota is shared by users inside that workspace rather than multiplied by team seats.
 
@@ -48,7 +48,7 @@ The package belongs to the tenant/workspace, so the quota is shared by users ins
 
 The API calculates SHA-256 before sending the file to Media Storage. If the same active file already exists in the same tenant/business scope, the existing media asset is returned and no second physical file is written. This prevents repeated product-image uploads from consuming additional VPS storage.
 
-The existing Media Storage service still retains its own disk-reserve and per-media-user byte quota as an independent infrastructure safety layer.
+The shared Media Storage service retains its disk-reserve and has a separate configurable 50 GiB global cap across all Media Storage users. This is a logical cap, not a dedicated filesystem volume. Existing per-tenant Media Storage accounts are retained only for access to files uploaded before the shared-account cutover. No new tenant Media Storage users or keys are provisioned on signup, Media page load, or upload.
 
 ## Supported image formats for megapixel verification
 

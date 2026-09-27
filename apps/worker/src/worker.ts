@@ -1,15 +1,18 @@
 import { UnrecoverableError, Worker, type Job } from "bullmq";
 import {
+  assertCustomerMediaCapacity,
   bullmqJobId,
   closeQueues,
   decryptSecret,
   env,
+  mediaApiKeyForAsset,
   query,
   queue,
   QUEUES,
   redis,
   redisKey,
   sha256,
+  sharedMediaApiKey,
   transaction,
   type JobEnvelope,
 } from "@n8n-automation/core";
@@ -44,6 +47,17 @@ async function acquireLock(key: string, ttlMs: number): Promise<string | null> {
 
 async function releaseLock(key: string, token: string) {
   await redis().eval(`if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end`, 1, key, token);
+}
+
+async function waitForMediaUploadLock(tenantId: string): Promise<{ key: string; token: string }> {
+  const key = redisKey("lock", "media-upload", tenantId);
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const token = await acquireLock(key, 600_000);
+    if (token) return { key, token };
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error("Timed out waiting for another workspace media upload");
 }
 
 async function rateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfterMs: number }> {
@@ -183,13 +197,6 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
   }
 }
 
-async function tenantMediaCredential(tenantId: string): Promise<string> {
-  const result = await query<{ encrypted_api_key: string | null }>("SELECT encrypted_api_key FROM tenant_media_accounts WHERE tenant_id=$1 AND status='active'", [tenantId]);
-  if (result.rows[0]?.encrypted_api_key) return decryptSecret(result.rows[0].encrypted_api_key);
-  if (config.MEDIA_API_KEY) return config.MEDIA_API_KEY;
-  throw new Error("Media credential is not configured");
-}
-
 async function loadAsset(tenantId: string, businessId: string, assetId: string) {
   const result = await query<any>(`SELECT * FROM media_assets
     WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'
@@ -201,7 +208,7 @@ async function loadAsset(tenantId: string, businessId: string, assetId: string) 
 
 async function fetchAssetBytes(tenantId: string, asset: any): Promise<{ bytes: ArrayBuffer; mime: string }> {
   if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
-  const credential = await tenantMediaCredential(tenantId);
+  const credential = await mediaApiKeyForAsset(tenantId, asset.storage_user_id);
   const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}/content`, { headers: { authorization: `Bearer ${credential}` } });
   if (!response.ok) throw new Error(`Media download failed with ${response.status}`);
   return { bytes: await response.arrayBuffer(), mime: response.headers.get("content-type") || asset.mime_type || "application/octet-stream" };
@@ -267,7 +274,10 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
   try {
     const { row, bytes, mime, filename } = await fetchInboundMedia(job.data.tenantId, messageId);
     if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
-    const credential = await tenantMediaCredential(row.tenant_id);
+    const { key: lockKey, token: lock } = await waitForMediaUploadLock(row.tenant_id);
+    try {
+    await assertCustomerMediaCapacity(row.tenant_id, bytes.byteLength);
+    const credential = sharedMediaApiKey();
     const form = new FormData();
     form.set("visibility", "private");
     form.set("file", new Blob([bytes], { type: mime }), filename);
@@ -279,7 +289,12 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
     const body = await upload.json().catch(() => ({}));
     if (!upload.ok) throw new Error((body as any)?.error?.message || (body as any)?.message || `Media Storage upload failed with ${upload.status}`);
     const file = (body as any).file ?? body;
-    if (!file?.id) throw new Error("Media Storage upload did not return a file ID");
+    if (!file?.id || !file.user_id) {
+      if (file?.id) await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(String(file.id))}`, {
+        method: "DELETE", headers: { authorization: `Bearer ${credential}` },
+      }).catch(() => undefined);
+      throw new Error("Media Storage upload did not return a file ID and storage user ID");
+    }
 
     const assetId = await transaction(async (client) => {
       if (file.checksum_sha256) {
@@ -301,6 +316,11 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
         file.checksum_sha256 ?? null,file.public_url ?? null,JSON.stringify({ source: "inbound_message", messageId }),
       ]);
       return asset.rows[0].id;
+    }).catch(async (error) => {
+      await fetch(`${config.MEDIA_BASE_URL!.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(String(file.id))}`, {
+        method: "DELETE", headers: { authorization: `Bearer ${credential}` },
+      }).catch(() => undefined);
+      throw error;
     });
 
     if (file.checksum_sha256) {
@@ -329,6 +349,9 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
         `media-ingest:${messageId}`,JSON.stringify({ messageType: row.message_type }),
       ]);
     });
+    } finally {
+      await releaseLock(lockKey, lock);
+    }
   } catch (error) {
     await query(
       "UPDATE messages SET metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1",
@@ -766,8 +789,11 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
       }
 
       if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
-      const credential = await tenantMediaCredential(job.data.tenantId);
       const bytes = Buffer.from(JSON.stringify(exportPayload,null,2),"utf8");
+      const { key: lockKey, token: lock } = await waitForMediaUploadLock(job.data.tenantId);
+      try {
+      await assertCustomerMediaCapacity(job.data.tenantId, bytes.length);
+      const credential = sharedMediaApiKey();
       const form = new FormData();
       form.set("visibility","private");
       const exportBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -776,25 +802,34 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
       const body = await upload.json().catch(()=>({})) as any;
       if(!upload.ok || !(body.file ?? body).id) throw new Error(body?.message || "Export upload failed");
       const file=body.file ?? body;
+      if(!file.user_id){
+        await fetch(`${config.MEDIA_BASE_URL.replace(/\$/,"")}/api/v1/files/${encodeURIComponent(String(file.id))}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}}).catch(()=>undefined);
+        throw new Error("Media Storage export upload did not return a storage user ID");
+      }
       const asset=await query<any>(`
         INSERT INTO media_assets(tenant_id,business_id,storage_file_id,storage_user_id,original_name,mime_type,kind,size_bytes,visibility,content_hash,public_url,processing_status,metadata)
         VALUES ($1,$2,$3,$4,$5,$6,'document',$7,'private',$8,NULL,'ready',$9::jsonb) RETURNING id
-      `,[job.data.tenantId,businessId,file.id,file.user_id ?? null,file.original_name ?? "export.json",file.mime_type ?? "application/json",file.size_bytes ?? bytes.length,file.checksum_sha256 ?? sha256(bytes),JSON.stringify({source:record.type,jobRecordId})]);
+      `,[job.data.tenantId,businessId,file.id,file.user_id,file.original_name ?? "export.json",file.mime_type ?? "application/json",file.size_bytes ?? bytes.length,file.checksum_sha256 ?? sha256(bytes),JSON.stringify({source:record.type,jobRecordId})]).catch(async(error)=>{
+        await fetch(`${config.MEDIA_BASE_URL!.replace(/\$/,"")}/api/v1/files/${encodeURIComponent(String(file.id))}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}}).catch(()=>undefined);
+        throw error;
+      });
       await query("UPDATE job_records SET status='completed',progress=100,result_json=$2::jsonb,completed_at=now(),updated_at=now() WHERE id=$1",
         [jobRecordId,JSON.stringify({mediaAssetId:asset.rows[0].id})]);
       await query("UPDATE tenant_data_requests SET status='completed',result_media_asset_id=$2,completed_at=now() WHERE job_record_id=$1",
         [jobRecordId,asset.rows[0].id]).catch(()=>undefined);
       return;
+      } finally {
+        await releaseLock(lockKey, lock);
+      }
     }
 
     if (record.type === "tenant_delete") {
-      const assets = await query<{ storage_file_id: string }>("SELECT storage_file_id FROM media_assets WHERE tenant_id=$1 AND processing_status<>'deleted'",[job.data.tenantId]);
+      const assets = await query<{ storage_file_id: string; storage_user_id: string | null }>("SELECT storage_file_id,storage_user_id FROM media_assets WHERE tenant_id=$1 AND processing_status<>'deleted'",[job.data.tenantId]);
       if (config.MEDIA_BASE_URL) {
-        const credential = await tenantMediaCredential(job.data.tenantId).catch(()=>null);
-        if (credential) {
-          for (const asset of assets.rows) {
-            await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}}).catch(()=>undefined);
-          }
+        for (const asset of assets.rows) {
+          const credential = await mediaApiKeyForAsset(job.data.tenantId, asset.storage_user_id);
+          const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}});
+          if (!response.ok && response.status !== 404) throw new Error(`Media deletion failed with ${response.status}`);
         }
       }
       await query("UPDATE tenants SET status='deleted',updated_at=now() WHERE id=$1",[job.data.tenantId]);
@@ -835,7 +870,7 @@ async function applyRetentionPolicies(){
     }
     if(policy.media_days){
       const stale=await query<any>(`
-        SELECT m.id,m.storage_file_id FROM media_assets m
+        SELECT m.id,m.storage_file_id,m.storage_user_id FROM media_assets m
         WHERE m.tenant_id=$1 AND m.processing_status='ready'
           AND m.created_at<now()-($2||' days')::interval
           AND NOT EXISTS(SELECT 1 FROM collection_item_media x WHERE x.media_asset_id=m.id)
@@ -845,10 +880,11 @@ async function applyRetentionPolicies(){
       `,[tenantId,String(policy.media_days)]);
       let deleted=0;
       if(stale.rows.length){
-        const credential=await tenantMediaCredential(tenantId).catch(()=>null);
         for(const asset of stale.rows){
           let removed=true;
-          if(config.MEDIA_BASE_URL&&credential){
+          if(config.MEDIA_BASE_URL){
+            const credential=await mediaApiKeyForAsset(tenantId,asset.storage_user_id).catch(()=>null);
+            if(!credential) continue;
             const response=await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}}).catch(()=>null);
             removed=Boolean(response&&(response.ok||response.status===404));
           }

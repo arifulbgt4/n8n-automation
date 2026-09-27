@@ -3,3 +3,4 @@ export * from "./db.js";
 export * from "./crypto.js";
 export * from "./queue.js";
 export * from "./types.js";
+export * from "./media.js";
