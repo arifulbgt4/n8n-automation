@@ -103,6 +103,36 @@ test("API auth, tenant isolation, CSRF, rate limiting and Meta webhook idempoten
   assert.equal(missingCsrf.response.status,403);
   assert.equal(missingCsrf.data?.error?.code,"CSRF_INVALID");
 
+  const collection=await jsonRequest(`/v1/tenants/${tenantA}/collections`,{
+    method:"POST",cookie:cookieA,headers:{"x-csrf-token":csrfA},
+    body:{businessId,name:"Editable Catalog",template:"blank"}
+  });
+  assert.equal(collection.response.status,201,JSON.stringify(collection.data));
+  const collectionId=collection.data.collection.id;
+  const collectionPath=`/v1/tenants/${tenantA}/collections/${collectionId}`;
+  const collectionCrossTenant=await jsonRequest(collectionPath,{
+    method:"PATCH",cookie:cookieB,body:{name:"Wrong Tenant"}
+  });
+  assert.equal(collectionCrossTenant.response.status,404);
+  const collectionMissingCsrf=await jsonRequest(collectionPath,{
+    method:"PATCH",cookie:cookieA,body:{name:"Should Not Change"}
+  });
+  assert.equal(collectionMissingCsrf.response.status,403);
+  const collectionUpdated=await jsonRequest(collectionPath,{
+    method:"PATCH",cookie:cookieA,headers:{"x-csrf-token":csrfA},
+    body:{name:"Updated Catalog",purpose:"products",isTransactionalSource:true}
+  });
+  assert.equal(collectionUpdated.response.status,200,JSON.stringify(collectionUpdated.data));
+  assert.equal(collectionUpdated.data.collection.name,"Updated Catalog");
+  assert.equal(collectionUpdated.data.collection.is_transactional_source,true);
+  const collectionDeleted=await jsonRequest(collectionPath,{
+    method:"DELETE",cookie:cookieA,headers:{"x-csrf-token":csrfA}
+  });
+  assert.equal(collectionDeleted.response.status,200,JSON.stringify(collectionDeleted.data));
+  assert.equal(collectionDeleted.data.mode,"archive");
+  const archivedCollection=await jsonRequest(collectionPath,{cookie:cookieA});
+  assert.equal(archivedCollection.response.status,404);
+
   const channel=await jsonRequest(`/v1/tenants/${tenantA}/channels`,{
     method:"POST",cookie:cookieA,headers:{"x-csrf-token":csrfA},
     body:{
@@ -160,4 +190,29 @@ test("API auth, tenant isolation, CSRF, rate limiting and Meta webhook idempoten
   assert.equal(meB.response.status,200);
   assert.equal(meB.data.memberships.some(m=>m.tenant_id===tenantA),false);
   assert.equal(meB.data.memberships.some(m=>m.tenant_id===tenantB),true);
+
+  const businessUpdated=await jsonRequest(`/v1/tenants/${tenantA}/businesses/${businessId}`,{
+    method:"PATCH",cookie:cookieA,headers:{"x-csrf-token":csrfA},body:{name:"Updated Business"}
+  });
+  assert.equal(businessUpdated.response.status,200,JSON.stringify(businessUpdated.data));
+  assert.equal(businessUpdated.data.business.name,"Updated Business");
+  const channelUpdated=await jsonRequest(`/v1/tenants/${tenantA}/channels/${channel.data.channel.id}`,{
+    method:"PATCH",cookie:cookieA,headers:{"x-csrf-token":csrfA},body:{name:"Updated Page"}
+  });
+  assert.equal(channelUpdated.response.status,200,JSON.stringify(channelUpdated.data));
+  assert.equal(channelUpdated.data.channel.name,"Updated Page");
+  const channelDeleted=await jsonRequest(`/v1/tenants/${tenantA}/channels/${channel.data.channel.id}/remove`,{
+    method:"DELETE",cookie:cookieA,headers:{"x-csrf-token":csrfA}
+  });
+  assert.equal(channelDeleted.response.status,200,JSON.stringify(channelDeleted.data));
+  const channelsAfterDelete=await jsonRequest(`/v1/tenants/${tenantA}/channels`,{cookie:cookieA});
+  assert.equal(channelsAfterDelete.response.status,200);
+  assert.equal(channelsAfterDelete.data.channels.some(row=>row.id===channel.data.channel.id),false);
+  const businessDeleted=await jsonRequest(`/v1/tenants/${tenantA}/businesses/${businessId}`,{
+    method:"DELETE",cookie:cookieA,headers:{"x-csrf-token":csrfA}
+  });
+  assert.equal(businessDeleted.response.status,200,JSON.stringify(businessDeleted.data));
+  const businessesAfterDelete=await jsonRequest(`/v1/tenants/${tenantA}/businesses`,{cookie:cookieA});
+  assert.equal(businessesAfterDelete.response.status,200);
+  assert.equal(businessesAfterDelete.data.businesses.some(row=>row.id===businessId),false);
 });

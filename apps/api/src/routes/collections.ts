@@ -83,7 +83,7 @@ async function validateFieldScope(tenantId: string, businessId: string, field: z
 }
 
 async function loadCollection(tenantId: string, collectionId: string) {
-  const result = await query("SELECT * FROM collections WHERE id=$1 AND tenant_id=$2", [collectionId, tenantId]);
+  const result = await query("SELECT * FROM collections WHERE id=$1 AND tenant_id=$2 AND status<>'archived'", [collectionId, tenantId]);
   if (!result.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
   return result.rows[0];
 }
@@ -248,6 +248,50 @@ export async function collectionRoutes(app: FastifyInstance) {
     });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: input.businessId, action: "COLLECTION_CREATED", resourceType: "collection", resourceId: collection.id, safeDiff: { name: input.name, template: input.template }, request });
     reply.code(201).send({ collection });
+  });
+
+  app.patch("/v1/tenants/:tenantId/collections/:collectionId", async (request, reply) => {
+    const params = z.object({ tenantId: z.string().uuid(), collectionId: z.string().uuid() }).parse(request.params);
+    const principal = await requireAuth(request);
+    const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id, ["OWNER", "ADMIN", "STAFF"]);
+    requireCsrf(request);
+    const input = z.object({
+      name: z.string().trim().min(1).max(160).optional(),
+      purpose: z.string().trim().max(80).nullable().optional(),
+      isTransactionalSource: z.boolean().optional(),
+    }).refine((value) => Object.keys(value).length > 0, "At least one collection setting is required.").parse(request.body);
+    const result = await query(`
+      UPDATE collections SET
+        name=COALESCE($3,name),
+        purpose=CASE WHEN $4::boolean THEN $5 ELSE purpose END,
+        is_transactional_source=COALESCE($6,is_transactional_source),
+        updated_at=now()
+      WHERE id=$1 AND tenant_id=$2 AND status<>'archived'
+      RETURNING *
+    `, [params.collectionId, params.tenantId, input.name ?? null, Object.prototype.hasOwnProperty.call(input, "purpose"), input.purpose ?? null, input.isTransactionalSource ?? null]);
+    if (!result.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
+    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: collection.business_id, action: "COLLECTION_UPDATED", resourceType: "collection", resourceId: params.collectionId, safeDiff: input, request });
+    reply.send({ collection: result.rows[0] });
+  });
+
+  app.delete("/v1/tenants/:tenantId/collections/:collectionId", async (request, reply) => {
+    const params = z.object({ tenantId: z.string().uuid(), collectionId: z.string().uuid() }).parse(request.params);
+    const principal = await requireAuth(request);
+    const collection = await loadCollection(params.tenantId, params.collectionId);
+    await requireBusinessAccess(request, params.tenantId, collection.business_id, ["OWNER", "ADMIN"]);
+    requireCsrf(request);
+    await transaction(async (client) => {
+      const archived = await client.query(
+        "UPDATE collections SET status='archived',updated_at=now() WHERE id=$1 AND tenant_id=$2 AND status<>'archived' RETURNING id",
+        [params.collectionId, params.tenantId],
+      );
+      if (!archived.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
+      await client.query("UPDATE collection_channel_links SET active=false WHERE collection_id=$1 AND tenant_id=$2", [params.collectionId, params.tenantId]);
+      await client.query("DELETE FROM agent_collection_links WHERE collection_id=$1 AND tenant_id=$2", [params.collectionId, params.tenantId]);
+    });
+    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: collection.business_id, action: "COLLECTION_DELETED", resourceType: "collection", resourceId: params.collectionId, safeDiff: { mode: "archive" }, request });
+    reply.send({ ok: true, deleted: true, mode: "archive" });
   });
 
   app.get("/v1/tenants/:tenantId/collections/:collectionId", async (request, reply) => {

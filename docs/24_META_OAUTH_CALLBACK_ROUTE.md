@@ -1,20 +1,13 @@
 # Customer Meta OAuth return route
 
-The Meta API callback redirects a successful Facebook Login for Business authorization to the Customer Panel origin at:
+The Meta app redirects to the API callback configured as `META_OAUTH_REDIRECT_URI`. After token exchange and Page discovery, the API sends the browser to the Customer Panel root:
 
 ```text
-/channels?metaConnection=<short-lived-discovery-id>
+/?view=businesses&tenantId=<tenant-id>&businessId=<business-id>&metaConnection=<short-lived-discovery-id>
 ```
 
-`customer-panel/app/channels/page.tsx` is a dedicated OAuth return route. It renders `MetaChannelCallback`, which:
+The root Customer Panel opens the selected business and its embedded Channels section. The customer selects a Facebook Page or linked Instagram professional account there. Completion verifies/subscribes the Page's Meta webhooks before persisting the channel. A provider cancellation/error follows the same route with `metaError` in place of `metaConnection`.
 
-1. validates that the user still has an authenticated Customer Panel session;
-2. resolves the short-lived discovery ID against the user's tenant memberships;
-3. loads the Facebook Pages and linked Instagram professional accounts returned by Meta;
-4. lets the customer choose the Facebook or Instagram account to connect;
-5. calls the existing channel-completion API, which performs automatic `subscribed_apps` verification/subscription before persisting the channel; and
-6. returns the browser to the main Customer Panel after the connection succeeds.
+`/channels` remains only as a compatibility return route for OAuth attempts started before this change or old bookmarks. It resolves the discovery to a tenant and business, then redirects to the unified Business & Channels screen. It is no longer a separate management page or sidebar item.
 
-This route exists separately from the Customer Panel's in-app Channels navigation. The main application remains a single dashboard at `/`; `/channels` is specifically the OAuth landing route so external Meta redirects do not produce a Next.js 404.
-
-If `metaError` is returned by Meta, the landing route displays the provider error and offers a return to the Customer Panel. If the discovery ID is missing, expired, or cannot be resolved to one of the authenticated user's memberships, the route shows a connection-expired/error state rather than creating a partial channel.
+Discovery state expires after 15 minutes. If it is missing or does not belong to the authenticated customer, the panel shows an error and the user can restart the connection from their business. The API callback URI itself must exactly match the URI configured in Meta's Facebook Login for Business settings.

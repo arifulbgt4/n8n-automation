@@ -59,7 +59,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
       SELECT c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at,
         COALESCE(jsonb_agg(jsonb_build_object('key',f.key,'label',f.label,'type',f.type,'required',f.required,'aiVisible',f.ai_visible) ORDER BY f.display_order) FILTER(WHERE f.id IS NOT NULL),'[]'::jsonb) AS fields
       FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id LEFT JOIN collection_fields f ON f.collection_id=c.id
-      WHERE acl.agent_profile_id=$1 AND acl.tenant_id=$2 AND c.tenant_id=$2 AND c.business_id=$3
+      WHERE acl.agent_profile_id=$1 AND acl.tenant_id=$2 AND c.tenant_id=$2 AND c.business_id=$3 AND c.status='active'
       GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at ORDER BY c.name
     `, [row.agent_profile_id, row.tenant_id, row.business_id]);
     const capturedVersions=Array.isArray(row.input_snapshot?.collectionVersions)?row.input_snapshot.collectionVersions:[];

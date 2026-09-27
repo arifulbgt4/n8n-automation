@@ -11,7 +11,8 @@ type Collection = {
   id: string;
   business_id: string;
   name: string;
-  purpose: string;
+  purpose: string | null;
+  is_transactional_source: boolean;
   schema_version: number;
   field_count?: number;
   item_count?: number;
@@ -23,6 +24,10 @@ type FieldRow = {
   label: string;
   type: string;
   required: boolean;
+  searchable?: boolean;
+  filterable?: boolean;
+  sortable?: boolean;
+  ai_visible?: boolean;
   options_json?: Record<string, unknown>;
   validation_json?: Record<string, unknown>;
   display_order?: number;
@@ -104,7 +109,10 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
   const [editing, setEditing] = useState<Item | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [collectionOpen, setCollectionOpen] = useState(false);
+  const [collectionEditing, setCollectionEditing] = useState<Collection | null>(null);
+  const [collectionEdit, setCollectionEdit] = useState({ name: "", purpose: "", isTransactionalSource: false });
   const [fieldOpen, setFieldOpen] = useState(false);
+  const [fieldEditing, setFieldEditing] = useState<FieldRow | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [collectionDraft, setCollectionDraft] = useState<CollectionDraft>({ name: "", template: "product" });
@@ -146,6 +154,12 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
       setFields([]);
       setItems([]);
       setLinkedChannelIds([]);
+      setCollectionEditing(null);
+      setFieldEditing(null);
+      setFormOpen(false);
+      setCollectionOpen(false);
+      setFieldOpen(false);
+      setImportOpen(false);
     }
     if (!tenantId || !businessId) {
       setCollections([]);
@@ -220,6 +234,50 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
       await openCollection(response.collection);
     } catch (reason) {
       setError(errorMessage(reason, "Unable to create collection."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startEditCollection(collection: Collection) {
+    setCollectionEditing(collection);
+    setCollectionEdit({ name: collection.name, purpose: collection.purpose ?? "", isTransactionalSource: collection.is_transactional_source });
+    setError("");
+  }
+
+  async function saveCollection(event: FormEvent) {
+    event.preventDefault();
+    if (!collectionEditing) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await api<{ collection: Collection }>(`/v1/tenants/${tenantId}/collections/${collectionEditing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(collectionEdit),
+      });
+      setCollectionEditing(null);
+      if (selected?.id === response.collection.id) setSelected(response.collection);
+      setNotice("Collection updated.");
+      await loadCollections();
+    } catch (reason) {
+      setError(errorMessage(reason, "Unable to update collection."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeCollection(collection: Collection) {
+    if (!confirm(`Delete ${collection.name}? Its items will be hidden, and its channel and AI agent links removed. Historical data is retained.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/v1/tenants/${tenantId}/collections/${collection.id}`, { method: "DELETE" });
+      if (selected?.id === collection.id) { setSelected(null); setFields([]); setItems([]); }
+      setNotice(`${collection.name} deleted.`);
+      await loadCollections();
+      onChanged?.();
+    } catch (reason) {
+      setError(errorMessage(reason, "Unable to delete collection."));
     } finally {
       setBusy(false);
     }
@@ -343,6 +401,53 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
     }
   }
 
+  function startEditField(field: FieldRow) {
+    setFieldEditing(field);
+    setFieldDraft((current) => ({
+      ...current,
+      key: field.key,
+      label: field.label,
+      type: field.type,
+      required: field.required,
+      searchable: Boolean(field.searchable),
+      filterable: Boolean(field.filterable),
+      sortable: Boolean(field.sortable),
+      aiVisible: field.ai_visible !== false,
+    }));
+    setError("");
+  }
+
+  async function saveField(event: FormEvent) {
+    event.preventDefault();
+    if (!selected || !fieldEditing) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/v1/tenants/${tenantId}/collections/${selected.id}/fields/${fieldEditing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          field: {
+            label: fieldDraft.label,
+            required: fieldDraft.required,
+            searchable: fieldDraft.searchable,
+            filterable: fieldDraft.filterable,
+            sortable: fieldDraft.sortable,
+            aiVisible: fieldDraft.aiVisible,
+          },
+          expectedSchemaVersion: selected.schema_version,
+        }),
+      });
+      setFieldEditing(null);
+      setNotice("Field updated.");
+      await openCollection(selected);
+      await loadCollections();
+    } catch (reason) {
+      setError(errorMessage(reason, "Unable to update field."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function updateChannelLinks(channelId: string, checked: boolean) {
     if (!selected) return;
     const next = checked ? [...new Set([...linkedChannelIds, channelId])] : linkedChannelIds.filter((id) => id !== channelId);
@@ -456,10 +561,14 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
     {error && <div role="alert" style={{ ...card, borderColor: "#fecaca", background: "#fff7f6", color: "#b42318", marginBottom: 14 }}>{error}</div>}
     {notice && <div role="status" style={{ ...card, borderColor: "#a7f3d0", background: "#ecfdf5", color: "#047857", marginBottom: 14 }}>{notice}</div>}
     {!businessId && <div style={{ ...card, color: "#92400e", background: "#fffbeb", borderColor: "#fde68a" }}>Create or select a business before managing its catalog.</div>}
-    {!selected && businessId && <section style={card}><div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 16 }}><div><h2 style={{ margin: 0 }}>Collections</h2><p style={{ margin: "5px 0 0", color: "#667085" }}>Each collection has its own schema, channel links and item form.</p></div><button disabled={busy} onClick={() => setCollectionOpen(true)} style={{ ...button, background: "#4f46e5", color: "#fff" }}>+ New collection</button></div><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(250px,1fr))", gap: 12 }}>{collections.map((collection) => <button key={collection.id} disabled={busy} onClick={() => void openCollection(collection)} style={{ textAlign: "left", border: "1px solid #e5e7eb", background: "#fff", borderRadius: 12, padding: 16, cursor: "pointer" }}><div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><strong>{collection.name}</strong><span style={{ fontSize: 12, color: "#4f46e5", fontWeight: 700 }}>{collection.purpose}</span></div><div style={{ fontSize: 13, color: "#667085", marginTop: 9 }}>{collection.field_count ?? 0} fields · {collection.item_count ?? 0} items · {collection.channel_count ?? 0} channels</div></button>)}</div>{!collections.length && <div style={{ padding: 30, textAlign: "center", color: "#667085" }}>No collections yet. Create one to add products, services or custom business data.</div>}</section>}
+    {!selected && businessId && <section style={card}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 16 }}><div><h2 style={{ margin: 0 }}>Collections</h2><p style={{ margin: "5px 0 0", color: "#667085" }}>Each collection has its own schema, channel links and item form.</p></div><button disabled={busy} onClick={() => setCollectionOpen(true)} style={{ ...button, background: "#4f46e5", color: "#fff" }}>+ New collection</button></div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(250px,1fr))", gap: 12 }}>{collections.map((collection) => <div key={collection.id} style={{ border: "1px solid #e5e7eb", background: "#fff", borderRadius: 12, padding: 16 }}><button disabled={busy} onClick={() => void openCollection(collection)} style={{ width: "100%", textAlign: "left", border: 0, background: "transparent", padding: 0, cursor: "pointer" }}><div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><strong>{collection.name}</strong><span style={{ fontSize: 12, color: "#4f46e5", fontWeight: 700 }}>{collection.purpose}</span></div><div style={{ fontSize: 13, color: "#667085", marginTop: 9 }}>{collection.field_count ?? 0} fields · {collection.item_count ?? 0} items · {collection.channel_count ?? 0} channels</div></button><div style={{ display: "flex", gap: 8, marginTop: 14 }}><button disabled={busy} onClick={() => startEditCollection(collection)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Edit</button><button disabled={busy} onClick={() => void removeCollection(collection)} style={{ ...button, background: "#fff1f2", color: "#be123c" }}>Delete</button></div></div>)}</div>
+      {!collections.length && <div style={{ padding: 30, textAlign: "center", color: "#667085" }}>No collections yet. Create one to add products, services or custom business data.</div>}
+    </section>}
     {selected && <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 12 }}><div><button onClick={() => setSelected(null)} style={{ ...button, background: "transparent", color: "#4f46e5", paddingLeft: 0 }}>← All collections</button><h2 style={{ margin: "2px 0 0" }}>{selected.name}</h2><div style={{ fontSize: 13, color: "#667085", marginTop: 4 }}>{selected.purpose} · schema v{selected.schema_version} · {fields.length} fields</div></div><div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}><button disabled={busy} onClick={() => setFieldOpen(true)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>+ Field</button><button disabled={busy} onClick={() => setImportOpen(true)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Import</button><button disabled={busy} onClick={() => void exportItems()} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Export</button><button disabled={busy} onClick={startAdd} style={{ ...button, background: "#4f46e5", color: "#fff" }}>+ Add item</button></div></div>
-      <section style={{ ...card, marginBottom: 14 }}><h3 style={{ marginTop: 0 }}>Schema</h3><div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>{fields.map((field) => <span key={field.id} style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 999, padding: "7px 10px", fontSize: 12 }}><b>{field.label}</b> · {field.type}{field.required ? " · required" : ""}</span>)}</div></section>
+      <section style={{ ...card, marginBottom: 14 }}><h3 style={{ marginTop: 0 }}>Schema</h3><div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>{fields.map((field) => <span key={field.id} style={{ display: "inline-flex", gap: 8, alignItems: "center", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 999, padding: "7px 10px", fontSize: 12 }}><span><b>{field.label}</b> · {field.type}{field.required ? " · required" : ""}</span><button disabled={busy} onClick={() => startEditField(field)} style={{ border: 0, background: "transparent", color: "#4338ca", fontWeight: 700, cursor: "pointer" }}>Edit</button></span>)}</div></section>
       <section style={{ ...card, marginBottom: 14 }}><h3 style={{ marginTop: 0 }}>Channel data links</h3><p style={{ marginTop: 0, color: "#667085", fontSize: 13 }}>Only selected business channels can use this collection in automation.</p><div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>{channels.map((channel) => <label key={channel.id} style={{ border: "1px solid #e5e7eb", borderRadius: 999, padding: "7px 10px", display: "flex", gap: 7, alignItems: "center" }}><input type="checkbox" disabled={busy} checked={linkedChannelIds.includes(channel.id)} onChange={(event) => void updateChannelLinks(channel.id, event.target.checked)} />{channel.name} · {channel.platform}</label>)}{!channels.length && <span style={{ color: "#667085", fontSize: 13 }}>No channels connected to this business.</span>}</div></section>
       <section style={card}>
         <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
@@ -503,6 +612,29 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
         {!items.length && <div style={{ padding: 40, textAlign: "center", color: "#667085" }}>No items yet. Click <b>+ Add item</b> and fill the normal form fields.</div>}
       </section>
     </>}
+    {collectionEditing && <Modal onClose={() => !busy && setCollectionEditing(null)}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}><h2 style={{ margin: 0 }}>Edit collection</h2><button onClick={() => setCollectionEditing(null)} style={{ ...button, background: "transparent", fontSize: 22 }}>×</button></div>
+      {error && <div role="alert" style={{ ...card, borderColor: "#fecaca", background: "#fff7f6", color: "#b42318", marginBottom: 14 }}>{error}</div>}
+      <form onSubmit={saveCollection} style={{ display: "grid", gap: 16 }}>
+        <Field label="Collection name" required><input style={control} required value={collectionEdit.name} onChange={(event) => setCollectionEdit((current) => ({ ...current, name: event.target.value }))} /></Field>
+        <Field label="Purpose"><input style={control} value={collectionEdit.purpose} onChange={(event) => setCollectionEdit((current) => ({ ...current, purpose: event.target.value }))} /></Field>
+        <label style={{ display: "flex", gap: 9, alignItems: "center" }}><input type="checkbox" checked={collectionEdit.isTransactionalSource} onChange={(event) => setCollectionEdit((current) => ({ ...current, isTransactionalSource: event.target.checked }))} /> Transactional source</label>
+        <small style={{ color: "#667085" }}>The collection key stays unchanged so existing integrations keep working.</small>
+        <button disabled={busy} style={{ ...button, background: "#4f46e5", color: "#fff", fontSize: 15 }}>{busy ? "Saving…" : "Save collection"}</button>
+      </form>
+    </Modal>}
+    {fieldEditing && selected && <Modal onClose={() => !busy && setFieldEditing(null)}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}><h2 style={{ margin: 0 }}>Edit field</h2><button onClick={() => setFieldEditing(null)} style={{ ...button, background: "transparent", fontSize: 22 }}>×</button></div>
+      {error && <div role="alert" style={{ ...card, borderColor: "#fecaca", background: "#fff7f6", color: "#b42318", marginBottom: 14 }}>{error}</div>}
+      <form onSubmit={saveField} style={{ display: "grid", gap: 16 }}>
+        <Field label="Field key"><input style={control} value={fieldEditing.key} disabled /></Field>
+        <Field label="Type"><input style={control} value={fieldEditing.type} disabled /></Field>
+        <Field label="Label" required><input style={control} required value={fieldDraft.label} onChange={(event) => setFieldDraft((current) => ({ ...current, label: event.target.value }))} /></Field>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}><label><input type="checkbox" checked={fieldDraft.required} onChange={(event) => setFieldDraft((current) => ({ ...current, required: event.target.checked }))} /> Required</label><label><input type="checkbox" checked={fieldDraft.searchable} onChange={(event) => setFieldDraft((current) => ({ ...current, searchable: event.target.checked }))} /> Searchable</label><label><input type="checkbox" checked={fieldDraft.filterable} onChange={(event) => setFieldDraft((current) => ({ ...current, filterable: event.target.checked }))} /> Filterable</label><label><input type="checkbox" checked={fieldDraft.sortable} onChange={(event) => setFieldDraft((current) => ({ ...current, sortable: event.target.checked }))} /> Sortable</label><label><input type="checkbox" checked={fieldDraft.aiVisible} onChange={(event) => setFieldDraft((current) => ({ ...current, aiVisible: event.target.checked }))} /> AI visible</label></div>
+        <small style={{ color: "#667085" }}>Field key and type cannot be changed here because existing items may rely on them.</small>
+        <button disabled={busy} style={{ ...button, background: "#4f46e5", color: "#fff", fontSize: 15 }}>{busy ? "Saving…" : "Save field"}</button>
+      </form>
+    </Modal>}
     {collectionOpen && <Modal onClose={() => !busy && setCollectionOpen(false)}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}><div><h2 style={{ margin: 0 }}>Create collection</h2><p style={{ color: "#667085", margin: "5px 0 0" }}>Start with a ready-made schema or a blank custom collection.</p></div><button onClick={() => setCollectionOpen(false)} style={{ ...button, background: "transparent", fontSize: 22 }}>×</button></div>{error && <div role="alert" style={{ ...card, borderColor: "#fecaca", background: "#fff7f6", color: "#b42318", marginBottom: 14 }}>{error}</div>}<form onSubmit={createCollection} style={{ display: "grid", gap: 16 }}><Field label="Collection name" required><input style={control} required value={collectionDraft.name} onChange={(event) => setCollectionDraft((current) => ({ ...current, name: event.target.value }))} /></Field><Field label="Starting template"><select style={control} value={collectionDraft.template} onChange={(event) => setCollectionDraft((current) => ({ ...current, template: event.target.value as CollectionDraft["template"] }))}><option value="product">Products</option><option value="service">Services</option><option value="property">Properties</option><option value="menu">Menu</option><option value="package">Packages</option><option value="blank">Blank custom collection</option></select></Field><button disabled={busy} style={{ ...button, background: "#4f46e5", color: "#fff", fontSize: 15 }}>{busy ? "Creating…" : "Create collection"}</button></form></Modal>}
     {formOpen && selected && <Modal onClose={() => !busy && setFormOpen(false)}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}><div><h2 style={{ margin: 0 }}>{editing ? "Edit item" : "Add item"}</h2><div style={{ color: "#667085", fontSize: 13, marginTop: 4 }}>{selected.name} · fields follow schema v{selected.schema_version}</div></div><button onClick={() => setFormOpen(false)} style={{ ...button, background: "transparent", fontSize: 22 }}>×</button></div>{error && <div role="alert" style={{ ...card, borderColor: "#fecaca", background: "#fff7f6", color: "#b42318", marginBottom: 14 }}>{error}</div>}<form onSubmit={saveItem} style={{ display: "grid", gap: 16 }}>{fields.map((field) => <Field key={field.id} label={field.label} required={field.required} hint={field.type === "media" ? "Select one or more reusable images. The first selected image becomes primary." : undefined}>{renderControl(field)}</Field>)}<button disabled={busy} style={{ ...button, background: "#4f46e5", color: "#fff", fontSize: 15 }}>{busy ? "Saving…" : editing ? "Save changes" : "Add item"}</button></form></Modal>}
     {fieldOpen && selected && <Modal onClose={() => !busy && setFieldOpen(false)}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}><div><h2 style={{ margin: 0 }}>Add custom field</h2><p style={{ color: "#667085", margin: "5px 0 0" }}>It will appear in future Add Item forms after saving.</p></div><button onClick={() => setFieldOpen(false)} style={{ ...button, background: "transparent", fontSize: 22 }}>×</button></div>{error && <div role="alert" style={{ ...card, borderColor: "#fecaca", background: "#fff7f6", color: "#b42318", marginBottom: 14 }}>{error}</div>}<form onSubmit={addField} style={{ display: "grid", gap: 16 }}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}><Field label="Field key" required><input style={control} required pattern="[a-z][a-z0-9_]*" value={fieldDraft.key} onChange={(event) => setFieldDraft((current) => ({ ...current, key: event.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_") }))} /></Field><Field label="Label" required><input style={control} required value={fieldDraft.label} onChange={(event) => setFieldDraft((current) => ({ ...current, label: event.target.value }))} /></Field></div><Field label="Type"><select style={control} value={fieldDraft.type} onChange={(event) => setFieldDraft((current) => ({ ...current, type: event.target.value }))}>{["text", "long_text", "integer", "decimal", "currency", "boolean", "date", "datetime", "email", "phone", "url", "single_select", "multi_select", "media", "relation", "json"].map((type) => <option key={type}>{type}</option>)}</select></Field>{(fieldDraft.type === "single_select" || fieldDraft.type === "multi_select") && <Field label="Choices" required hint="One choice per line."><textarea style={{ ...control, minHeight: 110 }} required value={fieldDraft.choices} onChange={(event) => setFieldDraft((current) => ({ ...current, choices: event.target.value }))} /></Field>}{fieldDraft.type === "relation" && <Field label="Related collection" required><select style={control} required value={fieldDraft.targetCollectionId} onChange={(event) => setFieldDraft((current) => ({ ...current, targetCollectionId: event.target.value }))}><option value="">Choose collection…</option>{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</select></Field>}<div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}><label><input type="checkbox" checked={fieldDraft.required} onChange={(event) => setFieldDraft((current) => ({ ...current, required: event.target.checked }))} /> Required</label><label><input type="checkbox" checked={fieldDraft.searchable} onChange={(event) => setFieldDraft((current) => ({ ...current, searchable: event.target.checked }))} /> Searchable</label><label><input type="checkbox" checked={fieldDraft.filterable} onChange={(event) => setFieldDraft((current) => ({ ...current, filterable: event.target.checked }))} /> Filterable</label><label><input type="checkbox" checked={fieldDraft.sortable} onChange={(event) => setFieldDraft((current) => ({ ...current, sortable: event.target.checked }))} /> Sortable</label><label><input type="checkbox" checked={fieldDraft.aiVisible} onChange={(event) => setFieldDraft((current) => ({ ...current, aiVisible: event.target.checked }))} /> AI visible</label></div><button disabled={busy} style={{ ...button, background: "#4f46e5", color: "#fff", fontSize: 15 }}>{busy ? "Adding…" : "Add field"}</button></form></Modal>}

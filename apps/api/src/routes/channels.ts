@@ -114,6 +114,15 @@ type MetaDiscovery = {
   pages: Array<{ id: string; name: string; accessToken: string; instagram?: { id: string; username?: string } | null }>;
 };
 
+function metaCustomerReturn(origin: string, tenantId: string, businessId: string, key: "metaConnection" | "metaError", value: string) {
+  const destination = new URL("/", origin);
+  destination.searchParams.set("view", "businesses");
+  destination.searchParams.set("tenantId", tenantId);
+  destination.searchParams.set("businessId", businessId);
+  destination.searchParams.set(key, value);
+  return destination.toString();
+}
+
 export async function channelRoutes(app: FastifyInstance) {
   app.get("/v1/tenants/:tenantId/channels/meta/oauth/start", async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
@@ -151,9 +160,7 @@ export async function channelRoutes(app: FastifyInstance) {
     if (!raw) throw new ApiError(400,"META_OAUTH_STATE_INVALID","Meta OAuth state is invalid or expired.");
     const state = JSON.parse(raw) as { tenantId: string; businessId: string; userId: string; requestedPlatform: "facebook"|"instagram" };
     if (q.error || !q.code) {
-      const failed = new URL("/channels", config.CUSTOMER_APP_ORIGIN);
-      failed.searchParams.set("metaError", q.error_description || q.error || "oauth_cancelled");
-      return reply.redirect(failed.toString());
+      return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, state.tenantId, state.businessId, "metaError", q.error_description || q.error || "Meta authorization was cancelled."));
     }
 
     const tokenUrl = new URL(`https://graph.facebook.com/${config.META_GRAPH_API_VERSION}/oauth/access_token`);
@@ -161,9 +168,10 @@ export async function channelRoutes(app: FastifyInstance) {
     tokenUrl.searchParams.set("client_secret", config.META_APP_SECRET!);
     tokenUrl.searchParams.set("redirect_uri", config.META_OAUTH_REDIRECT_URI!);
     tokenUrl.searchParams.set("code", q.code);
-    const tokenResponse = await fetch(tokenUrl);
+    const tokenResponse = await fetch(tokenUrl).catch(() => null);
+    if (!tokenResponse) return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, state.tenantId, state.businessId, "metaError", "Meta authorization is temporarily unavailable. Please retry."));
     const tokenBody = await tokenResponse.json().catch(() => ({})) as any;
-    if (!tokenResponse.ok || !tokenBody.access_token) throw new ApiError(502,"META_OAUTH_EXCHANGE_FAILED",tokenBody?.error?.message || "Meta token exchange failed.");
+    if (!tokenResponse.ok || !tokenBody.access_token) return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, state.tenantId, state.businessId, "metaError", "Meta authorization could not be completed. Retry the connection or check your Facebook Login settings."));
 
     let userToken = String(tokenBody.access_token);
     const longUrl = new URL(`https://graph.facebook.com/${config.META_GRAPH_API_VERSION}/oauth/access_token`);
@@ -181,9 +189,10 @@ export async function channelRoutes(app: FastifyInstance) {
     pagesUrl.searchParams.set("fields","id,name,access_token,instagram_business_account{id,username}");
     pagesUrl.searchParams.set("limit","200");
     pagesUrl.searchParams.set("access_token",userToken);
-    const pagesResponse = await fetch(pagesUrl);
+    const pagesResponse = await fetch(pagesUrl).catch(() => null);
+    if (!pagesResponse) return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, state.tenantId, state.businessId, "metaError", "Meta Page discovery is temporarily unavailable. Please retry."));
     const pagesBody = await pagesResponse.json().catch(() => ({})) as any;
-    if (!pagesResponse.ok) throw new ApiError(502,"META_PAGE_DISCOVERY_FAILED",pagesBody?.error?.message || "Unable to discover Meta Pages.");
+    if (!pagesResponse.ok) return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, state.tenantId, state.businessId, "metaError", "Meta could not list your Pages. Check Page access and the app's approved permissions, then retry."));
     const pages = (pagesBody.data ?? []).map((page: any) => ({
       id:String(page.id),name:String(page.name || page.id),accessToken:String(page.access_token || userToken),
       instagram:page.instagram_business_account ? { id:String(page.instagram_business_account.id), username:page.instagram_business_account.username ? String(page.instagram_business_account.username) : undefined } : null,
@@ -191,9 +200,7 @@ export async function channelRoutes(app: FastifyInstance) {
     const discoveryId = randomToken(24);
     const discovery: MetaDiscovery = { tenantId:state.tenantId,businessId:state.businessId,userId:state.userId,requestedPlatform:state.requestedPlatform,pages };
     await redis().set(redisKey("meta-oauth","discovery",discoveryId), encryptSecret(JSON.stringify(discovery)), "EX", 900);
-    const destination = new URL("/channels", config.CUSTOMER_APP_ORIGIN);
-    destination.searchParams.set("metaConnection",discoveryId);
-    return reply.redirect(destination.toString());
+    return reply.redirect(metaCustomerReturn(config.CUSTOMER_APP_ORIGIN, state.tenantId, state.businessId, "metaConnection", discoveryId));
   });
 
   app.get("/v1/tenants/:tenantId/channels/meta/oauth/discovery/:discoveryId", async (request, reply) => {
@@ -222,6 +229,7 @@ export async function channelRoutes(app: FastifyInstance) {
     const discovery = JSON.parse(decryptSecret(value)) as MetaDiscovery;
     if (discovery.tenantId !== params.tenantId || discovery.userId !== principal.userId) throw new ApiError(404,"META_DISCOVERY_NOT_FOUND","Meta connection selection not found.");
     await requireBusinessAccess(request, params.tenantId, discovery.businessId, ["OWNER","ADMIN"]);
+    if (input.platform !== discovery.requestedPlatform) throw new ApiError(400,"META_PLATFORM_MISMATCH","Restart Meta authorization for the selected platform.");
     const page = discovery.pages.find((candidate)=>candidate.id===input.pageId);
     if (!page) throw new ApiError(400,"META_PAGE_INVALID","Selected Page is not available in this connection.");
     const externalAccountId = input.platform === "facebook" ? page.id : page.instagram?.id;
@@ -267,6 +275,7 @@ export async function channelRoutes(app: FastifyInstance) {
       FROM channel_accounts c
       JOIN businesses b ON b.id=c.business_id
       WHERE c.tenant_id=$1
+        AND b.status<>'archived' AND NOT (c.settings_json ? 'deletedAt')
         AND ($2::uuid IS NULL OR c.business_id=$2)
         AND ($3::text IS NULL OR c.platform=$3)
         AND ($4::uuid[] IS NULL OR c.business_id=ANY($4::uuid[]))

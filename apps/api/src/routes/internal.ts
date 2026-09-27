@@ -76,7 +76,7 @@ async function findRelevantItems(tenantId: string, businessId: string, agentId: 
     FROM collection_items i
     JOIN collections c ON c.id=i.collection_id
     JOIN agent_collection_links acl ON acl.collection_id=c.id AND acl.agent_profile_id=$3
-    WHERE i.tenant_id=$1 AND i.business_id=$2 AND c.tenant_id=$1 AND c.business_id=$2
+    WHERE i.tenant_id=$1 AND i.business_id=$2 AND c.tenant_id=$1 AND c.business_id=$2 AND c.status='active'
       AND acl.tenant_id=$1 AND i.status='active'
       AND (i.title ILIKE '%'||$4||'%' OR i.data_jsonb::text ILIKE '%'||$4||'%' OR EXISTS (
         SELECT 1 FROM unnest(string_to_array($4,' ')) w WHERE length(w)>=3 AND (i.title ILIKE '%'||w||'%' OR i.data_jsonb::text ILIKE '%'||w||'%')

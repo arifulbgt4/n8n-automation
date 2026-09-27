@@ -16,7 +16,7 @@ export async function knowledgeRoutes(app: FastifyInstance) {
       WHERE ks.tenant_id=$1
         AND ($2::uuid IS NULL OR ks.business_id=$2)
         AND ($3::uuid IS NULL OR ks.agent_profile_id=$3)
-        AND ($4::text IS NULL OR ks.status=$4)
+        AND (CASE WHEN $4::text IS NULL THEN ks.status<>'archived' ELSE ks.status=$4 END)
         AND ($5::uuid[] IS NULL OR ks.business_id=ANY($5::uuid[]))
       ORDER BY ks.updated_at DESC
     `, [tenantId, q.businessId ?? null, q.agentId ?? null, q.status ?? null, scope]);
