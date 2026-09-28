@@ -43,16 +43,19 @@ test("native training keeps strict session windows, deduplicates events, and reu
     // current dataset. A preexisting candidate must fail the digest check.
     assert.equal(await capture("q1-late","CONTACT","A follow-up","2026-09-28T10:02:00Z"),true);
     assert.equal(await capture("a1-late","HUMAN","Follow-up answer","2026-09-28T10:03:00Z"),true);
+    // The native reply may reach us before its earlier customer message.
+    assert.equal(await capture("a-before-q","HUMAN","Out-of-order answer","2026-09-28T10:04:30Z"),true);
+    assert.equal(await capture("q-after-a","CONTACT","Out-of-order question","2026-09-28T10:04:00Z"),true);
     const late=await trainingDatasetState(client,tenant,agent);
-    assert.equal(late.exampleIds.length,3);
+    assert.equal(late.exampleIds.length,4);
     assert.notEqual(late.datasetDigest,next.datasetDigest);
     const rows=await client.query("SELECT training_session_id,input_text,ideal_response FROM training_examples WHERE agent_profile_id=$1 ORDER BY created_at,id",[agent]);
-    assert.equal(rows.rows.filter(row=>row.training_session_id===first).length,2);
+    assert.equal(rows.rows.filter(row=>row.training_session_id===first).length,3);
     assert.equal(rows.rows.filter(row=>row.training_session_id===second).length,1);
 
     await client.query("DELETE FROM training_sessions WHERE id=$1",[first]);
     const retained=await client.query("SELECT count(*)::int AS count FROM training_examples WHERE agent_profile_id=$1 AND training_session_id IS NULL",[agent]);
-    assert.equal(retained.rows[0].count,2);
+    assert.equal(retained.rows[0].count,3);
   } finally {
     await client.query("ROLLBACK");
     client.release();

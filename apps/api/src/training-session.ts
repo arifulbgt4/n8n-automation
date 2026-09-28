@@ -39,7 +39,9 @@ export async function captureTrainingMessage(client: pg.PoolClient, input: {
     RETURNING id
   `, [input.tenantId,input.businessId,input.channelId,session.rows[0].id,input.conversationId,
       input.sourceMessageId,input.platformMessageId,input.direction,input.text?.trim()??"",eventAt]);
-  if (inserted.rows[0] && input.direction === "HUMAN") await syncTrainingExamples(client, session.rows[0].id);
+  // Webhooks can arrive out of provider order, including after the session
+  // closes. Either side may complete or change a customer/reply pair.
+  if (inserted.rows[0]) await syncTrainingExamples(client, session.rows[0].id);
   return Boolean(inserted.rows[0]);
 }
 
