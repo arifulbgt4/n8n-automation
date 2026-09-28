@@ -13,6 +13,7 @@ import {
 } from "@n8n-automation/core";
 import { assertSafeAiBaseUrl, chat, testConnection, type AiConnection, type AiModelConfig } from "../ai-provider.js";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
+import { trainingDatasetState } from "../training-session.js";
 
 const providerSchema = z.enum(["openai", "anthropic", "gemini", "openai_compatible"]);
 const taskKeys = ["DEFAULT_CHAT", "INTENT_CLASSIFICATION", "IMAGE_ANALYSIS", "AUDIO_TRANSCRIPTION", "STRUCTURED_EXTRACTION", "PROMPT_SYNTHESIS", "EMBEDDINGS"] as const;
@@ -325,8 +326,30 @@ export async function aiRoutes(app: FastifyInstance) {
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
     await transaction(async (client) => {
-      const prompt = await client.query("SELECT id FROM prompt_versions WHERE id=$1 AND agent_profile_id=$2 AND tenant_id=$3 FOR UPDATE", [params.promptId, params.agentId, params.tenantId]);
+      const prompt = await client.query<{id:string;training_job_id:string|null}>("SELECT id,training_job_id FROM prompt_versions WHERE id=$1 AND agent_profile_id=$2 AND tenant_id=$3 FOR UPDATE", [params.promptId, params.agentId, params.tenantId]);
       if (!prompt.rows[0]) throw new ApiError(404, "PROMPT_NOT_FOUND", "Prompt version not found.");
+      await client.query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.agentId,params.tenantId]);
+      if (prompt.rows[0].training_job_id) {
+        const job = await client.query<{input_snapshot:any}>("SELECT input_snapshot FROM training_jobs WHERE id=$1",[prompt.rows[0].training_job_id]);
+        const snapshot = job.rows[0]?.input_snapshot;
+        if (snapshot?.datasetDigest) {
+          const dataset = await trainingDatasetState(client,params.tenantId,params.agentId,true);
+          if (dataset.datasetDigest !== snapshot.datasetDigest) {
+            throw new ApiError(409,"TRAINING_CANDIDATE_STALE","The training data changed. Generate a fresh candidate before publishing.");
+          }
+        }
+        if (snapshot?.trainingSessionId) {
+          const approved = await client.query<{id:string}>("SELECT id FROM training_examples WHERE tenant_id=$1 AND agent_profile_id=$2 AND approval_status='approved' ORDER BY id",[params.tenantId,params.agentId]);
+          const snapIds = [...(snapshot.exampleIds??[])].sort();
+          if (JSON.stringify(approved.rows.map(row=>row.id)) !== JSON.stringify(snapIds)) {
+            throw new ApiError(409,"TRAINING_CANDIDATE_STALE","The approved training set changed. Generate a fresh candidate before publishing.");
+          }
+          const current = await client.query<{count:number}>("SELECT count(*)::int AS count FROM training_session_messages WHERE training_session_id=$1",[snapshot.trainingSessionId]);
+          if (Number(current.rows[0]?.count??0) !== Number(snapshot.sessionEventCount??0)) {
+            throw new ApiError(409,"TRAINING_CANDIDATE_STALE","New training messages arrived after this candidate was created. Generate a fresh candidate before publishing.");
+          }
+        }
+      }
       await client.query("UPDATE prompt_versions SET status='archived' WHERE agent_profile_id=$1 AND status='active' AND id<>$2", [params.agentId, params.promptId]);
       await client.query("UPDATE prompt_versions SET status='active',published_by=$2,published_at=now() WHERE id=$1", [params.promptId, principal.userId]);
       await client.query("UPDATE agent_profiles SET active_prompt_version_id=$2,updated_at=now() WHERE id=$1", [params.agentId, params.promptId]);
@@ -477,7 +500,7 @@ export async function aiRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
-    const input = z.object({ modelConfigId: z.string().uuid().optional(), exampleIds: z.array(z.string().uuid()).min(1).max(200).optional() }).parse(request.body ?? {});
+    const input = z.object({ modelConfigId: z.string().uuid().optional(), exampleIds: z.array(z.string().uuid()).min(1).max(200).optional(), publishPolicy: z.enum(["manual"]).optional() }).parse(request.body ?? {});
     const requestedExamples = input.exampleIds ? [...new Set(input.exampleIds)] : null;
     const examples = requestedExamples
       ? (await query<{ id: string }>(
@@ -522,10 +545,12 @@ export async function aiRoutes(app: FastifyInstance) {
     `,[params.tenantId, agent.business_id, params.agentId]);
     const snapshot={
       exampleIds:examples,
+      datasetDigest:(await transaction(client=>trainingDatasetState(client,params.tenantId,params.agentId))).datasetDigest,
       basePromptVersionId:agent.active_prompt_version_id ?? null,
       collectionVersions:collectionVersions.rows.map((row)=>({id:row.id,schemaVersion:Number(row.schema_version),updatedAt:row.updated_at})),
       capabilities:agent.capabilities ?? [],
       behaviorSettings:agent.behavior_settings ?? {},
+      publishPolicy:input.publishPolicy,
       capturedAt:new Date().toISOString(),
     };
     const created = await query(`

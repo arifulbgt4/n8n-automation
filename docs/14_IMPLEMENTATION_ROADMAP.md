@@ -283,11 +283,11 @@ This file is the delivery checklist and current implementation status. Repositor
 
 ## Phase 14 — Training Studio
 
-- [x] Implement trainer identities.
-- [x] Facebook trainer user/profile routing.
-- [x] WhatsApp trainer number routing.
-- [x] Instagram trainer support where reliable.
-- [x] Panel simulator training examples.
+- [x] Implement channel-scoped Training ON/OFF with AI suppression and cumulative native examples.
+- [x] Verify Facebook Page Inbox echoes before enabling a session.
+- [ ] Verify WhatsApp Business App Coexistence and native echoes on a connected account.
+- [ ] Establish reliable Instagram native-reply attribution before enabling it.
+- [x] Preserve manual example and candidate review in Training Studio.
 - [x] Training sessions/examples.
 - [x] Training media stored privately by default.
 - [x] Approval/rejection of examples.

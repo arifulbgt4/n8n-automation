@@ -31,6 +31,7 @@ This directory is the implementation contract for the n8n Automation SaaS.
 25. [`24_CHANNEL_AI_ASSIGNMENT.md`](24_CHANNEL_AI_ASSIGNMENT.md) — channel default-agent assignment, conversation backfill/recovery, and AI readiness diagnostics.
 26. [`25_PLATFORM_AI_PLANS.md`](25_PLATFORM_AI_PLANS.md) — platform-owned AI providers/models, monthly token/credit allowances, Free/Pro packages, usage metering, and the no-payment phase boundary.
 27. [`27_META_APP_REVIEW_SUBMISSION_DRAFT.md`](27_META_APP_REVIEW_SUBMISSION_DRAFT.md) — source-backed Facebook Page permission explanations, reviewer walkthrough, screencast plan, and unresolved submission/data-deletion gates.
+28. [`28_NATIVE_CHANNEL_TRAINING.md`](28_NATIVE_CHANNEL_TRAINING.md) — session ON/OFF behavior, native reply feasibility, provider gates, and acceptance matrix.
 
 Unpublished legal-page drafts for this review are in [`meta-review-drafts/`](meta-review-drafts/README.md). They are not approved policies or public Meta submission URLs.
 

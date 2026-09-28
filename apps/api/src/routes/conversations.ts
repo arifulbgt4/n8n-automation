@@ -18,6 +18,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     }).parse(request.query);
     const result = await query(`
       SELECT cv.*,ct.external_contact_id,ct.display_name,ca.platform,ca.name AS channel_name,b.name AS business_name,
+        EXISTS(SELECT 1 FROM training_sessions ts WHERE ts.channel_account_id=cv.channel_account_id AND ts.status='open') AS training_active,
         (SELECT m.text_content FROM messages m WHERE m.conversation_id=cv.id AND m.tenant_id=cv.tenant_id ORDER BY m.created_at DESC LIMIT 1) AS last_message_text,
         (SELECT m.sender_type FROM messages m WHERE m.conversation_id=cv.id AND m.tenant_id=cv.tenant_id ORDER BY m.created_at DESC LIMIT 1) AS last_sender_type
       FROM conversations cv
@@ -38,7 +39,8 @@ export async function conversationRoutes(app: FastifyInstance) {
     const params = z.object({ tenantId: z.string().uuid(), conversationId: z.string().uuid() }).parse(request.params);
     await requireTenant(request, params.tenantId);
     const conversation = await query(`
-      SELECT cv.*,ct.external_contact_id,ct.display_name,ct.phone,ct.email,ca.platform,ca.name AS channel_name,b.name AS business_name,a.name AS agent_name
+      SELECT cv.*,ct.external_contact_id,ct.display_name,ct.phone,ct.email,ca.platform,ca.name AS channel_name,b.name AS business_name,a.name AS agent_name,
+        EXISTS(SELECT 1 FROM training_sessions ts WHERE ts.channel_account_id=cv.channel_account_id AND ts.status='open') AS training_active
       FROM conversations cv JOIN contacts ct ON ct.id=cv.contact_id JOIN channel_accounts ca ON ca.id=cv.channel_account_id
       JOIN businesses b ON b.id=cv.business_id LEFT JOIN agent_profiles a ON a.id=cv.agent_profile_id
       WHERE cv.id=$1 AND cv.tenant_id=$2
@@ -73,6 +75,11 @@ export async function conversationRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, params.tenantId, scopeConversation.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const input = z.object({ mode: z.enum(["AI", "HUMAN", "PAUSED"]), reason: z.string().max(500).optional() }).parse(request.body);
+    if (input.mode === "AI") {
+      const training = await query(`SELECT ts.id FROM conversations cv JOIN training_sessions ts ON ts.channel_account_id=cv.channel_account_id
+        WHERE cv.id=$1 AND cv.tenant_id=$2 AND ts.status='open' LIMIT 1`,[params.conversationId,params.tenantId]);
+      if (training.rows[0]) throw new ApiError(409,"CHANNEL_TRAINING_ON","Turn off channel training before returning this conversation to AI mode.");
+    }
     const result = await query(`
       UPDATE conversations SET mode=$3,state_version=state_version+1,
         escalation_metadata=escalation_metadata || $4::jsonb,updated_at=now()

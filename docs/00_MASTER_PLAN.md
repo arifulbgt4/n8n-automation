@@ -150,9 +150,7 @@ The same business may also have a separate wholesale catalog attached only to Wh
 
 ## 6. Conversation and training model
 
-Normal customer conversations and training conversations are distinct.
-
-A customer may register a trainer identity such as a Facebook user/profile ID, WhatsApp number, Instagram identity, or use the in-panel training simulator. Messages from configured trainer identities are captured as training examples rather than ordinary production customer turns.
+An agent and one of its assigned channels can enter a time-bounded training session. Training ON suppresses automated replies and follow-ups for that channel. Only customer messages and verifiable native business-inbox replies exchanged inside the session become examples; previously captured examples remain available for later sessions. Training OFF resumes normal AI routing and produces a reviewable prompt candidate from the cumulative approved examples. No trainer identity or special profile is selected. Channel-specific native reply eligibility is described in [Native channel training](28_NATIVE_CHANNEL_TRAINING.md).
 
 Prompt synthesis uses:
 

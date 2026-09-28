@@ -390,15 +390,19 @@ Only one active production prompt version per relevant scope unless an experimen
 
 ### `training_sessions`
 
-Groups demonstrations and metadata for a training run.
+Records an agent/channel Training ON/OFF window, its provider source, and the candidate job created after OFF. One open session is allowed per channel.
+
+### `training_session_messages`
+
+Durably records provider-timestamped customer and verified native owner messages inside a session. These records survive the operational 20-message conversation cache until the configured training retention policy removes the session.
 
 ### `training_examples`
 
-Stores paired customer-like input, ideal owner response, attachments, context labels, and approval state.
+Stores paired customer input, ideal owner response, provenance, context labels, and approval state. Approved examples survive session metadata deletion and are reused by later training jobs, subject to the configured training retention policy.
 
 ### `training_jobs`
 
-Tracks synthesis execution, input versions, model used, output candidate, cost, status, and errors.
+Tracks synthesis execution, the exact approved dataset digest, input versions, model used, output candidate, cost, status, and errors.
 
 Training data never mutates the live prompt without a versioned publication decision.
 

@@ -49,6 +49,20 @@ async function releaseLock(key: string, token: string) {
   await redis().eval(`if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end`, 1, key, token);
 }
 
+async function channelTrainingActive(channelId: string): Promise<boolean> {
+  const active = await query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channelId]);
+  return Boolean(active.rows[0]);
+}
+
+async function automaticMessageFenced(channelId: string, queuedAt: string): Promise<boolean> {
+  const fenced = await query(`SELECT id FROM training_sessions
+    WHERE channel_account_id=$1 AND (
+      created_at >= $2::timestamptz OR
+      (created_at <= $2::timestamptz AND (stopped_at IS NULL OR $2::timestamptz < stopped_at))
+    ) LIMIT 1`,[channelId,queuedAt]);
+  return Boolean(fenced.rows[0]);
+}
+
 async function waitForMediaUploadLock(tenantId: string): Promise<{ key: string; token: string }> {
   const key = redisKey("lock", "media-upload", tenantId);
   const deadline = Date.now() + 10 * 60 * 1000;
@@ -92,7 +106,7 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
   if (!lock) return;
   try {
     const cv = await query<any>("SELECT mode,status,last_message_at,agent_profile_id FROM conversations WHERE id=$1 AND tenant_id=$2", [conversationId, tenantId]);
-    if (!cv.rows[0] || cv.rows[0].status !== "open" || cv.rows[0].mode !== "AI") return;
+    if (!cv.rows[0] || cv.rows[0].status !== "open" || cv.rows[0].mode !== "AI" || await channelTrainingActive(channelAccountId)) return;
     const mediaPending = await query<{ count: string; oldest: Date | null }>(`
       SELECT count(*)::text AS count,min(created_at) AS oldest
       FROM messages
@@ -112,6 +126,8 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
         + COALESCE((SELECT SUM(ma.size_bytes) FROM message_media mm JOIN media_assets ma ON ma.id=mm.media_asset_id WHERE mm.message_id=m.id),0) AS approx_bytes
       FROM messages m
       WHERE m.conversation_id=$1 AND m.direction='INBOUND' AND m.turn_id IS NULL AND m.sender_type='CONTACT'
+        AND COALESCE(m.metadata->>'trainingSuppressed','false')<>'true'
+        AND NOT EXISTS (SELECT 1 FROM training_session_messages sm WHERE sm.source_message_id=m.id)
       ORDER BY m.created_at ASC LIMIT $2
     `, [conversationId, config.AGGREGATION_MAX_MESSAGES]);
     if (!pending.rows.length) return;
@@ -127,11 +143,15 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
     const turn = await transaction(async (client) => {
       const locked = await client.query<any>("SELECT id,mode,status FROM conversations WHERE id=$1 FOR UPDATE", [conversationId]);
       if (!locked.rows[0] || locked.rows[0].mode !== "AI" || locked.rows[0].status !== "open") return null;
+      const training = await client.query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channelAccountId]);
+      if (training.rows[0]) return null;
       const messages = await client.query<{ id: string; approx_bytes:string }>(`
         SELECT m.id,
           (COALESCE(octet_length(m.text_content),0)
           + COALESCE((SELECT SUM(ma.size_bytes) FROM message_media mm JOIN media_assets ma ON ma.id=mm.media_asset_id WHERE mm.message_id=m.id),0))::text AS approx_bytes
         FROM messages m WHERE m.conversation_id=$1 AND m.direction='INBOUND' AND m.turn_id IS NULL AND m.sender_type='CONTACT'
+          AND COALESCE(m.metadata->>'trainingSuppressed','false')<>'true'
+          AND NOT EXISTS (SELECT 1 FROM training_session_messages sm WHERE sm.source_message_id=m.id)
         ORDER BY m.created_at ASC LIMIT $2 FOR UPDATE OF m
       `, [conversationId, config.AGGREGATION_MAX_MESSAGES]);
       if (!messages.rows.length) return null;
@@ -493,6 +513,10 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   if (existing.rows[0]?.delivery_status === "sent") return;
   const channel = await loadChannelRuntime(channelAccountId, conversationId, tenantId, businessId);
   if (!channel.active || channel.connection_status !== "connected" || channel.conversation_status !== "open") throw new Error("Channel or conversation is not active");
+  if (payload.senderType !== "HUMAN" && (await channelTrainingActive(channelAccountId) || await automaticMessageFenced(channelAccountId,job.data.createdAt))) {
+    if (existing.rows[0]) await query("UPDATE messages SET delivery_status='cancelled',updated_at=now() WHERE id=$1 AND delivery_status<>'sent'",[existing.rows[0].id]);
+    return;
+  }
   if (payload.senderType === "AI" && channel.mode !== "AI") return;
   const tenant = await query<{ status: string }>("SELECT status FROM tenants WHERE id=$1", [tenantId]);
   if (tenant.rows[0]?.status !== "active") throw new Error("Tenant is not active");
@@ -542,7 +566,23 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
     await query("INSERT INTO message_media(message_id,media_asset_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [messageId,message.assetId,tenantId]);
   }
   try {
-    const sent = await sendProviderMessage(tenantId, channel, message);
+    const sent = payload.senderType !== "HUMAN"
+      ? await transaction(async (client) => {
+          // Starting training holds the same channel row lock. An ON response
+          // therefore means every earlier AI provider request has finished.
+          await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channelAccountId]);
+          const active = await client.query(`SELECT id FROM training_sessions
+            WHERE channel_account_id=$1 AND (status='open' OR created_at >= $2::timestamptz OR
+              (created_at <= $2::timestamptz AND stopped_at>$2::timestamptz)) LIMIT 1`,
+            [channelAccountId,job.data.createdAt]);
+          if (active.rows[0]) return null;
+          return sendProviderMessage(tenantId, channel, message);
+        })
+      : await sendProviderMessage(tenantId, channel, message);
+    if (!sent) {
+      await query("UPDATE messages SET delivery_status='cancelled',updated_at=now() WHERE id=$1",[messageId]);
+      return;
+    }
     await query("UPDATE messages SET platform_message_id=$2,delivery_status='sent',updated_at=now() WHERE id=$1", [messageId,sent.providerMessageId]);
     await query("UPDATE channel_accounts SET last_delivery_at=now(),updated_at=now() WHERE id=$1", [channelAccountId]);
     await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
@@ -571,7 +611,8 @@ async function trainingJob(job: Job<JobEnvelope<any>>) {
     const result = await internalFetch("/v1/internal/training/synthesize", { method: "POST", body: JSON.stringify({ trainingJobId }) });
     await query("UPDATE training_jobs SET status='completed',candidate_prompt_version_id=$2,evaluation_json=$3::jsonb,cost_metadata=$4::jsonb,completed_at=now() WHERE id=$1", [trainingJobId,result.candidatePromptVersionId,JSON.stringify(result.evaluation ?? {}),JSON.stringify(result.usage ?? {})]);
     const agent = await query<any>("SELECT a.*,tj.tenant_id FROM training_jobs tj JOIN agent_profiles a ON a.id=tj.agent_profile_id WHERE tj.id=$1",[trainingJobId]);
-    if(agent.rows[0]?.behavior_settings?.autoPublishTraining === true && result.evaluation?.passed === true) {
+    const snapshot = await query<any>("SELECT input_snapshot FROM training_jobs WHERE id=$1",[trainingJobId]);
+    if(snapshot.rows[0]?.input_snapshot?.publishPolicy !== "manual" && agent.rows[0]?.behavior_settings?.autoPublishTraining === true && result.evaluation?.passed === true) {
       await transaction(async (client)=>{
         await client.query("UPDATE prompt_versions SET status='archived' WHERE agent_profile_id=$1 AND status='active' AND id<>$2",[agent.rows[0].id,result.candidatePromptVersionId]);
         await client.query("UPDATE prompt_versions SET status='active',published_at=now() WHERE id=$1 AND agent_profile_id=$2",[result.candidatePromptVersionId,agent.rows[0].id]);
@@ -600,7 +641,7 @@ async function followupJob(job: Job<JobEnvelope<any>>) {
     WHERE f.id=$1
   `,[followupId]);
   const row=result.rows[0];
-  if(!row||!["scheduled","queued"].includes(row.status)||row.mode!=="AI"||row.conversation_status!=="open"||!row.active||row.connection_status!=="connected"||row.tenant_status!=="active"){
+  if(!row||!["scheduled","queued"].includes(row.status)||row.mode!=="AI"||row.conversation_status!=="open"||!row.active||row.connection_status!=="connected"||row.tenant_status!=="active"||await channelTrainingActive(row.channel_account_id)||await automaticMessageFenced(row.channel_account_id,new Date(row.created_at).toISOString())){
     if(row) await query("UPDATE followup_jobs SET status='cancelled',updated_at=now() WHERE id=$1",[followupId]);
     return;
   }
@@ -770,7 +811,7 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
       } else {
         const tenant = await query("SELECT id,name,slug,status,settings_json,created_at FROM tenants WHERE id=$1",[job.data.tenantId]);
         if (!tenant.rows[0]) throw new Error("Tenant not found");
-        const [businesses,channels,collections,fields,items,orders,bookings,leads,quotes,cases,agents,prompts,knowledge,contacts,conversations,messages,mediaAssets,messageMedia,collectionItemMedia] = await Promise.all([
+        const [businesses,channels,collections,fields,items,orders,bookings,leads,quotes,cases,agents,prompts,knowledge,contacts,conversations,messages,trainingSessions,trainingSessionMessages,trainingExamples,trainingJobs,mediaAssets,messageMedia,collectionItemMedia] = await Promise.all([
           query("SELECT * FROM businesses WHERE tenant_id=$1",[job.data.tenantId]),
           query("SELECT id,business_id,platform,name,external_account_id,public_identifier,connection_status,settings_json,created_at FROM channel_accounts WHERE tenant_id=$1",[job.data.tenantId]),
           query("SELECT * FROM collections WHERE tenant_id=$1",[job.data.tenantId]),
@@ -787,13 +828,17 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
           query("SELECT id,business_id,channel_account_id,external_contact_id,display_name,phone,email,created_at,updated_at FROM contacts WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
           query("SELECT id,business_id,channel_account_id,contact_id,mode,status,assigned_user_id,agent_profile_id,last_message_at,last_turn_at,created_at,updated_at FROM conversations WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
           query("SELECT id,business_id,channel_account_id,conversation_id,turn_id,platform_message_id,direction,sender_type,message_type,text_content,provider_timestamp,delivery_status,reply_to_message_id,created_at,updated_at FROM messages WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
+          query("SELECT * FROM training_sessions WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
+          query("SELECT * FROM training_session_messages WHERE tenant_id=$1 ORDER BY event_at,id",[job.data.tenantId]),
+          query("SELECT * FROM training_examples WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
+          query("SELECT * FROM training_jobs WHERE tenant_id=$1 ORDER BY created_at,id",[job.data.tenantId]),
           query("SELECT id,business_id,original_name,mime_type,kind,size_bytes,width,height,duration_ms,visibility,processing_status,created_at,updated_at FROM media_assets WHERE tenant_id=$1 AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export') ORDER BY created_at,id",[job.data.tenantId]),
           query("SELECT mm.message_id,mm.media_asset_id,mm.display_order,mm.created_at FROM message_media mm WHERE mm.tenant_id=$1 ORDER BY mm.message_id,mm.display_order,mm.media_asset_id",[job.data.tenantId]),
           query("SELECT cim.collection_item_id,cim.media_asset_id,cim.role,cim.display_order,cim.created_at FROM collection_item_media cim WHERE cim.tenant_id=$1 ORDER BY cim.collection_item_id,cim.display_order,cim.media_asset_id",[job.data.tenantId]),
         ]);
         exportPayload={
           exportedAt:new Date().toISOString(),
-          formatVersion:2,
+          formatVersion:3,
           mediaFileBytesIncluded:false,
           tenant:tenant.rows[0],
           businesses:businesses.rows,
@@ -812,6 +857,10 @@ async function bulkJob(job: Job<JobEnvelope<any>>) {
           contacts:contacts.rows,
           conversations:conversations.rows,
           messages:messages.rows,
+          trainingSessions:trainingSessions.rows,
+          trainingSessionMessages:trainingSessionMessages.rows,
+          trainingExamples:trainingExamples.rows,
+          trainingJobs:trainingJobs.rows,
           mediaAssets:mediaAssets.rows,
           messageMedia:messageMedia.rows,
           collectionItemMedia:collectionItemMedia.rows,
@@ -891,7 +940,7 @@ async function applyRetentionPolicies(){
     }
     if(policy.training_days){
       const examples=await query(`DELETE FROM training_examples WHERE tenant_id=$1 AND created_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
-      const sessions=await query(`DELETE FROM training_sessions WHERE tenant_id=$1 AND updated_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
+      const sessions=await query(`DELETE FROM training_sessions WHERE tenant_id=$1 AND status<>'open' AND updated_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
       counts.training=(examples.rowCount??0)+(sessions.rowCount??0);
     }
     if(policy.audit_days){

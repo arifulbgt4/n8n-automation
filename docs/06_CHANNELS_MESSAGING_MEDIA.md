@@ -92,7 +92,7 @@ For each inbound message:
 3. Resolve active conversation.
 4. Append message.
 5. Check HUMAN/AI/PAUSED mode.
-6. Check trainer identity before production processing.
+6. Check whether a channel training session is open; suppress AI processing while it is on and capture only provider-verified native training events inside its time window.
 7. Aggregate into a logical turn if eligible.
 
 Do not merge people across platforms merely because names match.

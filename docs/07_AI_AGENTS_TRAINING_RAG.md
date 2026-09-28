@@ -155,24 +155,17 @@ Customers teach the agent by demonstrating how a human owner/staff member would 
 
 Training sources:
 
-- Configured Facebook trainer profile/user identity.
-- Configured WhatsApp trainer number.
-- Configured Instagram trainer identity where technically reliable.
-- Customer Panel Training Studio simulator.
+- Customer messages and verified native owner replies inside an active channel training session.
 - Manually entered paired examples.
-- Approved historical conversations in a later phase.
+- Approved historical conversations in a later phase, if explicitly selected.
 
-## 10. Trainer identity routing
+## 10. Channel training session routing
 
-Before a channel message enters normal production AI handling:
+The customer selects an already assigned agent and channel and turns training on. The session pauses AI replies and follow-ups for that channel. Its capture interval is server-recorded, with provider timestamps used to place delayed callbacks in the correct interval. Only customer messages paired with verified replies from the original provider inbox/app become training examples. Turning training off resumes the published AI prompt for otherwise AI-eligible conversations and creates a reviewable candidate from this and earlier approved examples.
 
-```text
-Is sender a configured trainer identity for this scope?
-  yes -> training pipeline
-  no  -> production conversation pipeline
-```
+No special trainer identity or phone number is selected. Legacy trainer-identity records and endpoints are not part of the session flow. Provider-specific capability checks and limitations are specified in [Native channel training](28_NATIVE_CHANNEL_TRAINING.md).
 
-Trainer identities are scoped to tenant/business/channel/agent as configured. A trainer identity on one Page must not automatically train another Page/business.
+Independent HUMAN/PAUSED conversation handoffs are preserved when training stops. Native channel session candidates always require customer review and publication even if an agent otherwise has an auto-publish setting.
 
 ## 11. Training example model
 
@@ -426,7 +419,7 @@ AI architecture is acceptable when:
 
 - two channels can share one agent/data set while another uses overrides
 - customers can configure task-specific models without editing n8n
-- trainer messages create training examples instead of production replies
+- session-bounded customer/native-human exchanges create agent-scoped training examples
 - candidate prompts are versioned/testable/rollbackable
 - live price/stock/service data is retrieved at runtime
 - vector retrieval cannot return another tenant's content
