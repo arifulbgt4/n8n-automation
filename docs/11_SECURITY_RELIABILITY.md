@@ -56,13 +56,13 @@ Controls:
 - business-scoped permissions enforce assignment.
 - PostgreSQL RLS where appropriate as defense in depth.
 - queue jobs carry tenant IDs and workers re-verify ownership.
-- Media Storage access maps tenant -> approved media user/credential.
+- Media Storage uses one application credential for new files; application authorization and asset records enforce tenant ownership and quota. Legacy assets retain their original storage credential until migrated.
 - media asset records carry tenant ownership independent of storage metadata.
 - vector search includes tenant/business filters.
 - Redis keys are application/environment/tenant namespaced.
 - caches are not shared across tenants unless data is truly global/public.
 
-Preferred Media Storage isolation is one media user/account per SaaS tenant.
+Current Media Storage isolation is application-enforced on one shared service account, with a 512 MiB tenant cap and a 50 GiB service cap. Storage credentials never reach customer browsers.
 
 ## 5. Input validation
 
