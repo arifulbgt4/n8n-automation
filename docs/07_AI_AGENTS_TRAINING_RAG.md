@@ -27,6 +27,12 @@ Suggested configuration:
 
 One agent can serve Facebook + WhatsApp + Instagram for the same business, while channel-specific overrides remain possible.
 
+### Catalog assignment and current-item lookup
+
+In Customer Panel → AI Agents, create or edit an agent to select active Data / Catalogs collections from the same business. The edit form loads existing assignments; saving a changed selection replaces those links, while a profile-only edit preserves them. Assignment changes are blocked while the agent has an open channel-training session.
+
+A channel conversation can use a collection only when both the agent-to-collection link and the active channel-to-collection link exist in the same tenant and business. Runtime lookup returns at most 20 active items. Generic Bengali or English product-list questions browse the current catalog; specific questions use keyword matching. Channel item overrides apply before lookup, and only fields marked AI-visible are searched or included in the AI context. The Agent Test button exercises the prompt without channel catalog context, so verify live product answers through a designated test-safe channel conversation.
+
 ## 3. Capabilities
 
 Capabilities describe actions the agent may perform. Initial list:
