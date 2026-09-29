@@ -29,12 +29,13 @@ export async function findRelevantItems(
   if (!agentId || !text.trim()) return [];
 
   const browse = isCatalogBrowseRequest(text);
+  const productBrowse = browse && /(?:প্রোডাক্ট|পণ্য|পন্য)|\bproducts?\b/i.test(text);
   const words = browse ? [] : (text.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? [])
     .filter((word) => word.length >= 3).slice(0, 8);
   if (!browse && !words.length) return [];
 
   const result = await runQuery(`
-    SELECT i.id,i.collection_id,i.title,visible.data_jsonb,
+    SELECT i.id,i.collection_id,safe.title,visible.data_jsonb,
       c.name AS collection_name,c.purpose
     FROM collection_items i
     JOIN collections c ON c.id=i.collection_id AND c.tenant_id=$1 AND c.business_id=$2 AND c.status='active'
@@ -54,15 +55,26 @@ export async function findRelevantItems(
       WHERE f.collection_id=c.id AND f.tenant_id=$1 AND f.ai_visible=true
         AND effective.data_jsonb ? f.key
     ) visible
+    CROSS JOIN LATERAL (
+      SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM collection_fields hidden
+        WHERE hidden.collection_id=c.id AND hidden.tenant_id=$1 AND hidden.ai_visible=false
+          AND (hidden.key IN ('name','title') OR i.title=i.data_jsonb->>hidden.key
+            OR i.title=effective.data_jsonb->>hidden.key)
+      ) THEN NULL ELSE i.title END AS title
+    ) safe
     WHERE i.tenant_id=$1 AND i.business_id=$2 AND i.status='active'
-      AND ($5::boolean OR i.title ILIKE '%'||$6||'%' OR
+      AND ($8::boolean=false OR lower(COALESCE(c.purpose,'blank')) IN
+        ('product','products','catalog','inventory','custom','blank'))
+      AND ($5::boolean OR safe.title ILIKE '%'||$6||'%' OR
         visible.data_jsonb::text ILIKE '%'||$6||'%' OR EXISTS (
           SELECT 1 FROM unnest($7::text[]) w WHERE length(w)>=3 AND
-            (i.title ILIKE '%'||w||'%' OR
+            (safe.title ILIKE '%'||w||'%' OR
              visible.data_jsonb::text ILIKE '%'||w||'%')
         ))
-    ORDER BY acl.priority DESC,i.updated_at DESC,i.id
+    ORDER BY CASE WHEN $8::boolean AND lower(COALESCE(c.purpose,'')) IN ('product','products') THEN 0 ELSE 1 END,
+      acl.priority DESC,i.updated_at DESC,i.id
     LIMIT 20
-  `, [tenantId, businessId, agentId, channelId, browse, words.join(" "), words]);
+  `, [tenantId, businessId, agentId, channelId, browse, words.join(" "), words, productBrowse]);
   return result.rows;
 }

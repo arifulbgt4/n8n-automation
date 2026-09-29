@@ -38,8 +38,8 @@ test("catalog lookup uses only active products linked to this agent, channel, te
     const channelId = (await client.query("INSERT INTO channel_accounts(tenant_id,business_id,platform,name,external_account_id) VALUES($1,$2,'facebook','Saree Page',$3) RETURNING id", [tenantId,businessId,`catalog-page-${suffix}`])).rows[0].id;
     const otherChannelId = (await client.query("INSERT INTO channel_accounts(tenant_id,business_id,platform,name,external_account_id) VALUES($1,$2,'facebook','Unlinked Page',$3) RETURNING id", [tenantId,businessId,`other-catalog-page-${suffix}`])).rows[0].id;
 
-    const collection = async (ownerTenant, ownerBusiness, key, status = "active") =>
-      (await client.query("INSERT INTO collections(tenant_id,business_id,name,key,purpose,status) VALUES($1,$2,$3,$3,'products',$4) RETURNING id", [ownerTenant,ownerBusiness,key,status])).rows[0].id;
+    const collection = async (ownerTenant, ownerBusiness, key, status = "active", purpose = "products") =>
+      (await client.query("INSERT INTO collections(tenant_id,business_id,name,key,purpose,status) VALUES($1,$2,$3,$3,$4,$5) RETURNING id", [ownerTenant,ownerBusiness,key,purpose,status])).rows[0].id;
     const item = async (ownerTenant, ownerBusiness, collectionId, title, status = "active", data = {}) =>
       (await client.query("INSERT INTO collection_items(tenant_id,business_id,collection_id,title,status,data_jsonb) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING id", [ownerTenant,ownerBusiness,collectionId,title,status,JSON.stringify(data)])).rows[0].id;
     const link = async (collectionId, ownerTenant = tenantId, { agent = true, channel = true, active = true } = {}) => {
@@ -96,6 +96,29 @@ test("catalog lookup uses only active products linked to this agent, channel, te
     assert.equal(bounded.length,20);
     assert.equal(new Set(bounded.map(row => row.id)).size,20);
     assert.ok(bounded.every(row => row.collection_id === visibleCollection));
+
+    const hiddenTitleCollection = await collection(tenantId,businessId,"Hidden name catalog");
+    await link(hiddenTitleCollection);
+    await client.query("INSERT INTO collection_fields(tenant_id,collection_id,key,label,type,ai_visible) VALUES($1,$2,'name','Name','text',false),($1,$2,'price','Price','currency',true)", [tenantId,hiddenTitleCollection]);
+    const hiddenTitleId = await item(tenantId,businessId,hiddenTitleCollection,"Private sample name","active",{name:"Private sample name",price:120});
+    const withHiddenTitle = await lookup(channelId,"What products do you have?");
+    const hiddenTitleRow = withHiddenTitle.find(row => row.id === hiddenTitleId);
+    assert.ok(hiddenTitleRow);
+    assert.equal(hiddenTitleRow.title,null);
+    assert.deepEqual(hiddenTitleRow.data_jsonb,{price:120});
+    assert.deepEqual(await lookup(channelId,"Private sample name"),[]);
+
+    const services = await collection(tenantId,businessId,"Services","active","service");
+    await link(services);
+    await client.query("UPDATE agent_collection_links SET priority=100 WHERE agent_profile_id=$1 AND collection_id=$2", [agentId,services]);
+    for (let index=0;index<25;index++) await item(tenantId,businessId,services,`Service ${index}`);
+    const productBrowse = await lookup(channelId,"তোমাদের কাছে কি কি প্রোডাক্ট আছে?");
+    assert.equal(productBrowse.length,20);
+    assert.ok(productBrowse.every(row => row.purpose === "products"));
+    assert.ok(productBrowse.some(row => row.collection_id === visibleCollection));
+    const generalBrowse = await lookup(channelId,"Show me your catalog");
+    assert.equal(generalBrowse.length,20);
+    assert.ok(generalBrowse.every(row => row.collection_id === services));
   } finally {
     await client.query("ROLLBACK");
     client.release();
