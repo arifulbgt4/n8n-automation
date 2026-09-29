@@ -14,6 +14,7 @@ import {
 import { assertSafeAiBaseUrl, chat, testConnection, type AiConnection, type AiModelConfig } from "../ai-provider.js";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
 import { trainingDatasetState } from "../training-session.js";
+import { requireAgentTrainingOff } from "../training-guards.js";
 
 const providerSchema = z.enum(["openai", "anthropic", "gemini", "openai_compatible"]);
 const taskKeys = ["DEFAULT_CHAT", "INTENT_CLASSIFICATION", "IMAGE_ANALYSIS", "AUDIO_TRANSCRIPTION", "STRUCTURED_EXTRACTION", "PROMPT_SYNTHESIS", "EMBEDDINGS"] as const;
@@ -286,11 +287,14 @@ export async function aiRoutes(app: FastifyInstance) {
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
     const input = z.object({ name: z.string().trim().min(1).max(160).optional(), description: z.string().max(2000).nullable().optional(), capabilities: z.array(z.string()).max(50).optional(), behaviorSettings: z.record(z.string(), z.unknown()).optional(), status: z.enum(["active", "draft", "archived"]).optional() }).parse(request.body);
-    const result = await query(`
-      UPDATE agent_profiles SET name=COALESCE($3,name),description=CASE WHEN $4::boolean THEN $5 ELSE description END,
-        capabilities=COALESCE($6,capabilities),behavior_settings=CASE WHEN $7::jsonb IS NULL THEN behavior_settings ELSE behavior_settings || $7::jsonb END,
-        status=COALESCE($8,status),updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *
-    `, [params.agentId, params.tenantId, input.name ?? null, Object.prototype.hasOwnProperty.call(input, "description"), input.description ?? null, input.capabilities ?? null, input.behaviorSettings ? JSON.stringify(input.behaviorSettings) : null, input.status ?? null]);
+    const result = await transaction(async (client) => {
+      if (input.status) await requireAgentTrainingOff(client,params.tenantId,params.agentId);
+      return client.query(`
+        UPDATE agent_profiles SET name=COALESCE($3,name),description=CASE WHEN $4::boolean THEN $5 ELSE description END,
+          capabilities=COALESCE($6,capabilities),behavior_settings=CASE WHEN $7::jsonb IS NULL THEN behavior_settings ELSE behavior_settings || $7::jsonb END,
+          status=COALESCE($8,status),updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *
+      `, [params.agentId, params.tenantId, input.name ?? null, Object.prototype.hasOwnProperty.call(input, "description"), input.description ?? null, input.capabilities ?? null, input.behaviorSettings ? JSON.stringify(input.behaviorSettings) : null, input.status ?? null]);
+    });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: agent.business_id, action: "AGENT_UPDATED", resourceType: "agent_profile", resourceId: params.agentId, safeDiff: input, request });
     reply.send({ agent: result.rows[0] });
   });

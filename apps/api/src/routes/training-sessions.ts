@@ -54,11 +54,20 @@ export async function trainingSessionRoutes(app: FastifyInstance) {
     const session = await transaction(async (client) => {
       const lockedChannel = await client.query<{default_agent_profile_id:string|null;active:boolean;connection_status:string}>(
         "SELECT default_agent_profile_id,active,connection_status FROM channel_accounts WHERE id=$1 FOR UPDATE",[channel.id]);
+      // Business status changes lock the channel before committing. Read it
+      // after that lock so a session cannot start on a newly paused business.
+      const scopeStatus = await client.query<{business_status:string;tenant_status:string}>(`
+        SELECT b.status AS business_status,t.status AS tenant_status
+        FROM businesses b JOIN tenants t ON t.id=b.tenant_id WHERE b.id=$1 AND t.id=$2
+      `,[agent.business_id,params.tenantId]);
       const lockedAgent = await client.query<{status:string;active_prompt_version_id:string|null}>(
         "SELECT status,active_prompt_version_id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[agent.id,params.tenantId]);
       if (lockedChannel.rows[0]?.default_agent_profile_id !== params.agentId ||
           !lockedChannel.rows[0]?.active || lockedChannel.rows[0]?.connection_status !== "connected") {
         throw new ApiError(409,"CHANNEL_AGENT_MISMATCH","The channel or its agent assignment changed. Refresh and try again.");
+      }
+      if (scopeStatus.rows[0]?.business_status !== "active" || scopeStatus.rows[0]?.tenant_status !== "active") {
+        throw new ApiError(409,"BUSINESS_NOT_ACTIVE","Activate the business before training this channel.");
       }
       if (lockedAgent.rows[0]?.status !== "active" || !lockedAgent.rows[0]?.active_prompt_version_id) {
         throw new ApiError(409,"AGENT_NOT_READY","Activate and publish the agent before training.");

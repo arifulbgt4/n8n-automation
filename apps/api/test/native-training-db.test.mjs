@@ -53,6 +53,47 @@ test("native training keeps strict session windows, deduplicates events, and reu
     assert.equal(rows.rows.filter(row=>row.training_session_id===first).length,3);
     assert.equal(rows.rows.filter(row=>row.training_session_id===second).length,1);
 
+    await client.query("UPDATE training_sessions SET status='closed',stopped_at='2026-09-28T11:05:00Z' WHERE id=$1",[second]);
+
+    const third=(await client.query(`INSERT INTO training_sessions(tenant_id,business_id,agent_profile_id,channel_account_id,status,created_at,stopped_at)
+      VALUES($1,$2,$3,$4,'closed','2026-09-28T12:00:00Z','2026-09-28T12:05:00Z') RETURNING id`,[tenant,business,agent,channel])).rows[0].id;
+    assert.equal(await capture("review-q","CONTACT","Review this answer","2026-09-28T12:01:00Z"),true);
+    assert.equal(await capture("review-a","HUMAN","Rejected answer","2026-09-28T12:02:00Z"),true);
+    const rejected=(await client.query(`UPDATE training_examples SET approval_status='rejected'
+      WHERE training_session_id=$1 RETURNING id`,[third])).rows[0].id;
+    // The Page may deliver an earlier customer event after the owner has
+    // rejected the example. Regrouping must not create an approved replacement.
+    assert.equal(await capture("review-q-earlier","CONTACT","Earlier context","2026-09-28T12:00:30Z"),true);
+    const reviewed=await client.query(`SELECT id,input_text,ideal_response,approval_status
+      FROM training_examples WHERE training_session_id=$1`,[third]);
+    assert.equal(reviewed.rows.length,1);
+    assert.equal(reviewed.rows[0].id,rejected);
+    assert.equal(reviewed.rows[0].approval_status,"rejected");
+    assert.equal(reviewed.rows[0].input_text,"Earlier context\nReview this answer");
+    assert.equal(reviewed.rows[0].ideal_response,"Rejected answer");
+    // An even later echo can split that reviewed pair; both fragments still
+    // overlap the rejected evidence and must stay out of the approved set.
+    assert.equal(await capture("review-a-earlier","HUMAN","Earlier answer","2026-09-28T12:00:45Z"),true);
+    const split=await client.query(`SELECT id,approval_status FROM training_examples WHERE training_session_id=$1`,[third]);
+    assert.equal(split.rows.length,2);
+    assert.ok(split.rows.some(row=>row.id===rejected));
+    assert.deepEqual(split.rows.map(row=>row.approval_status),["rejected","rejected"]);
+    assert.equal(await capture("fresh-q","CONTACT","Independent question","2026-09-28T12:03:00Z"),true);
+    assert.equal(await capture("fresh-a","HUMAN","Independent answer","2026-09-28T12:04:00Z"),true);
+    const reviewedAndFresh=await client.query(`SELECT input_text,approval_status FROM training_examples
+      WHERE training_session_id=$1 ORDER BY input_text`,[third]);
+    assert.deepEqual(reviewedAndFresh.rows.map(row=>row.approval_status).sort(),["approved","rejected","rejected"]);
+
+    // Provider times have millisecond precision, while the server records
+    // microseconds. Exclude the whole ON/OFF boundary millisecond when its
+    // ordering cannot be established from the provider timestamp.
+    await client.query(`INSERT INTO training_sessions(tenant_id,business_id,agent_profile_id,channel_account_id,status,created_at,stopped_at)
+      VALUES($1,$2,$3,$4,'closed','2026-09-28T14:00:00.001500Z','2026-09-28T14:05:00.123500Z')`,[tenant,business,agent,channel]);
+    assert.equal(await capture("before-on-ms","CONTACT","Before ON","2026-09-28T14:00:00.001Z"),false);
+    assert.equal(await capture("after-on-ms","CONTACT","After ON","2026-09-28T14:00:00.002Z"),true);
+    assert.equal(await capture("before-off-ms","CONTACT","Before OFF","2026-09-28T14:05:00.122Z"),true);
+    assert.equal(await capture("at-off-ms","CONTACT","Ambiguous OFF millisecond","2026-09-28T14:05:00.123Z"),false);
+
     await client.query("DELETE FROM training_sessions WHERE id=$1",[first]);
     const retained=await client.query("SELECT count(*)::int AS count FROM training_examples WHERE agent_profile_id=$1 AND training_session_id IS NULL",[agent]);
     assert.equal(retained.rows[0].count,3);

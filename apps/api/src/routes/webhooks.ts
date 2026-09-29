@@ -202,7 +202,7 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
       const inTraining = await client.query(`SELECT id FROM training_sessions
         WHERE tenant_id=$1 AND channel_account_id=$2 AND
           $3::timestamptz IS NOT NULL AND created_at<=$3::timestamptz
-          AND (stopped_at IS NULL OR stopped_at>$3::timestamptz)
+          AND (stopped_at IS NULL OR date_trunc('milliseconds',stopped_at)>$3::timestamptz)
         LIMIT 1`,[channel.tenant_id,channel.id,message.providerTimestamp??null]);
       let conversation = await client.query<{id:string}>(`SELECT id FROM conversations
         WHERE channel_account_id=$1 AND contact_id=$2 AND status='open'

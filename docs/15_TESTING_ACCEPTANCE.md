@@ -134,6 +134,9 @@ Against an isolated/test media user:
 - a second session combines its examples with prior approved examples; a candidate remains inactive until reviewed and published.
 - unavailable native reply attribution blocks session start with a channel-specific reason.
 - a delayed callback that changes training data invalidates an older candidate at publish.
+- a late customer or owner event cannot turn a previously rejected example back into an approved one when pairs regroup or split.
+- the ambiguous millisecond at a session boundary is excluded from training capture.
+- agent/channel reassignment, channel disablement, and business or agent archival are blocked while channel training is on.
 - manually entered examples remain available.
 - training attachments follow private-media policy.
 - synthesis job uses declared base version/examples/schema/capabilities.

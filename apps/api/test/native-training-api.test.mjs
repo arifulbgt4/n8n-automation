@@ -59,7 +59,7 @@ test("Training ON/OFF captures native Page replies and later sessions reuse appr
     const webhook=async(mid,text,isEcho=false,timestamp=Date.now())=>{
       const payload=JSON.stringify({object:"page",entry:[{id:pageId,messaging:[{
         sender:{id:isEcho?pageId:"customer-1"},recipient:{id:isEcho?"customer-1":pageId},timestamp,
-        message:{mid,text,...(isEcho?{is_echo:true,app_id:26390203743090}:{})},
+        message:{mid,text,...(isEcho?{is_echo:true,app_id:263902037430900}:{})},
       }]}]});
       const signature=`sha256=${createHmac("sha256",process.env.META_APP_SECRET).update(payload).digest("hex")}`;
       return app.inject({method:"POST",url:"/webhooks/meta",headers:{"content-type":"application/json","x-hub-signature-256":signature},payload});

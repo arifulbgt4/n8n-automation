@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type pg from "pg";
 import { z } from "zod";
 import {
   decryptSecret,
@@ -15,6 +16,7 @@ import {
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, safeSecretEqual } from "../lib.js";
 import { assertChannelOverrideWithinPlan, assertTenantCountLimit } from "../limits.js";
 import { ensureMetaPageSubscription, type MetaPageSubscriptionResult } from "../meta-page-subscription.js";
+import { requireChannelTrainingOff } from "../training-guards.js";
 
 const platformSchema = z.enum(["facebook", "instagram", "whatsapp"]);
 const credentialInput = z.object({
@@ -29,13 +31,16 @@ async function ensureBusiness(tenantId: string, businessId: string) {
   if (!result.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
 }
 
-async function upsertCredential(tenantId: string, channelId: string, type: string, value: string) {
-  await query(`
+async function upsertCredential(tenantId: string, channelId: string, type: string, value: string, client?: pg.PoolClient) {
+  const sql = `
     INSERT INTO channel_credentials(tenant_id,channel_account_id,credential_type,encrypted_value,key_hint)
     VALUES ($1,$2,$3,$4,$5)
     ON CONFLICT(channel_account_id,credential_type)
     DO UPDATE SET encrypted_value=EXCLUDED.encrypted_value,key_hint=EXCLUDED.key_hint,rotated_at=now(),updated_at=now()
-  `, [tenantId, channelId, type, encryptSecret(value), maskSecret(value)]);
+  `;
+  const values = [tenantId, channelId, type, encryptSecret(value), maskSecret(value)];
+  if (client) await client.query(sql, values);
+  else await query(sql, values);
 }
 
 async function credentialValue(channelId: string, type: string): Promise<string | null> {
@@ -364,24 +369,36 @@ export async function channelRoutes(app: FastifyInstance) {
       const agent = await query("SELECT 1 FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND status<>'archived'", [input.defaultAgentProfileId, params.tenantId, existingChannel.rows[0].business_id]);
       if (!agent.rows[0]) throw new ApiError(400, "AGENT_SCOPE_INVALID", "Selected AI agent does not belong to this business.");
     }
-    const result = await query(`
-      UPDATE channel_accounts SET
-        name=COALESCE($3,name),
-        active=COALESCE($4,active),
-        default_agent_profile_id=CASE WHEN $5::boolean THEN $6::uuid ELSE default_agent_profile_id END,
-        settings_json=CASE WHEN $7::jsonb IS NULL THEN settings_json ELSE settings_json || $7::jsonb END,
-        updated_at=now()
-      WHERE id=$1 AND tenant_id=$2 RETURNING *
-    `, [params.channelId, params.tenantId, input.name ?? null, input.active ?? null, Object.prototype.hasOwnProperty.call(input, "defaultAgentProfileId"), input.defaultAgentProfileId ?? null, input.settings ? JSON.stringify(input.settings) : null]);
-    const channel = result.rows[0];
-    if (!channel) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
-    if (input.credentials?.accessToken) await upsertCredential(params.tenantId, params.channelId, "access_token", input.credentials.accessToken);
-    if (input.credentials?.appSecret) await upsertCredential(params.tenantId, params.channelId, "app_secret", input.credentials.appSecret);
-    if (input.credentials?.verifyToken) await upsertCredential(params.tenantId, params.channelId, "verify_token", input.credentials.verifyToken);
-    if (input.credentials?.whatsappBusinessAccountId) await upsertCredential(params.tenantId, params.channelId, "whatsapp_business_account_id", input.credentials.whatsappBusinessAccountId);
-    if (input.credentials && Object.values(input.credentials).some(Boolean)) {
-      await query("UPDATE channel_accounts SET connection_status='pending',updated_at=now() WHERE id=$1",[params.channelId]);
-    }
+    const channel = await transaction(async (client) => {
+      const locked = await client.query<{active:boolean;default_agent_profile_id:string|null}>(
+        "SELECT active,default_agent_profile_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+        [params.channelId, params.tenantId]);
+      if (!locked.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
+      const hasCredentials = Boolean(input.credentials && Object.values(input.credentials).some(Boolean));
+      if ((input.active !== undefined && input.active !== locked.rows[0].active)
+          || (Object.prototype.hasOwnProperty.call(input, "defaultAgentProfileId")
+            && input.defaultAgentProfileId !== locked.rows[0].default_agent_profile_id)
+          || hasCredentials) {
+        await requireChannelTrainingOff(client, params.tenantId, params.channelId);
+      }
+      const result = await client.query(`
+        UPDATE channel_accounts SET
+          name=COALESCE($3,name),
+          active=COALESCE($4,active),
+          default_agent_profile_id=CASE WHEN $5::boolean THEN $6::uuid ELSE default_agent_profile_id END,
+          settings_json=CASE WHEN $7::jsonb IS NULL THEN settings_json ELSE settings_json || $7::jsonb END,
+          updated_at=now()
+        WHERE id=$1 AND tenant_id=$2 RETURNING *
+      `, [params.channelId, params.tenantId, input.name ?? null, input.active ?? null, Object.prototype.hasOwnProperty.call(input, "defaultAgentProfileId"), input.defaultAgentProfileId ?? null, input.settings ? JSON.stringify(input.settings) : null]);
+      if (input.credentials?.accessToken) await upsertCredential(params.tenantId, params.channelId, "access_token", input.credentials.accessToken, client);
+      if (input.credentials?.appSecret) await upsertCredential(params.tenantId, params.channelId, "app_secret", input.credentials.appSecret, client);
+      if (input.credentials?.verifyToken) await upsertCredential(params.tenantId, params.channelId, "verify_token", input.credentials.verifyToken, client);
+      if (input.credentials?.whatsappBusinessAccountId) await upsertCredential(params.tenantId, params.channelId, "whatsapp_business_account_id", input.credentials.whatsappBusinessAccountId, client);
+      if (hasCredentials) {
+        await client.query("UPDATE channel_accounts SET connection_status='pending',updated_at=now() WHERE id=$1",[params.channelId]);
+      }
+      return result.rows[0];
+    });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: channel.business_id, action: "CHANNEL_UPDATED", resourceType: "channel_account", resourceId: params.channelId, safeDiff: { ...input, credentials: input.credentials ? Object.keys(input.credentials) : undefined }, request });
     reply.send({ channel });
   });
@@ -395,7 +412,14 @@ export async function channelRoutes(app: FastifyInstance) {
     if (!result.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
     await requireBusinessAccess(request, params.tenantId, result.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
     const test = await testMetaChannel(result.rows[0]);
-    await query("UPDATE channel_accounts SET connection_status=$2,updated_at=now() WHERE id=$1", [params.channelId, test.ok ? "connected" : "degraded"]);
+    await transaction(async (client) => {
+      const locked = await client.query<{connection_status:string}>(
+        "SELECT connection_status FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.channelId,params.tenantId]);
+      if (!locked.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
+      const nextStatus = test.ok ? "connected" : "degraded";
+      if (locked.rows[0].connection_status !== nextStatus) await requireChannelTrainingOff(client,params.tenantId,params.channelId);
+      await client.query("UPDATE channel_accounts SET connection_status=$2,updated_at=now() WHERE id=$1", [params.channelId,nextStatus]);
+    });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: result.rows[0].business_id, action: "CHANNEL_TESTED", resourceType: "channel_account", resourceId: params.channelId, safeDiff: { ok: test.ok, metaSubscribed:test.metaSubscription?.subscribed ?? null }, request });
     reply.send(test);
   });
@@ -407,7 +431,12 @@ export async function channelRoutes(app: FastifyInstance) {
     if(!channel.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
     await requireBusinessAccess(request,params.tenantId,channel.rows[0].business_id,["OWNER","ADMIN"]);
     requireCsrf(request);
-    const updated=await query<any>("UPDATE channel_accounts SET active=false,updated_at=now() WHERE id=$1 RETURNING *",[params.channelId]);
+    const updated=await transaction(async (client) => {
+      const locked=await client.query<{active:boolean}>("SELECT active FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.channelId,params.tenantId]);
+      if (!locked.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
+      if (locked.rows[0].active) await requireChannelTrainingOff(client,params.tenantId,params.channelId);
+      return client.query<any>("UPDATE channel_accounts SET active=false,updated_at=now() WHERE id=$1 RETURNING *",[params.channelId]);
+    });
     await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:channel.rows[0].business_id,action:"CHANNEL_PAUSED",resourceType:"channel_account",resourceId:params.channelId,request});
     reply.send({channel:updated.rows[0]});
   });
@@ -420,7 +449,14 @@ export async function channelRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request,params.tenantId,channel.rows[0].business_id,["OWNER","ADMIN"]);
     requireCsrf(request);
     if(channel.rows[0].connection_status==="disconnected") throw new ApiError(409,"CHANNEL_RECONNECT_REQUIRED","Reconnect credentials before resuming a disconnected channel.");
-    const updated=await query<any>("UPDATE channel_accounts SET active=true,updated_at=now() WHERE id=$1 RETURNING *",[params.channelId]);
+    const updated=await transaction(async (client) => {
+      const locked=await client.query<{active:boolean;connection_status:string}>(
+        "SELECT active,connection_status FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.channelId,params.tenantId]);
+      if (!locked.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
+      if (locked.rows[0].connection_status==="disconnected") throw new ApiError(409,"CHANNEL_RECONNECT_REQUIRED","Reconnect credentials before resuming a disconnected channel.");
+      if (!locked.rows[0].active) await requireChannelTrainingOff(client,params.tenantId,params.channelId);
+      return client.query<any>("UPDATE channel_accounts SET active=true,updated_at=now() WHERE id=$1 RETURNING *",[params.channelId]);
+    });
     await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:channel.rows[0].business_id,action:"CHANNEL_RESUMED",resourceType:"channel_account",resourceId:params.channelId,request});
     reply.send({channel:updated.rows[0]});
   });
@@ -433,7 +469,16 @@ export async function channelRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request,params.tenantId,channel.rows[0].business_id,["OWNER","ADMIN"]);
     requireCsrf(request);
     const test=await testMetaChannel(channel.rows[0]);
-    const updated=await query<any>("UPDATE channel_accounts SET active=$2,connection_status=$3,updated_at=now() WHERE id=$1 RETURNING *",[params.channelId,test.ok,test.ok?"connected":"degraded"]);
+    const updated=await transaction(async (client) => {
+      const locked=await client.query<{active:boolean;connection_status:string}>(
+        "SELECT active,connection_status FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.channelId,params.tenantId]);
+      if (!locked.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
+      const nextStatus=test.ok?"connected":"degraded";
+      if (locked.rows[0].active!==test.ok || locked.rows[0].connection_status!==nextStatus) {
+        await requireChannelTrainingOff(client,params.tenantId,params.channelId);
+      }
+      return client.query<any>("UPDATE channel_accounts SET active=$2,connection_status=$3,updated_at=now() WHERE id=$1 RETURNING *",[params.channelId,test.ok,nextStatus]);
+    });
     await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:channel.rows[0].business_id,action:"CHANNEL_RECONNECT_TESTED",resourceType:"channel_account",resourceId:params.channelId,safeDiff:{ok:test.ok,metaSubscribed:test.metaSubscription?.subscribed ?? null},request});
     reply.send({channel:updated.rows[0],test});
   });
@@ -490,8 +535,13 @@ export async function channelRoutes(app: FastifyInstance) {
     const channel = await query<{ business_id: string }>("SELECT business_id FROM channel_accounts WHERE id=$1 AND tenant_id=$2", [params.channelId, params.tenantId]);
     if (!channel.rows[0]) throw new ApiError(404, "CHANNEL_NOT_FOUND", "Channel not found.");
     await requireBusinessAccess(request, params.tenantId, channel.rows[0].business_id, ["OWNER", "ADMIN"]);
-    await query("UPDATE channel_accounts SET active=false,connection_status='disconnected',updated_at=now() WHERE id=$1", [params.channelId]);
-    await query("DELETE FROM channel_credentials WHERE channel_account_id=$1", [params.channelId]);
+    await transaction(async (client) => {
+      const locked=await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.channelId,params.tenantId]);
+      if (!locked.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
+      await requireChannelTrainingOff(client,params.tenantId,params.channelId);
+      await client.query("UPDATE channel_accounts SET active=false,connection_status='disconnected',updated_at=now() WHERE id=$1", [params.channelId]);
+      await client.query("DELETE FROM channel_credentials WHERE channel_account_id=$1", [params.channelId]);
+    });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: channel.rows[0].business_id, action: "CHANNEL_DISCONNECTED", resourceType: "channel_account", resourceId: params.channelId, request });
     reply.send({ ok: true });
   });

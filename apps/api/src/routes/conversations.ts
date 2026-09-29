@@ -75,16 +75,23 @@ export async function conversationRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, params.tenantId, scopeConversation.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const input = z.object({ mode: z.enum(["AI", "HUMAN", "PAUSED"]), reason: z.string().max(500).optional() }).parse(request.body);
-    if (input.mode === "AI") {
-      const training = await query(`SELECT ts.id FROM conversations cv JOIN training_sessions ts ON ts.channel_account_id=cv.channel_account_id
-        WHERE cv.id=$1 AND cv.tenant_id=$2 AND ts.status='open' LIMIT 1`,[params.conversationId,params.tenantId]);
-      if (training.rows[0]) throw new ApiError(409,"CHANNEL_TRAINING_ON","Turn off channel training before returning this conversation to AI mode.");
-    }
-    const result = await query(`
-      UPDATE conversations SET mode=$3,state_version=state_version+1,
-        escalation_metadata=escalation_metadata || $4::jsonb,updated_at=now()
-      WHERE id=$1 AND tenant_id=$2 RETURNING *
-    `, [params.conversationId, params.tenantId, input.mode, JSON.stringify({ lastModeReason: input.reason ?? null, lastModeChangedBy: principal.userId, lastModeChangedAt: new Date().toISOString() })]);
+    const result = await transaction(async (client) => {
+      if (input.mode === "AI") {
+        // Training ON holds the same channel lock before changing conversation
+        // state. Recheck under that lock so a concurrent ON cannot be missed.
+        const channel = await client.query<{id:string}>(`SELECT ca.id FROM channel_accounts ca
+          JOIN conversations cv ON cv.channel_account_id=ca.id
+          WHERE cv.id=$1 AND cv.tenant_id=$2 FOR UPDATE OF ca`,[params.conversationId,params.tenantId]);
+        if (!channel.rows[0]) throw new ApiError(404,"CONVERSATION_NOT_FOUND","Conversation not found.");
+        const training = await client.query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channel.rows[0].id]);
+        if (training.rows[0]) throw new ApiError(409,"CHANNEL_TRAINING_ON","Turn off channel training before returning this conversation to AI mode.");
+      }
+      return client.query(`
+        UPDATE conversations SET mode=$3,state_version=state_version+1,
+          escalation_metadata=escalation_metadata || $4::jsonb,updated_at=now()
+        WHERE id=$1 AND tenant_id=$2 RETURNING *
+      `, [params.conversationId, params.tenantId, input.mode, JSON.stringify({ lastModeReason: input.reason ?? null, lastModeChangedBy: principal.userId, lastModeChangedAt: new Date().toISOString() })]);
+    });
     if (!result.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: result.rows[0].business_id, action: "CONVERSATION_MODE_CHANGED", resourceType: "conversation", resourceId: params.conversationId, safeDiff: input, request });
     reply.send({ conversation: result.rows[0] });

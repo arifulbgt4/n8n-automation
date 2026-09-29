@@ -11,7 +11,7 @@ test("Facebook Page Inbox echo resolves the Page as channel and the recipient as
   }]}]});
   const [owner] = normalizeMetaPayload({object:"page",entry:[{id:"page-1",messaging:[{
     sender:{id:"page-1"},recipient:{id:"contact-1"},timestamp:1_700_000_001_000,
-    message:{mid:"out-1",text:"Yes",is_echo:true,app_id:26390203743090},
+    message:{mid:"out-1",text:"Yes",is_echo:true,app_id:263902037430900},
   }]}]});
   assert.equal(customer.channelExternalId,"page-1");
   assert.equal(customer.senderExternalId,"contact-1");

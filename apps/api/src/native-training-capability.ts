@@ -9,6 +9,8 @@ export type NativeTrainingCapability = {
 };
 
 const capabilityCache = new Map<string,{value:NativeTrainingCapability;expiresAt:number}>();
+// Meta's Page Inbox app ID, as used by the Messenger Handover sample.
+const PAGE_INBOX_APP_ID = "263902037430900";
 
 export async function inspectNativeTrainingCapability(channel: any, forceRefresh = false): Promise<NativeTrainingCapability> {
   if (!channel?.active || channel.connection_status !== "connected") {
@@ -47,7 +49,7 @@ export async function inspectNativeTrainingCapability(channel: any, forceRefresh
 export function isNativeHumanReply(message: NormalizedInboundMessage): boolean {
   const metadata = message.metadata ?? {};
   if (!metadata.isEcho) return false;
-  if (message.platform === "facebook") return String(metadata.appId ?? "") === "26390203743090";
+  if (message.platform === "facebook") return String(metadata.appId ?? "") === PAGE_INBOX_APP_ID;
   // A future WhatsApp Coexistence onboarding must verify channel eligibility
   // before its native-only smb_message_echoes events can be used for training.
   if (message.platform === "whatsapp") return metadata.echoSource === "smb_message_echoes";

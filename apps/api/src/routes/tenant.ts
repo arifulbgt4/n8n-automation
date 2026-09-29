@@ -3,6 +3,7 @@ import { z } from "zod";
 import { query, transaction, type MembershipRole } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, slugify } from "../lib.js";
 import { assertTenantCountLimit } from "../limits.js";
+import { requireBusinessTrainingOff } from "../training-guards.js";
 
 const tenantRoles = ["OWNER", "ADMIN", "STAFF", "VIEWER"] as const;
 
@@ -196,16 +197,23 @@ export async function tenantRoutes(app: FastifyInstance) {
       status: z.enum(["active", "paused", "archived"]).optional(),
       settings: z.record(z.string(), z.unknown()).optional(),
     }).parse(request.body);
-    const result = await query(`
-      UPDATE businesses SET
-        name=COALESCE($3,name),
-        business_type_hint=CASE WHEN $4::boolean THEN $5 ELSE business_type_hint END,
-        timezone=COALESCE($6,timezone),currency=COALESCE($7,currency),
-        locale=COALESCE($8,locale),status=COALESCE($9,status),
-        settings_json=CASE WHEN $10::jsonb IS NULL THEN settings_json ELSE settings_json || $10::jsonb END,
-        updated_at=now()
-      WHERE id=$1 AND tenant_id=$2 RETURNING *
-    `, [params.businessId, params.tenantId, input.name ?? null, Object.prototype.hasOwnProperty.call(input,"businessTypeHint"), input.businessTypeHint ?? null, input.timezone ?? null, input.currency ?? null, input.locale ?? null, input.status ?? null, input.settings ? JSON.stringify(input.settings) : null]);
+    const result = await transaction(async (client) => {
+      if (input.status) {
+        const current=await client.query<{status:string}>("SELECT status FROM businesses WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.businessId,params.tenantId]);
+        if (!current.rows[0]) throw new ApiError(404,"BUSINESS_NOT_FOUND","Business not found.");
+        if (current.rows[0].status!==input.status) await requireBusinessTrainingOff(client,params.tenantId,params.businessId);
+      }
+      return client.query(`
+        UPDATE businesses SET
+          name=COALESCE($3,name),
+          business_type_hint=CASE WHEN $4::boolean THEN $5 ELSE business_type_hint END,
+          timezone=COALESCE($6,timezone),currency=COALESCE($7,currency),
+          locale=COALESCE($8,locale),status=COALESCE($9,status),
+          settings_json=CASE WHEN $10::jsonb IS NULL THEN settings_json ELSE settings_json || $10::jsonb END,
+          updated_at=now()
+        WHERE id=$1 AND tenant_id=$2 RETURNING *
+      `, [params.businessId, params.tenantId, input.name ?? null, Object.prototype.hasOwnProperty.call(input,"businessTypeHint"), input.businessTypeHint ?? null, input.timezone ?? null, input.currency ?? null, input.locale ?? null, input.status ?? null, input.settings ? JSON.stringify(input.settings) : null]);
+    });
     if (!result.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: params.businessId, action: "BUSINESS_UPDATED", resourceType: "business", resourceId: params.businessId, safeDiff: input, request });
     reply.send({ business: result.rows[0] });
@@ -219,6 +227,7 @@ export async function tenantRoutes(app: FastifyInstance) {
     await transaction(async (client) => {
       const business = await client.query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2 FOR UPDATE", [params.businessId, params.tenantId]);
       if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
+      await requireBusinessTrainingOff(client,params.tenantId,params.businessId);
       await client.query("UPDATE businesses SET status='archived',updated_at=now() WHERE id=$1", [params.businessId]);
       await client.query("UPDATE channel_accounts SET active=false,updated_at=now() WHERE business_id=$1", [params.businessId]);
     });
