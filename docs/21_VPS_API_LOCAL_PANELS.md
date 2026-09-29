@@ -58,6 +58,10 @@ npm run smoke:public-auth
 
 It sends Origin-bearing preflight requests through both public panel proxies and one synthetic invalid customer sign-in. Success requires the sign-in route to return `401 INVALID_CREDENTIALS`, rather than a CORS `500`; no account is created and no email is sent. To check another environment, set `CUSTOMER_PANEL_URL` and `ADMIN_PANEL_URL` to its panel URLs before running the command. Password-reset delivery still requires a configured email provider; this smoke check does not verify inbox delivery.
 
+## Production email delivery
+
+Configure either `AUTOMATION_RESEND_API_KEY` or `AUTOMATION_EMAIL_DELIVERY_WEBHOOK_URL` in the VPS `~/srv/.env`, plus `AUTOMATION_EMAIL_FROM` with a sender authorized by the provider. Keep provider credentials in that private environment file and recreate `automation-api` after changing them. With neither provider configured, production signup, password-reset requests, verification resends, and team invitations return `503` before creating accounts or delivery tokens; sign-in remains available. A successful provider API response confirms acceptance by the provider, not delivery to an inbox. Verify inbox delivery with an authorized test recipient before declaring these flows operational.
+
 ## 3. Configure the Customer Panel on the development machine
 
 Create `customer-panel/.env.local`:

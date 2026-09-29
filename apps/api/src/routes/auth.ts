@@ -2,7 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   hashPassword,
-  env,
   query,
   randomToken,
   redis,
@@ -19,6 +18,7 @@ import {
   loadPrincipal,
   requireAuth,
   requireCsrf,
+  requireEmailDelivery,
   sendEmail,
   slugify,
 } from "../lib.js";
@@ -45,6 +45,7 @@ export async function authRoutes(app: FastifyInstance) {
       organizationName: z.string().trim().min(1).max(160),
     }).parse(request.body);
     await authRateLimit(`signup:email:${sha256(input.email)}`,5,3600);
+    requireEmailDelivery();
 
     const token = randomToken(32);
     const passwordHash = await hashPassword(input.password);
@@ -211,6 +212,7 @@ export async function authRoutes(app: FastifyInstance) {
     if (principal.authRealm !== "customer") throw new ApiError(403, "CUSTOMER_SESSION_REQUIRED", "Use the Customer Panel for customer account verification.");
     requireCsrf(request);
     if (principal.emailVerifiedAt) return reply.send({ ok: true });
+    requireEmailDelivery();
     const token = randomToken(32);
     await query(`
       INSERT INTO email_verification_tokens(user_id,token_hash,expires_at)
@@ -227,10 +229,7 @@ export async function authRoutes(app: FastifyInstance) {
       email: z.string().email().transform((v) => v.trim().toLowerCase()),
       realm: z.literal("customer").default("customer"),
     }).parse(request.body);
-    const config = env();
-    if (config.NODE_ENV === "production" && !config.RESEND_API_KEY && !config.EMAIL_DELIVERY_WEBHOOK_URL) {
-      throw new ApiError(503, "PASSWORD_RESET_UNAVAILABLE", "Password reset is temporarily unavailable. Please try again later.");
-    }
+    requireEmailDelivery("PASSWORD_RESET_UNAVAILABLE", "Password reset is temporarily unavailable. Please try again later.");
     await authRateLimit(`reset:${input.realm}:email:${sha256(input.email)}`,5,3600);
     const user = await query<{ id: string }>(`
       SELECT c.user_id AS id
