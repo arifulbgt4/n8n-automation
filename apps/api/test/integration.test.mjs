@@ -215,4 +215,23 @@ test("API auth, tenant isolation, CSRF, rate limiting and Meta webhook idempoten
   const businessesAfterDelete=await jsonRequest(`/v1/tenants/${tenantA}/businesses`,{cookie:cookieA});
   assert.equal(businessesAfterDelete.response.status,200);
   assert.equal(businessesAfterDelete.data.businesses.some(row=>row.id===businessId),false);
+
+  const signoutWithoutCsrf=await jsonRequest("/v1/auth/signout",{method:"POST",cookie:cookieA});
+  assert.equal(signoutWithoutCsrf.response.status,403);
+  assert.equal(signoutWithoutCsrf.data?.error?.code,"CSRF_INVALID");
+  assert.equal((await jsonRequest("/v1/auth/me",{cookie:cookieA})).response.status,200);
+
+  const signout=await jsonRequest("/v1/auth/signout",{
+    method:"POST",cookie:cookieA,headers:{"x-csrf-token":csrfA}
+  });
+  assert.equal(signout.response.status,200,JSON.stringify(signout.data));
+  assert.equal(signout.data.ok,true);
+  const clearedCookies=signout.response.headers.getSetCookie().join("\n");
+  assert.match(clearedCookies,/n8nauto_session=;/);
+  assert.match(clearedCookies,/n8nauto_csrf=;/);
+  assert.equal((await jsonRequest("/v1/auth/me",{cookie:cookieA})).response.status,401);
+
+  const signoutAgain=await jsonRequest("/v1/auth/signout",{method:"POST",cookie:cookieA});
+  assert.equal(signoutAgain.response.status,200,JSON.stringify(signoutAgain.data));
+  assert.match(signoutAgain.response.headers.getSetCookie().join("\n"),/n8nauto_session=;/);
 });
