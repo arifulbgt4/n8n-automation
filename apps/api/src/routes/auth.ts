@@ -162,7 +162,12 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post("/v1/auth/signout", async (request, reply) => {
-    const principal = await requireAuth(request);
+    const principal = await loadPrincipal(request);
+    if (!principal) {
+      clearSessionCookie(reply);
+      return reply.send({ ok: true });
+    }
+    request.auth = { principal };
     requireCsrf(request);
     await query("UPDATE sessions SET revoked_at=now() WHERE id=$1", [principal.sessionId]);
     clearSessionCookie(reply);

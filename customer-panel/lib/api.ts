@@ -77,7 +77,14 @@ export async function signUp(input: { email: string; password: string; name: str
 }
 
 export async function signOut() {
-  try { await api("/v1/auth/signout", { method: "POST" }); } finally { setCsrfToken(null); }
+  try {
+    await api("/v1/auth/signout", { method: "POST" });
+  } catch (error) {
+    // A confirmed expired/revoked session is already signed out. Other errors
+    // must leave the CSRF token intact so the user can retry the request.
+    if (!(error instanceof ApiClientError && error.status === 401 && error.code === "AUTH_REQUIRED")) throw error;
+  }
+  setCsrfToken(null);
 }
 
 export function qs(values: Record<string, string | number | boolean | null | undefined>) {
