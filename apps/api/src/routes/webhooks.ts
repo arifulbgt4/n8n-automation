@@ -6,11 +6,12 @@ import {
   query,
   QUEUES,
   randomToken,
-  sha256,
   transaction,
   type NormalizedInboundMessage,
 } from "@n8n-automation/core";
 import { ApiError, requestId, safeSecretEqual } from "../lib.js";
+import { isNativeHumanReply } from "../native-training-capability.js";
+import { captureTrainingMessage } from "../training-session.js";
 
 function verifyMetaSignature(request: FastifyRequest): boolean {
   const secret = env().META_APP_SECRET;
@@ -79,7 +80,7 @@ async function applyProviderDeliveryEvents(payload:any,correlationId:string){
   }
 }
 
-function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
+export function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
   const messages: NormalizedInboundMessage[] = [];
   if (payload?.object === "whatsapp_business_account") {
     for (const entry of payload.entry ?? []) {
@@ -107,6 +108,22 @@ function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
             },
           });
         }
+        if (change.field === "smb_message_echoes") {
+          for (const echo of value.message_echoes ?? []) {
+            if (["edit","revoke"].includes(String(echo.type))) continue;
+            const mediaNode = echo.image ?? echo.audio ?? echo.video ?? echo.document ?? null;
+            const type = String(echo.type ?? "unknown") as NormalizedInboundMessage["type"];
+            messages.push({
+              platform: "whatsapp",channelExternalId,
+              eventId:String(echo.id ?? randomToken(12)),messageId:String(echo.id ?? randomToken(12)),
+              senderExternalId:String(echo.to ?? "").replace(/^\+/, ""),
+              type:["text","image","audio","video","document"].includes(type)?type:"unknown",
+              text:echo.text?.body ?? mediaNode?.caption ?? null,
+              providerTimestamp:echo.timestamp?new Date(Number(echo.timestamp)*1000).toISOString():null,
+              metadata:{isEcho:true,echoSource:"smb_message_echoes",recipientId:String(echo.to??"").replace(/^\+/, ""),rawType:echo.type},
+            });
+          }
+        }
       }
     }
     return messages.filter((message) => message.channelExternalId && message.senderExternalId);
@@ -115,8 +132,9 @@ function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
   if (payload?.object === "page" || payload?.object === "instagram") {
     const platform = payload.object === "instagram" ? "instagram" : "facebook";
     for (const entry of payload.entry ?? []) {
-      for (const event of entry.messaging ?? []) {
+      for (const event of [...(entry.messaging ?? []),...(entry.standby ?? [])]) {
         if (!event.message) continue;
+        const isEcho = Boolean(event.message.is_echo);
         const attachment = event.message.attachments?.[0];
         let type: NormalizedInboundMessage["type"] = "text";
         if (attachment?.type === "image") type = "image";
@@ -125,16 +143,16 @@ function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
         else if (attachment?.type === "file") type = "document";
         messages.push({
           platform,
-          channelExternalId: String(event.recipient?.id ?? entry.id ?? ""),
+          channelExternalId: String((isEcho ? event.sender?.id : event.recipient?.id) ?? entry.id ?? ""),
           eventId: String(event.message.mid ?? `${entry.id}:${event.timestamp}:${event.sender?.id}`),
           messageId: String(event.message.mid ?? randomToken(12)),
-          senderExternalId: String(event.sender?.id ?? ""),
+          senderExternalId: String((isEcho ? event.recipient?.id : event.sender?.id) ?? ""),
           type,
           text: event.message.text ?? attachment?.payload?.title ?? null,
           providerMediaUrl: attachment?.payload?.url ?? null,
           providerTimestamp: event.timestamp ? new Date(Number(event.timestamp)).toISOString() : null,
           metadata: {
-            isEcho: Boolean(event.message.is_echo),
+            isEcho,
             appId: event.message.app_id ?? null,
             attachments: event.message.attachments ?? [],
             replyTo: event.message.reply_to?.mid ?? null,
@@ -170,69 +188,96 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
   if (isEcho) {
     const knownOutbound = await query("SELECT id,conversation_id FROM messages WHERE channel_account_id=$1 AND platform_message_id=$2 AND direction='OUTBOUND'", [channel.id, message.messageId]);
     if (knownOutbound.rows[0]) return { accepted: true, duplicateEcho: true };
-    const contactId = String((message.metadata as any)?.recipientId ?? message.senderExternalId);
-    const conversation = await query<any>(`
-      SELECT cv.id,cv.contact_id,cv.agent_profile_id
-      FROM conversations cv JOIN contacts ct ON ct.id=cv.contact_id
-      WHERE cv.channel_account_id=$1 AND cv.status='open'
-      ORDER BY cv.last_message_at DESC NULLS LAST LIMIT 1
-    `, [channel.id]);
-    if (conversation.rows[0]) {
-      await transaction(async (client) => {
-        await client.query("UPDATE conversations SET mode='HUMAN',state_version=state_version+1,updated_at=now() WHERE id=$1", [conversation.rows[0].id]);
-        await client.query(`INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,platform_message_id,platform_event_id,direction,sender_type,message_type,text_content,provider_timestamp,delivery_status,metadata)
-          VALUES ($1,$2,$3,$4,$5,$6,'OUTBOUND','HUMAN',$7,$8,$9,'sent',$10::jsonb) ON CONFLICT DO NOTHING`, [channel.tenant_id, channel.business_id, channel.id, conversation.rows[0].id, message.messageId, message.eventId, message.type, message.text ?? null, message.providerTimestamp ?? null, JSON.stringify(message.metadata ?? {})]);
-        const lastTrainer = await client.query<any>(`
-          SELECT m.text_content,m.id,ti.agent_profile_id
-          FROM messages m
-          JOIN trainer_identities ti ON ti.channel_account_id=m.channel_account_id AND ti.tenant_id=m.tenant_id AND ti.active=true
-          WHERE m.conversation_id=$1 AND m.sender_type='TRAINER' AND m.text_content IS NOT NULL
-          ORDER BY m.created_at DESC LIMIT 1
-        `, [conversation.rows[0].id]);
-        if (lastTrainer.rows[0] && message.text) {
-          await client.query(`INSERT INTO training_examples(tenant_id,agent_profile_id,source,input_text,ideal_response,input_json,labels,approval_status)
-            VALUES ($1,$2,'channel_demonstration',$3,$4,$5::jsonb,ARRAY['channel_training'],'pending')`, [channel.tenant_id, lastTrainer.rows[0].agent_profile_id ?? conversation.rows[0].agent_profile_id, lastTrainer.rows[0].text_content, message.text, JSON.stringify({ conversationId: conversation.rows[0].id, inputMessageId: lastTrainer.rows[0].id })]);
-        }
+    if (!isNativeHumanReply(message)) return { accepted: true, ignoredEcho: true };
+    const recordedTrainingEcho = await query("SELECT id FROM training_session_messages WHERE channel_account_id=$1 AND platform_message_id=$2 AND direction='HUMAN' LIMIT 1",[channel.id,message.messageId]);
+    if (recordedTrainingEcho.rows[0]) return { accepted:true,duplicateTrainingEcho:true };
+    const contactId = message.senderExternalId;
+    return transaction(async (client) => {
+      // Serialize webhook classification with Training ON and AI provider sends.
+      await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channel.id]);
+      const contact = await client.query<{id:string}>(`INSERT INTO contacts(tenant_id,business_id,channel_account_id,external_contact_id)
+        VALUES($1,$2,$3,$4) ON CONFLICT(channel_account_id,external_contact_id)
+        DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
+        [channel.tenant_id,channel.business_id,channel.id,contactId]);
+      const inTraining = await client.query(`SELECT id FROM training_sessions
+        WHERE tenant_id=$1 AND channel_account_id=$2 AND
+          $3::timestamptz IS NOT NULL AND created_at<=$3::timestamptz
+          AND (stopped_at IS NULL OR date_trunc('milliseconds',stopped_at)>$3::timestamptz)
+        LIMIT 1`,[channel.tenant_id,channel.id,message.providerTimestamp??null]);
+      let conversation = await client.query<{id:string}>(`SELECT id FROM conversations
+        WHERE channel_account_id=$1 AND contact_id=$2 AND status='open'
+        ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,[channel.id,contact.rows[0].id]);
+      if (!conversation.rows[0]) {
+        conversation = await client.query<{id:string}>(`INSERT INTO conversations(
+          tenant_id,business_id,channel_account_id,contact_id,mode,agent_profile_id,last_message_at
+        ) VALUES($1,$2,$3,$4,$5,$6,now()) RETURNING id`,
+          [channel.tenant_id,channel.business_id,channel.id,contact.rows[0].id,
+            inTraining.rows[0]?"AI":"HUMAN",channel.default_agent_profile_id??null]);
+      }
+      const conversationId=conversation.rows[0].id;
+      const inserted = await client.query<{id:string}>(`INSERT INTO messages(
+        tenant_id,business_id,channel_account_id,conversation_id,platform_message_id,platform_event_id,
+        direction,sender_type,message_type,text_content,provider_timestamp,delivery_status,metadata
+      ) VALUES ($1,$2,$3,$4,$5,$6,'OUTBOUND','HUMAN',$7,$8,$9,'sent',$10::jsonb)
+        ON CONFLICT DO NOTHING RETURNING id`,
+        [channel.tenant_id,channel.business_id,channel.id,conversationId,message.messageId,message.eventId,
+          message.type,message.text??null,message.providerTimestamp??null,JSON.stringify(message.metadata??{})]);
+      if (!inserted.rows[0]) return {accepted:true,duplicateEcho:true};
+      await captureTrainingMessage(client,{
+        tenantId:channel.tenant_id,businessId:channel.business_id,channelId:channel.id,
+        conversationId,sourceMessageId:inserted.rows[0].id,
+        platformMessageId:message.messageId,direction:"HUMAN",text:message.text,providerTimestamp:message.providerTimestamp,
       });
-      return { accepted: true, manualHuman: true };
-    }
-    return { accepted: true, manualHuman: true, conversationMissing: true, contactId };
+      if (!inTraining.rows[0]) {
+        await client.query("UPDATE conversations SET mode='HUMAN',state_version=state_version+1,updated_at=now() WHERE id=$1",[conversationId]);
+      }
+      return {accepted:true,manualHuman:true};
+    });
   }
 
-  const trainer = await query<{ id: string; agent_profile_id: string | null }>(`
-    SELECT id,agent_profile_id FROM trainer_identities
-    WHERE tenant_id=$1 AND active=true
-      AND (channel_account_id=$2 OR channel_account_id IS NULL)
-      AND identifier_hash=$3
-    ORDER BY (channel_account_id IS NOT NULL) DESC LIMIT 1
-  `, [channel.tenant_id, channel.id, sha256(message.senderExternalId)]);
-  const senderType = trainer.rows[0] ? "TRAINER" : "CONTACT";
+  const recordedTrainingMessage = await query("SELECT id FROM training_session_messages WHERE channel_account_id=$1 AND platform_message_id=$2 AND direction='CONTACT' LIMIT 1",[channel.id,message.messageId]);
+  if (recordedTrainingMessage.rows[0]) return { accepted:true,duplicateTrainingMessage:true };
+
+  const senderType = "CONTACT";
 
   const created = await transaction(async (client) => {
+    await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channel.id]);
+    const contact = await client.query<{ id: string }>(`INSERT INTO contacts(tenant_id,business_id,channel_account_id,external_contact_id)
+      VALUES ($1,$2,$3,$4) ON CONFLICT(channel_account_id,external_contact_id)
+      DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
+      [channel.tenant_id, channel.business_id, channel.id, message.senderExternalId]);
     const duplicate = await client.query("SELECT id,conversation_id FROM messages WHERE channel_account_id=$1 AND platform_message_id=$2", [channel.id, message.messageId]);
     if (duplicate.rows[0]) return { duplicate: true, messageId: duplicate.rows[0].id, conversationId: duplicate.rows[0].conversation_id };
-    let contact = await client.query<{ id: string }>("SELECT id FROM contacts WHERE channel_account_id=$1 AND external_contact_id=$2", [channel.id, message.senderExternalId]);
-    if (!contact.rows[0]) {
-      contact = await client.query<{ id: string }>(`INSERT INTO contacts(tenant_id,business_id,channel_account_id,external_contact_id) VALUES ($1,$2,$3,$4) RETURNING id`, [channel.tenant_id, channel.business_id, channel.id, message.senderExternalId]);
-    }
     let conversation = await client.query<any>(`SELECT id,mode,agent_profile_id FROM conversations WHERE channel_account_id=$1 AND contact_id=$2 AND status='open' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [channel.id, contact.rows[0].id]);
     if (!conversation.rows[0]) {
       conversation = await client.query<any>(`
         INSERT INTO conversations(tenant_id,business_id,channel_account_id,contact_id,mode,agent_profile_id,last_message_at)
         VALUES ($1,$2,$3,$4,$5,$6,now()) RETURNING id,mode,agent_profile_id
-      `, [channel.tenant_id, channel.business_id, channel.id, contact.rows[0].id, senderType === "TRAINER" ? "PAUSED" : "AI", trainer.rows[0]?.agent_profile_id ?? channel.default_agent_profile_id ?? null]);
+      `, [channel.tenant_id, channel.business_id, channel.id, contact.rows[0].id, "AI", channel.default_agent_profile_id ?? null]);
     }
     const inserted = await client.query<{ id: string }>(`
       INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,platform_message_id,platform_event_id,direction,sender_type,message_type,text_content,provider_timestamp,delivery_status,metadata)
       VALUES ($1,$2,$3,$4,$5,$6,'INBOUND',$7,$8,$9,$10,'received',$11::jsonb)
-      RETURNING id
+      ON CONFLICT DO NOTHING RETURNING id
     `, [channel.tenant_id, channel.business_id, channel.id, conversation.rows[0].id, message.messageId, message.eventId, senderType, message.type, message.text ?? null, message.providerTimestamp ?? null, JSON.stringify({
       ...message.metadata,
       providerMediaId: message.providerMediaId,
       providerMediaUrl: message.providerMediaUrl,
       mediaIngestStatus: ["image","audio","video","document"].includes(message.type) ? "pending" : "none",
     })]);
+    if (!inserted.rows[0]) return { duplicate: true, messageId: null, conversationId: conversation.rows[0].id };
     await client.query("UPDATE conversations SET last_message_at=now(),updated_at=now() WHERE id=$1", [conversation.rows[0].id]);
+    const trainingCaptured = await captureTrainingMessage(client,{
+      tenantId:channel.tenant_id,businessId:channel.business_id,channelId:channel.id,
+      conversationId:conversation.rows[0].id,sourceMessageId:inserted.rows[0].id,
+      platformMessageId:message.messageId,direction:"CONTACT",text:message.text,providerTimestamp:message.providerTimestamp,
+    });
+    let trainingSuppressed = false;
+    if (!trainingCaptured) {
+      const activeTraining = await client.query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channel.id]);
+      trainingSuppressed = Boolean(activeTraining.rows[0]);
+      if (trainingSuppressed) await client.query(`UPDATE messages SET metadata=metadata||'{"trainingSuppressed":true}'::jsonb WHERE id=$1`,[inserted.rows[0].id]);
+    }
     if (senderType === "CONTACT") {
       await client.query(
         "UPDATE followup_jobs SET status='cancelled',policy_snapshot=policy_snapshot||'{\"cancelled_by_inbound\":true}'::jsonb,updated_at=now() WHERE conversation_id=$1 AND status IN ('scheduled','queued')",
@@ -241,7 +286,7 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
     }
     await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key)
       VALUES ($1,$2,$3,$4,'inbound_message',1,'message',$5,$6) ON CONFLICT DO NOTHING`, [channel.tenant_id, channel.business_id, channel.id, conversation.rows[0].id, correlationId, `inbound:${message.messageId}`]);
-    return { duplicate: false, messageId: inserted.rows[0].id, conversationId: conversation.rows[0].id, mode: conversation.rows[0].mode, senderType };
+    return { duplicate: false, messageId: inserted.rows[0].id, conversationId: conversation.rows[0].id, mode: conversation.rows[0].mode, senderType, trainingCaptured, trainingSuppressed };
   });
 
   if (!created.duplicate && ["image","audio","video","document"].includes(message.type) && (message.providerMediaId || message.providerMediaUrl)) {
@@ -260,7 +305,8 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
     });
   }
 
-  if (!created.duplicate && created.senderType !== "TRAINER" && created.mode === "AI") {
+  const trainingActive = await query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channel.id]);
+  if (!created.duplicate && !created.trainingCaptured && !created.trainingSuppressed && !trainingActive.rows[0] && created.mode === "AI") {
     const jobId = `inbound:${created.conversationId}:${message.messageId}`;
     await enqueue(QUEUES.inbound, {
       jobId,

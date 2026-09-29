@@ -65,7 +65,12 @@ jobs:
             super-admin-panel/package-lock.json
 
       - name: Install dependencies
-        run: npm install --include=dev
+        run: |
+          npm install --include=dev
+          # The root lockfile was generated on macOS. Each Next app's lockfile
+          # includes its Linux-native Lightning CSS and Tailwind binaries.
+          npm ci --prefix customer-panel --include=dev --workspaces=false
+          npm ci --prefix super-admin-panel --include=dev --workspaces=false
 
       - name: Run database migrations
         run: npm run db:migrate

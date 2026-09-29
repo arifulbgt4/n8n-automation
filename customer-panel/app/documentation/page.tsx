@@ -87,10 +87,11 @@ const sections = [
     title: "8. Training",
     summary: "Teach the AI from real examples and improve its response behavior over time.",
     steps: [
-      "Use Training to add example conversations or reusable training material for the selected business.",
-      "Prefer examples that show the exact response style and business rules you want the AI to follow.",
-      "Review generated or edited training instructions before publishing a new version.",
-      "Update training when products, policies, delivery rules, prices or business procedures change.",
+      "Assign an agent to a connected channel in AI Channel Setup, then select that agent and channel in Training.",
+      "Turn Training on to pause AI replies and automated follow-ups for the channel. Reply to customers from the original Page inbox; only messages exchanged during that session are captured.",
+      "Turn Training off to resume AI with the current published prompt. Any separately handed-off conversations remain in Human or Paused mode.",
+      "Review the captured examples and generated prompt candidate. Publish the candidate only when its behavior is right for the business.",
+      "Native reply capture must be verified for a channel before Training can be turned on; the Training screen explains unavailable channels.",
     ],
   },
   {

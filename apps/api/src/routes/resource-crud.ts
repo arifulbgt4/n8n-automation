@@ -9,6 +9,7 @@ import {
   requireCsrf,
   requireRecentPlatformAdmin,
 } from "../lib.js";
+import { requireAgentTrainingOff, requireBusinessTrainingOff, requireChannelTrainingOff } from "../training-guards.js";
 
 /**
  * Destructive/resource-lifecycle endpoints that complement the create/update
@@ -30,6 +31,7 @@ export async function resourceCrudRoutes(app: FastifyInstance) {
         [params.businessId, params.tenantId],
       );
       if (!business.rows[0] || business.rows[0].status === "archived") throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
+      await requireBusinessTrainingOff(client,params.tenantId,params.businessId);
 
       const channels = await client.query<{ id: string }>(
         "SELECT id FROM channel_accounts WHERE business_id=$1 AND tenant_id=$2",
@@ -75,6 +77,9 @@ export async function resourceCrudRoutes(app: FastifyInstance) {
     requireCsrf(request);
 
     await transaction(async (client) => {
+      const locked=await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.channelId,params.tenantId]);
+      if (!locked.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
+      await requireChannelTrainingOff(client,params.tenantId,params.channelId);
       await client.query("DELETE FROM channel_credentials WHERE channel_account_id=$1", [params.channelId]);
       await client.query("UPDATE followup_policies SET active=false,updated_at=now() WHERE tenant_id=$1 AND channel_account_id=$2", [params.tenantId, params.channelId]);
       await client.query("UPDATE followup_jobs SET status='cancelled',updated_at=now() WHERE tenant_id=$1 AND channel_account_id=$2 AND status IN ('scheduled','queued')", [params.tenantId, params.channelId]);
@@ -105,6 +110,7 @@ export async function resourceCrudRoutes(app: FastifyInstance) {
     requireCsrf(request);
 
     await transaction(async (client) => {
+      await requireAgentTrainingOff(client,params.tenantId,params.agentId);
       await client.query("UPDATE channel_accounts SET default_agent_profile_id=NULL,updated_at=now() WHERE tenant_id=$1 AND default_agent_profile_id=$2", [params.tenantId, params.agentId]);
       await client.query("UPDATE conversations SET agent_profile_id=NULL,mode='PAUSED',state_version=state_version+1,updated_at=now() WHERE tenant_id=$1 AND agent_profile_id=$2 AND status='open'", [params.tenantId, params.agentId]);
       await client.query("DELETE FROM agent_channel_links WHERE agent_profile_id=$1", [params.agentId]);

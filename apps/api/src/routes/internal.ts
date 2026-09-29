@@ -199,6 +199,11 @@ export async function internalRoutes(app: FastifyInstance) {
     const input = z.object({ turnId: z.string().uuid() }).parse(request.body);
     const context = await runtimeContext(input.turnId);
     const row = context.row;
+    const training = await query(`SELECT id FROM training_sessions WHERE channel_account_id=$1 AND (
+      status='open' OR created_at >= $2::timestamptz OR
+      (created_at <= $2::timestamptz AND stopped_at>$2::timestamptz)
+    ) LIMIT 1`,[row.channel_account_id,row.created_at]);
+    if (training.rows[0]) throw new ApiError(409,"AI_SUPPRESSED_BY_TRAINING","AI responses are paused while channel training is on.");
     await assertMonthlyUsageLimit(row.tenant_id, "ai_call", "aiTurnsPerMonth");
     await assertMonthlyAiAllowance(row.tenant_id);
     if (row.mode !== "AI" || row.conversation_status !== "open") throw new ApiError(409, "CONVERSATION_NOT_AI_ELIGIBLE", "Conversation is not eligible for an AI response.");
@@ -255,6 +260,16 @@ export async function internalRoutes(app: FastifyInstance) {
     const actions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 5) : [];
     if (!messages.length && !parsed.handoff) messages.push({ type: "text", text: "I’m unable to answer that right now. A team member can help if needed." });
     await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:"DEFAULT_CHAT",model,usage:result.usage,correlationId:requestId(request),idempotencyKey:`ai:${input.turnId}:${row.active_prompt_version_id}`});
+    const stillEligible = await query<{mode:string;status:string;state_version:string}>(
+      "SELECT mode,status,state_version FROM conversations WHERE id=$1 AND tenant_id=$2",[row.conversation_id,row.tenant_id]);
+    const nowTraining = await query(`SELECT id FROM training_sessions WHERE channel_account_id=$1 AND (
+      status='open' OR created_at >= $2::timestamptz OR
+      (created_at <= $2::timestamptz AND stopped_at>$2::timestamptz)
+    ) LIMIT 1`,[row.channel_account_id,row.created_at]);
+    if (nowTraining.rows[0] || stillEligible.rows[0]?.mode !== "AI" ||
+        stillEligible.rows[0]?.status !== "open" || Number(stillEligible.rows[0]?.state_version) !== Number(row.state_version)) {
+      throw new ApiError(409,"AI_SUPPRESSED_BY_TRAINING","The conversation changed while the AI response was generated.");
+    }
     reply.send({
       turnId: input.turnId,
       tenantId: row.tenant_id,
@@ -295,6 +310,21 @@ export async function internalRoutes(app: FastifyInstance) {
     if (!agent.rows[0]?.capabilities?.includes(capabilityMap[input.tool])) throw new ApiError(403, "CAPABILITY_DISABLED", `Capability ${capabilityMap[input.tool]} is not enabled.`);
     const existing = await query<{ response_json: any; status: string }>("SELECT response_json,status FROM idempotency_keys WHERE tenant_id=$1 AND scope='agent_action' AND key=$2", [input.tenantId, input.idempotencyKey]);
     if (existing.rows[0]?.status === "completed") return reply.send(existing.rows[0].response_json);
+    const turnId = input.idempotencyKey.match(/^turn:([0-9a-fA-F-]{36}):/)?.[1];
+    if (!turnId || !z.string().uuid().safeParse(turnId).success) {
+      throw new ApiError(400,"ACTION_TURN_REQUIRED","An AI action must identify its source turn.");
+    }
+    const sourceTurn = await query<{created_at:Date}>(
+      "SELECT created_at FROM conversation_turns WHERE id=$1 AND tenant_id=$2 AND conversation_id=$3",
+      [turnId,input.tenantId,input.conversationId]);
+    if (!sourceTurn.rows[0]) throw new ApiError(404,"TURN_NOT_FOUND","Source turn not found.");
+    const training = await query(`SELECT id FROM training_sessions WHERE channel_account_id=$1 AND (
+      status='open' OR created_at >= $2::timestamptz OR
+      (created_at <= $2::timestamptz AND stopped_at>$2::timestamptz)
+    ) LIMIT 1`,[input.channelAccountId,sourceTurn.rows[0].created_at]);
+    if (conversation.rows[0].mode !== "AI" || conversation.rows[0].status !== "open" || training.rows[0]) {
+      throw new ApiError(409,"AI_SUPPRESSED_BY_TRAINING","AI actions are paused while channel training is on or the source turn is stale.");
+    }
     if (input.tool === "schedule_followup") {
       const delayMinutes = Math.max(1, Math.min(60 * 24 * 30, Number(input.arguments.delayMinutes ?? 60)));
       const message = String(input.arguments.message ?? "").trim();
@@ -344,6 +374,10 @@ export async function internalRoutes(app: FastifyInstance) {
     if (!cv.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
     if (cv.rows[0].business_id !== input.businessId) throw new ApiError(400, "BUSINESS_SCOPE_INVALID", "Conversation does not belong to the selected business.");
     if (input.senderType === "AI" && cv.rows[0].mode !== "AI") throw new ApiError(409, "AI_SUPPRESSED_BY_MODE", "AI delivery is blocked because the conversation is not in AI mode.");
+    if (input.senderType !== "HUMAN") {
+      const training = await query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[input.channelAccountId]);
+      if (training.rows[0]) throw new ApiError(409,"AI_SUPPRESSED_BY_TRAINING","AI delivery is paused while channel training is on.");
+    }
     if (input.stateVersion && Number(cv.rows[0].state_version) !== input.stateVersion) throw new ApiError(409, "CONVERSATION_VERSION_CHANGED", "Conversation state changed while the response was being generated.");
     const logicalResponseId = input.logicalResponseId ?? randomToken(18);
     let i = 0;

@@ -101,7 +101,7 @@ Configure:
 - channel-specific limits below ceilings.
 - follow-up policy.
 - human handoff behavior.
-- trainer identities.
+- native channel training availability.
 - media send preferences.
 - connection/test status.
 
@@ -224,8 +224,9 @@ Prompt versions support draft, test, publish, archive, rollback. Mutable busines
 
 Supports:
 
-- trainer identities by channel.
-- detected training conversations.
+- existing agent/channel selection and a session ON/OFF control.
+- captured customer/native-owner exchanges within the active session only.
+- clear provider capability status before enabling native reply capture.
 - approve/reject examples.
 - simulator customer message + ideal response pairs.
 - text/media examples.
@@ -234,7 +235,7 @@ Supports:
 - candidate diff.
 - sandbox test.
 - publish/discard/rollback.
-- optional explicit auto-publish policy.
+- explicit review/publish for native channel session candidates.
 
 Training is behavior/prompt synthesis by default, not foundation-model fine-tuning.
 

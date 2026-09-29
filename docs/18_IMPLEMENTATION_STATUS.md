@@ -10,7 +10,7 @@ The repository now contains:
 - BullMQ worker service under `apps/worker`.
 - shared TypeScript/core package under `packages/core`.
 - PostgreSQL migrations, pgvector schema, audit/outbox/idempotency, billing-ready records, automation deployment metadata, dynamic data, messaging, media, AI/training, business-action and retention tables.
-- Customer Panel covering authentication, businesses, Meta/WhatsApp channels, dynamic data, inbox/handoff, orders/bookings/leads/quotes/support, AI providers/agents/templates, trainer identities, Training Studio, RAG knowledge, media, analytics, team access, follow-ups, quotas, billing history, retention, export and deletion.
+- Customer Panel covering authentication, businesses, Meta/WhatsApp channels, dynamic data, inbox/handoff, orders/bookings/leads/quotes/support, AI providers/agents/templates, agent/channel Training Studio sessions, RAG knowledge, media, analytics, team access, follow-ups, quotas, billing history, retention, export and deletion.
 - Super Admin Panel covering tenants, plans/subscriptions/credits, queue/dead-letter control, n8n bundle/deployment health, infrastructure health, API metrics, AI registry/templates, feature flags and audit/security.
 - server-side secret encryption/masking, CSRF protection, separate customer/admin auth realms, tenant/business authorization, custom-provider SSRF controls and webhook HMAC verification. Super Admin MFA enrollment state is cleared and MFA enforcement is disabled by the current product policy.
 - Redis namespacing, aggregation, locks, atomic rate limiting, queue retry/backoff/jitter, priorities, dead-letter classification, worker heartbeat, outbox recovery and analytics rollups.
@@ -20,6 +20,8 @@ The repository now contains:
 - multimodal image/audio handling, pgvector RAG, versioned prompt training/candidates, validation, optional guarded auto-publish and rollback.
 - sanitized modular n8n JSON artifacts, manifest validation, deployment CLI, manual GitHub Action and deployment metadata recording.
 - automated CI for migrations, workflow validation, TypeScript, tests and builds.
+
+Channel-scoped Training ON/OFF, native Page Inbox-origin reply capture, durable session examples, and manual candidate review are implemented in the application source. PostgreSQL migrations and database-backed ON/OFF, webhook, AI-enqueue suppression, cumulative-example, out-of-order callback, rejected-example preservation, and stale-candidate tests passed against disposable PostgreSQL 17/Redis 7. Application revision `c36a6c5` is deployed to the VPS; migration 016, service health, panel routing, live Facebook Page subscription capability, signed/unsigned empty webhook checks, and VSM smoke checks passed. A real Page Inbox/customer exchange during Training ON remains **SKIPPED** until a designated test-safe Page and tester conversation are available. Human-versus-Inbox-automation attribution also requires live verification. WhatsApp Business App Coexistence onboarding and reliable Instagram native reply attribution remain provider capability gates; the Training UI reports these channels as unavailable until verified. See [native channel training](28_NATIVE_CHANNEL_TRAINING.md) for the evidence and acceptance matrix.
 
 ## Automated verification
 
