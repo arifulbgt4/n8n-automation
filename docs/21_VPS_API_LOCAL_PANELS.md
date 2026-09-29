@@ -32,21 +32,35 @@ Expected readiness response:
 {"status":"ready"}
 ```
 
-## 2. Verify VPS browser origins
+## 2. Configure and verify VPS browser origins
 
-The API CORS configuration must allow the local panels. In the VSM `.env` keep:
+The API CORS configuration must allow the deployed HTTPS panels. In the VSM `.env` use the public panel origins as the primary URLs. These URLs also appear in customer verification, invitation, and password-reset links. Keep localhost in the additional allowlists only if you use local panels against the VPS API:
 
 ```dotenv
-AUTOMATION_CUSTOMER_APP_ORIGIN=http://localhost:3000
-AUTOMATION_ADMIN_APP_ORIGIN=http://localhost:3001
+AUTOMATION_CUSTOMER_APP_ORIGIN=https://app.openmusk.store
+AUTOMATION_ADMIN_APP_ORIGIN=https://saas-admin.openmusk.store
+AUTOMATION_CUSTOMER_APP_ALLOWED_ORIGINS=http://localhost:3000
+AUTOMATION_ADMIN_APP_ALLOWED_ORIGINS=http://localhost:3001
 ```
 
-If either value changes on the VPS, recreate the API service after editing `~/srv/.env`:
+After changing these values, recreate only the API service:
 
 ```bash
 cd ~/srv
-docker compose up -d --force-recreate automation-api
+docker compose up -d --no-deps --force-recreate automation-api
 ```
+
+From this repository, run the public auth smoke check after deployment:
+
+```bash
+npm run smoke:public-auth
+```
+
+It sends Origin-bearing preflight requests through both public panel proxies and one synthetic invalid customer sign-in. Success requires the sign-in route to return `401 INVALID_CREDENTIALS`, rather than a CORS `500`; no account is created and no email is sent. To check another environment, set `CUSTOMER_PANEL_URL` and `ADMIN_PANEL_URL` to its panel URLs before running the command. Password-reset delivery still requires a configured email provider; this smoke check does not verify inbox delivery.
+
+## Production email delivery
+
+Configure either `AUTOMATION_RESEND_API_KEY` or `AUTOMATION_EMAIL_DELIVERY_WEBHOOK_URL` in the VPS `~/srv/.env`, plus `AUTOMATION_EMAIL_FROM` with a sender authorized by the provider. Keep provider credentials in that private environment file and recreate `automation-api` after changing them. With neither provider configured, production signup, password-reset requests, verification resends, and team invitations return `503` before creating accounts or delivery tokens; sign-in remains available. A successful provider API response confirms acceptance by the provider, not delivery to an inbox. Verify inbox delivery with an authorized test recipient before declaring these flows operational.
 
 ## 3. Configure the Customer Panel on the development machine
 
@@ -156,14 +170,14 @@ Do not change n8n to call `https://api.openmusk.store` unless there is a specifi
 
 Cookies are scoped to host, not TCP port. `localhost:3000` and `localhost:3001` therefore share the same host cookie namespace. If you need a customer user and a different Super Admin logged in at the same time, use separate browser profiles/incognito contexts.
 
-## 11. Production panel deployment later
+## 11. Production panel configuration
 
 When a panel is deployed behind HTTPS instead of localhost:
 
 - keep `NEXT_PUBLIC_API_URL=/api`;
 - set `API_PROXY_TARGET=https://api.openmusk.store`;
 - remove `API_PROXY_INSECURE_COOKIES=true` (or set it to `false`);
-- change the API's allowed Customer/Admin origins to the actual HTTPS panel origins;
+- set the API's primary Customer/Admin origins to the actual HTTPS panel origins, as shown in section 2;
 - recreate `automation-api` after changing those origins.
 
 Never enable insecure-cookie rewriting for an internet-facing production panel.

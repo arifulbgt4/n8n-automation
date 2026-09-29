@@ -13,6 +13,7 @@ import {
   createSession,
   requireAuth,
   requireCsrf,
+  requireEmailDelivery,
   requireTenant,
   sendEmail,
 } from "../lib.js";
@@ -92,6 +93,7 @@ export async function invitationRoutes(app: FastifyInstance) {
     }
     const member = await query("SELECT 1 FROM users u JOIN tenant_memberships tm ON tm.user_id=u.id WHERE tm.tenant_id=$1 AND lower(u.email)=lower($2)", [tenantId, input.email]);
     if (member.rowCount) throw new ApiError(409, "ALREADY_MEMBER", "This email is already a tenant member.");
+    requireEmailDelivery();
 
     const token = randomToken(32);
     const created = await transaction(async (client) => {

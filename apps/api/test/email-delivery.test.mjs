@@ -69,3 +69,11 @@ test("sendEmail keeps the legacy webhook as a fallback", async () => {
     text: "Accept the invitation.",
   });
 });
+
+test("sendEmail fails closed in production when no provider is configured", async () => {
+  configureEmail({ NODE_ENV: "production" });
+  await assert.rejects(
+    sendEmail("recipient@example.com", "Verification", "Verify your account."),
+    (error) => error?.statusCode === 503 && error?.code === "EMAIL_DELIVERY_UNAVAILABLE",
+  );
+});

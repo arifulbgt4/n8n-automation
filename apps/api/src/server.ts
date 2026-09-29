@@ -62,7 +62,7 @@ await app.register(cookie);
 await app.register(cors, {
   origin(origin, callback) {
     if (!origin || allowedBrowserOrigins.has(origin)) return callback(null, true);
-    callback(new Error("Origin not allowed"), false);
+    callback(new ApiError(403, "ORIGIN_NOT_ALLOWED", "This origin is not allowed."), false);
   },
   credentials: true,
   allowedHeaders: ["content-type", "authorization", "idempotency-key", config.CSRF_HEADER_NAME, "x-business-id", "x-admin-tenant-access"],

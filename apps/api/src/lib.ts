@@ -279,7 +279,18 @@ export async function audit(input: {
   ]);
 }
 
+export function requireEmailDelivery(
+  code = "EMAIL_DELIVERY_UNAVAILABLE",
+  message = "Email delivery is temporarily unavailable. Please try again later.",
+): void {
+  const config = env();
+  if (config.NODE_ENV === "production" && !config.RESEND_API_KEY && !config.EMAIL_DELIVERY_WEBHOOK_URL) {
+    throw new ApiError(503, code, message);
+  }
+}
+
 export async function sendEmail(to: string, subject: string, text: string): Promise<void> {
+  requireEmailDelivery();
   const config = env();
   if (config.RESEND_API_KEY) {
     const response = await fetch(`${config.RESEND_API_URL.replace(/\/+$/, "")}/emails`, {
