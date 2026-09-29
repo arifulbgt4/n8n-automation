@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   hashPassword,
+  env,
   query,
   randomToken,
   redis,
@@ -226,6 +227,10 @@ export async function authRoutes(app: FastifyInstance) {
       email: z.string().email().transform((v) => v.trim().toLowerCase()),
       realm: z.literal("customer").default("customer"),
     }).parse(request.body);
+    const config = env();
+    if (config.NODE_ENV === "production" && !config.RESEND_API_KEY && !config.EMAIL_DELIVERY_WEBHOOK_URL) {
+      throw new ApiError(503, "PASSWORD_RESET_UNAVAILABLE", "Password reset is temporarily unavailable. Please try again later.");
+    }
     await authRateLimit(`reset:${input.realm}:email:${sha256(input.email)}`,5,3600);
     const user = await query<{ id: string }>(`
       SELECT c.user_id AS id
