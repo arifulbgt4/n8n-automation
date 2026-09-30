@@ -1,11 +1,53 @@
 import type { FastifyInstance } from "fastify";
+import type pg from "pg";
 import { z } from "zod";
 import { enqueue, query, QUEUES, transaction } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
 import { inspectNativeTrainingCapability } from "../native-training-capability.js";
-import { syncTrainingExamples, trainingDatasetState } from "../training-session.js";
+import { restoreTrainingConversations, syncTrainingExamples, trainingDatasetState } from "../training-session.js";
 
 const scopeSchema = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid() });
+
+async function createSessionTrainingJob(client: pg.PoolClient, tenantId: string, agent: any, session: any) {
+  const dataset = await trainingDatasetState(client,tenantId,agent.id,false,"native_channel_training");
+  if (!dataset.exampleIds.length) return null;
+  const captured = await client.query<{count:number}>(
+    "SELECT count(*)::int AS count FROM training_session_messages WHERE training_session_id=$1",[session.id]);
+  const collectionVersions = await client.query<{id:string;schema_version:number;updated_at:Date}>(`
+    SELECT c.id,c.schema_version,c.updated_at FROM agent_collection_links acl
+    JOIN collections c ON c.id=acl.collection_id
+    WHERE acl.tenant_id=$1 AND c.tenant_id=$1 AND c.business_id=$2
+      AND acl.agent_profile_id=$3 AND c.status='active' ORDER BY c.id
+  `,[tenantId,agent.business_id,agent.id]);
+  const snapshot = {exampleIds:dataset.exampleIds,datasetDigest:dataset.datasetDigest,
+    datasetSource:"native_channel_training",basePromptVersionId:agent.active_prompt_version_id,
+    collectionVersions:collectionVersions.rows.map((row)=>({id:row.id,schemaVersion:Number(row.schema_version),updatedAt:row.updated_at})),
+    capabilities:agent.capabilities??[],behaviorSettings:agent.behavior_settings??{},
+    trainingSessionId:session.id,sessionEventCount:captured.rows[0]?.count??0,
+    publishPolicy:"auto_session",capturedAt:new Date().toISOString()};
+  const job = await client.query<{id:string}>(`
+    INSERT INTO training_jobs(tenant_id,agent_profile_id,base_prompt_version_id,input_snapshot)
+    VALUES($1,$2,$3,$4::jsonb) RETURNING id
+  `,[tenantId,agent.id,agent.active_prompt_version_id,JSON.stringify(snapshot)]);
+  await client.query("UPDATE training_sessions SET candidate_training_job_id=$2 WHERE id=$1",[session.id,job.rows[0].id]);
+  await client.query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload)
+    VALUES($1,'TRAINING_JOB_QUEUED',$2,'training_job',$3,$4::jsonb)`,
+    [tenantId,agent.business_id,job.rows[0].id,JSON.stringify({agentProfileId:agent.id})]);
+  return job.rows[0].id;
+}
+
+async function enqueueSessionTrainingJob(jobId: string, tenantId: string, agent: any, request: any) {
+  const queuedJob = await query<{status:string}>("SELECT status FROM training_jobs WHERE id=$1 AND tenant_id=$2",[jobId,tenantId]);
+  if (queuedJob.rows[0]?.status !== "queued") return;
+  try {
+    await enqueue(QUEUES.training,{jobId,jobType:"PROMPT_SYNTHESIS",tenantId,
+      businessId:agent.business_id,correlationId:requestId(request),idempotencyKey:`training:${jobId}`,
+      createdAt:new Date().toISOString(),payload:{trainingJobId:jobId,agentProfileId:agent.id}});
+  } catch (error) {
+    request.log.warn({jobId,error:error instanceof Error?error.message:String(error)},
+      "Training job enqueue will be retried from the outbox");
+  }
+}
 
 async function scopedAgent(request: any, tenantId: string, agentId: string) {
   await requireTenant(request, tenantId, ["OWNER", "ADMIN", "STAFF"]);
@@ -32,7 +74,7 @@ export async function trainingSessionRoutes(app: FastifyInstance) {
       SELECT ts.*,
         (SELECT count(*)::int FROM training_session_messages sm WHERE sm.training_session_id=ts.id) AS captured_count,
         (SELECT count(*)::int FROM training_examples te WHERE te.training_session_id=ts.id) AS example_count,
-        tj.status AS job_status,tj.candidate_prompt_version_id
+        tj.status AS job_status,tj.error AS job_error,tj.candidate_prompt_version_id
       FROM training_sessions ts LEFT JOIN training_jobs tj ON tj.id=ts.candidate_training_job_id
       WHERE ts.tenant_id=$1 AND ts.agent_profile_id=$2 AND ts.channel_account_id=$3
       ORDER BY ts.created_at DESC LIMIT 50
@@ -72,14 +114,15 @@ export async function trainingSessionRoutes(app: FastifyInstance) {
       if (lockedAgent.rows[0]?.status !== "active" || !lockedAgent.rows[0]?.active_prompt_version_id) {
         throw new ApiError(409,"AGENT_NOT_READY","Activate and publish the agent before training.");
       }
-      const existing = await client.query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open'",[channel.id]);
-      if (existing.rows[0]) throw new ApiError(409,"TRAINING_ALREADY_ON","This channel already has an active training session.");
+      const existing = await client.query("SELECT id FROM training_sessions WHERE agent_profile_id=$1 AND status IN ('open','finalizing')",[agent.id]);
+      if (existing.rows[0]) throw new ApiError(409,"TRAINING_ALREADY_ON","This agent already has an active or finalizing training session. Finish it before training another connected channel.");
       const created = await client.query<any>(`
         INSERT INTO training_sessions(tenant_id,business_id,agent_profile_id,channel_account_id,status,created_by,metadata,created_at,updated_at)
         VALUES($1,$2,$3,$4,'open',$5,$6::jsonb,clock_timestamp(),clock_timestamp()) RETURNING *
       `,[params.tenantId,agent.business_id,agent.id,channel.id,principal.userId,JSON.stringify({nativeSource:capability.source})]);
-      await client.query(`UPDATE conversations SET state_version=state_version+1,updated_at=now()
-        WHERE tenant_id=$1 AND channel_account_id=$2 AND status='open' AND mode='AI'`,[params.tenantId,channel.id]);
+      await client.query(`UPDATE conversations SET mode='HUMAN',state_version=state_version+1,
+        escalation_metadata=escalation_metadata||jsonb_build_object('trainingAutoHumanSessionId',$3::text),updated_at=now()
+        WHERE tenant_id=$1 AND channel_account_id=$2 AND status='open' AND mode='AI'`,[params.tenantId,channel.id,created.rows[0].id]);
       await client.query(`UPDATE followup_jobs SET status='cancelled',updated_at=now()
         WHERE tenant_id=$1 AND channel_account_id=$2 AND status IN ('scheduled','queued')`,[params.tenantId,channel.id]);
       return created.rows[0];
@@ -96,52 +139,82 @@ export async function trainingSessionRoutes(app: FastifyInstance) {
     const agent = await scopedAgent(request,params.tenantId,params.agentId);
     requireCsrf(request);
     const result = await transaction(async (client) => {
+      const scoped = await client.query<{channel_account_id:string|null}>(
+        "SELECT channel_account_id FROM training_sessions WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3",
+        [params.sessionId,params.tenantId,params.agentId]);
+      if (!scoped.rows[0]?.channel_account_id) throw new ApiError(404,"TRAINING_SESSION_NOT_FOUND","Training session not found.");
+      await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[scoped.rows[0].channel_account_id]);
+      const currentAgent = await client.query<any>(
+        "SELECT * FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.agentId,params.tenantId]);
       const session = await client.query<any>(`
         SELECT * FROM training_sessions WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 FOR UPDATE
       `,[params.sessionId,params.tenantId,params.agentId]);
       if (!session.rows[0]?.channel_account_id) throw new ApiError(404,"TRAINING_SESSION_NOT_FOUND","Training session not found.");
       if (session.rows[0].status !== "open") return {session:session.rows[0],jobId:session.rows[0].candidate_training_job_id as string|null,created:false};
       const stopped = await client.query<any>(`
-        UPDATE training_sessions SET status='closed',stopped_at=clock_timestamp(),updated_at=clock_timestamp()
+        UPDATE training_sessions SET status='finalizing',stopped_at=clock_timestamp(),updated_at=clock_timestamp()
         WHERE id=$1 RETURNING *
       `,[params.sessionId]);
       await syncTrainingExamples(client,params.sessionId);
       const sessionExamples = await client.query<{count:number}>(
-        "SELECT count(*)::int AS count FROM training_examples WHERE training_session_id=$1 AND approval_status='approved'",[params.sessionId]);
-      if (!sessionExamples.rows[0]?.count) return {session:stopped.rows[0],jobId:null,created:true};
-      const dataset = await trainingDatasetState(client,params.tenantId,params.agentId);
-      if (!dataset.exampleIds.length) return {session:stopped.rows[0],jobId:null,created:true};
-      const captured = await client.query<{count:number}>(
-        "SELECT count(*)::int AS count FROM training_session_messages WHERE training_session_id=$1",[params.sessionId]);
-      const collectionVersions = await client.query<{id:string;schema_version:number;updated_at:Date}>(`
-        SELECT c.id,c.schema_version,c.updated_at FROM agent_collection_links acl
-        JOIN collections c ON c.id=acl.collection_id
-        WHERE acl.tenant_id=$1 AND c.tenant_id=$1 AND c.business_id=$2
-          AND acl.agent_profile_id=$3 AND c.status='active' ORDER BY c.id
-      `,[params.tenantId,agent.business_id,params.agentId]);
-      const snapshot = {exampleIds:dataset.exampleIds,datasetDigest:dataset.datasetDigest,basePromptVersionId:agent.active_prompt_version_id,
-        collectionVersions:collectionVersions.rows.map((row)=>({id:row.id,schemaVersion:Number(row.schema_version),updatedAt:row.updated_at})),
-        capabilities:agent.capabilities??[],behaviorSettings:agent.behavior_settings??{},
-        trainingSessionId:params.sessionId,sessionEventCount:captured.rows[0]?.count??0,
-        publishPolicy:"manual",capturedAt:new Date().toISOString()};
-      const job = await client.query<{id:string}>(`
-        INSERT INTO training_jobs(tenant_id,agent_profile_id,base_prompt_version_id,input_snapshot)
-        VALUES($1,$2,$3,$4::jsonb) RETURNING id
-      `,[params.tenantId,params.agentId,agent.active_prompt_version_id,JSON.stringify(snapshot)]);
-      await client.query("UPDATE training_sessions SET candidate_training_job_id=$2 WHERE id=$1",[params.sessionId,job.rows[0].id]);
-      return {session:stopped.rows[0],jobId:job.rows[0].id,created:true};
+        "SELECT count(*)::int AS count FROM training_examples WHERE training_session_id=$1 AND source='native_channel_training' AND approval_status='approved'",[params.sessionId]);
+      if (!sessionExamples.rows[0]?.count) {
+        const closed = await client.query<any>("UPDATE training_sessions SET status='closed',updated_at=clock_timestamp() WHERE id=$1 RETURNING *",[params.sessionId]);
+        await restoreTrainingConversations(client,params.sessionId,session.rows[0].channel_account_id);
+        return {session:closed.rows[0],jobId:null,created:true};
+      }
+      if (currentAgent.rows[0]?.status !== "active" || !currentAgent.rows[0]?.active_prompt_version_id) {
+        throw new ApiError(409,"AGENT_NOT_READY","The agent changed while training was on. Restore the agent before stopping.");
+      }
+      const jobId = await createSessionTrainingJob(client,params.tenantId,currentAgent.rows[0],stopped.rows[0]);
+      await restoreTrainingConversations(client,params.sessionId,session.rows[0].channel_account_id);
+      if (!jobId) {
+        const closed = await client.query<any>("UPDATE training_sessions SET status='closed',updated_at=clock_timestamp() WHERE id=$1 RETURNING *",[params.sessionId]);
+        return {session:closed.rows[0],jobId:null,created:true};
+      }
+      return {session:stopped.rows[0],jobId,created:true};
     });
-    const queuedJob = result.jobId
-      ? await query<{status:string}>("SELECT status FROM training_jobs WHERE id=$1 AND tenant_id=$2",[result.jobId,params.tenantId])
-      : null;
-    if (result.jobId && queuedJob?.rows[0]?.status === "queued") {
-      await enqueue(QUEUES.training,{jobId:result.jobId,jobType:"PROMPT_SYNTHESIS",tenantId:params.tenantId,
-        businessId:agent.business_id,correlationId:requestId(request),idempotencyKey:`training:${result.jobId}`,
-        createdAt:new Date().toISOString(),payload:{trainingJobId:result.jobId,agentProfileId:params.agentId}});
-    }
+    if (result.jobId) await enqueueSessionTrainingJob(result.jobId,params.tenantId,agent,request);
     if (result.created) await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:agent.business_id,
       action:"CHANNEL_TRAINING_STOPPED",resourceType:"training_session",resourceId:params.sessionId,
       safeDiff:{exampleJobCreated:Boolean(result.jobId)},request});
+    reply.send({session:result.session,trainingJobId:result.jobId});
+  });
+
+  app.post("/v1/tenants/:tenantId/agents/:agentId/training-sessions/:sessionId/retry", async (request, reply) => {
+    const params = scopeSchema.extend({sessionId:z.string().uuid()}).parse(request.params);
+    const principal = await requireAuth(request);
+    const agent = await scopedAgent(request,params.tenantId,params.agentId);
+    requireCsrf(request);
+    const result = await transaction(async (client) => {
+      const scoped = await client.query<{channel_account_id:string|null}>(
+        "SELECT channel_account_id FROM training_sessions WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3",
+        [params.sessionId,params.tenantId,params.agentId]);
+      if (!scoped.rows[0]?.channel_account_id) throw new ApiError(404,"TRAINING_SESSION_NOT_FOUND","Training session not found.");
+      const channel = await client.query<{id:string;default_agent_profile_id:string|null}>(
+        "SELECT id,default_agent_profile_id FROM channel_accounts WHERE id=$1 FOR UPDATE",[scoped.rows[0].channel_account_id]);
+      if (!channel.rows[0]) throw new ApiError(404,"CHANNEL_NOT_FOUND","Channel not found.");
+      const currentAgent = await client.query<any>("SELECT * FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[agent.id,params.tenantId]);
+      const session = await client.query<any>(`
+        SELECT * FROM training_sessions WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 FOR UPDATE
+      `,[params.sessionId,params.tenantId,params.agentId]);
+      if (!session.rows[0]?.channel_account_id) throw new ApiError(404,"TRAINING_SESSION_NOT_FOUND","Training session not found.");
+      if (session.rows[0].status !== "failed") throw new ApiError(409,"TRAINING_RETRY_UNAVAILABLE","Only a failed training session can be retried.");
+      if (channel.rows[0].default_agent_profile_id !== params.agentId) throw new ApiError(409,"CHANNEL_AGENT_MISMATCH","Restore this agent as the channel's default agent before retrying.");
+      const concurrent = await client.query("SELECT id FROM training_sessions WHERE agent_profile_id=$1 AND status IN ('open','finalizing') LIMIT 1",[params.agentId]);
+      if (concurrent.rows[0]) throw new ApiError(409,"TRAINING_ALREADY_ON","This agent already has an active or finalizing training session on a connected channel.");
+      if (currentAgent.rows[0]?.status !== "active" || !currentAgent.rows[0]?.active_prompt_version_id) {
+        throw new ApiError(409,"AGENT_NOT_READY","Activate and publish the agent before retrying training.");
+      }
+      const jobId = await createSessionTrainingJob(client,params.tenantId,currentAgent.rows[0],session.rows[0]);
+      if (!jobId) throw new ApiError(409,"TRAINING_EXAMPLES_REQUIRED","This session has no approved channel training examples to retry.");
+      const updated = await client.query<any>("UPDATE training_sessions SET status='finalizing',updated_at=clock_timestamp() WHERE id=$1 RETURNING *",[params.sessionId]);
+      return {session:updated.rows[0],jobId};
+    });
+    await enqueueSessionTrainingJob(result.jobId,params.tenantId,agent,request);
+    await audit({actorUserId:principal.userId,tenantId:params.tenantId,businessId:agent.business_id,
+      action:"CHANNEL_TRAINING_RETRIED",resourceType:"training_session",resourceId:params.sessionId,
+      safeDiff:{trainingJobId:result.jobId},request});
     reply.send({session:result.session,trainingJobId:result.jobId});
   });
 }

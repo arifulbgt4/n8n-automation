@@ -4,6 +4,7 @@ import { env, query, transaction } from "@n8n-automation/core";
 import { chat, embedding } from "../ai-provider.js";
 import { ApiError, requestId, safeSecretEqual } from "../lib.js";
 import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
+import { queueResumedTrainingMessages, releaseFinalizingMessages, restoreTrainingConversations, trainingDatasetState } from "../training-session.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -103,8 +104,6 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
     let parsed: any;
     try { parsed = JSON.parse(result.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); } catch { throw new ApiError(502, "TRAINING_OUTPUT_INVALID", "Prompt synthesis model did not return valid JSON."); }
     if (!parsed.sections || typeof parsed.sections !== "object") throw new ApiError(502, "TRAINING_OUTPUT_INVALID", "Prompt synthesis output is missing sections.");
-    const latest = await query<{ version: number }>("SELECT COALESCE(max(version),0)::int AS version FROM prompt_versions WHERE agent_profile_id=$1", [row.agent_profile_id]);
-    const version = (latest.rows[0]?.version ?? 0) + 1;
     const assembled = Object.entries(parsed.sections).map(([key,value]) => `## ${key.replace(/_/g," ")}\n${typeof value === "string" ? value : JSON.stringify(value,null,2)}`).join("\n\n");
     const requiredSections=["core_role","tone_language","grounding","capabilities","business_process","human_handoff","restrictions"];
     const validation={
@@ -115,13 +114,122 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
     };
     const validationPassed=Object.values(validation).every(Boolean);
     const candidate = await transaction(async (client) => {
+      await client.query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[row.agent_profile_id,row.tenant_id]);
+      const latest = await client.query<{ version: number }>(
+        "SELECT COALESCE(max(version),0)::int AS version FROM prompt_versions WHERE agent_profile_id=$1",[row.agent_profile_id]);
+      const version = (latest.rows[0]?.version ?? 0) + 1;
       const created = await client.query(`
         INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,sections_json,assembled_prompt,base_version_id,training_job_id)
         VALUES ($1,$2,$3,'training','candidate',$4::jsonb,$5,$6,$7) RETURNING *
       `, [row.tenant_id,row.agent_profile_id,version,JSON.stringify(parsed.sections),assembled,row.base_prompt_version_id ?? null,trainingJobId]);
       return created.rows[0];
     });
-    reply.send({ candidatePromptVersionId: candidate.id, version, sections: parsed.sections, evaluation: { ...(parsed.evaluation ?? {}), validation, passed: validationPassed }, usage: result.usage });
+    reply.send({ candidatePromptVersionId: candidate.id, version: candidate.version, sections: parsed.sections, evaluation: { ...(parsed.evaluation ?? {}), validation, passed: validationPassed }, usage: result.usage });
+  });
+
+  app.post("/v1/internal/training/finalize", async (request, reply) => {
+    requireInternal(request);
+    const input = z.object({
+      trainingJobId: z.string().uuid(),
+      candidatePromptVersionId: z.string().uuid(),
+      evaluation: z.record(z.string(), z.unknown()),
+      usage: z.record(z.string(), z.unknown()).optional(),
+    }).parse(request.body);
+    if (input.evaluation.passed !== true) throw new ApiError(409,"TRAINING_VALIDATION_FAILED","The generated prompt did not pass validation.");
+    const scope = await query<{channel_account_id:string}>(`
+      SELECT ts.channel_account_id FROM training_sessions ts
+      JOIN training_jobs tj ON tj.id=ts.candidate_training_job_id
+      WHERE tj.id=$1 AND tj.input_snapshot->>'publishPolicy'='auto_session'
+    `,[input.trainingJobId]);
+    if (!scope.rows[0]?.channel_account_id) throw new ApiError(404,"TRAINING_SESSION_NOT_FOUND","Automatic training session not found.");
+    const outcome = await transaction(async (client) => {
+      // Webhook capture, panel sends, Training OFF and final publication share
+      // this channel lock. The dataset cannot change while it is checked.
+      await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[scope.rows[0].channel_account_id]);
+      const agent = await client.query<any>(`
+        SELECT a.* FROM agent_profiles a JOIN training_sessions ts ON ts.agent_profile_id=a.id
+        WHERE ts.candidate_training_job_id=$1 AND a.tenant_id=ts.tenant_id FOR UPDATE OF a
+      `,[input.trainingJobId]);
+      const session = await client.query<any>(`
+        SELECT ts.* FROM training_sessions ts
+        WHERE ts.candidate_training_job_id=$1 FOR UPDATE
+      `,[input.trainingJobId]);
+      if (!session.rows[0]) throw new ApiError(404,"TRAINING_SESSION_NOT_FOUND","Automatic training session not found.");
+      const current = session.rows[0];
+      const job = await client.query<any>("SELECT * FROM training_jobs WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[input.trainingJobId,current.tenant_id]);
+      const row = job.rows[0];
+      if (!row || row.input_snapshot?.publishPolicy !== "auto_session" || row.agent_profile_id !== current.agent_profile_id) {
+        throw new ApiError(409,"TRAINING_JOB_SCOPE_INVALID","Training job does not belong to this session.");
+      }
+      if (current.status === "closed" && row.status === "completed" && row.candidate_prompt_version_id === input.candidatePromptVersionId) {
+        return {alreadyFinalized:true};
+      }
+      if (current.status !== "finalizing") throw new ApiError(409,"TRAINING_SESSION_NOT_FINALIZING","Training session is not ready to publish.");
+      if (!agent.rows[0] || agent.rows[0].status !== "active" || agent.rows[0].active_prompt_version_id !== row.input_snapshot.basePromptVersionId) {
+        throw new ApiError(409,"TRAINING_INPUT_STALE","The agent changed while training was running.");
+      }
+      const prompt = await client.query<any>(`
+        SELECT id,status FROM prompt_versions
+        WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3 AND training_job_id=$4 FOR UPDATE
+      `,[input.candidatePromptVersionId,current.tenant_id,current.agent_profile_id,input.trainingJobId]);
+      if (!prompt.rows[0] || prompt.rows[0].status !== "candidate") {
+        throw new ApiError(409,"TRAINING_CANDIDATE_INVALID","The generated prompt is not a candidate for this job.");
+      }
+      const snapshot = row.input_snapshot;
+      const dataset = await trainingDatasetState(client,current.tenant_id,current.agent_profile_id,true,"native_channel_training");
+      if (dataset.datasetDigest !== snapshot.datasetDigest || JSON.stringify(dataset.exampleIds) !== JSON.stringify(snapshot.exampleIds)) {
+        throw new ApiError(409,"TRAINING_INPUT_STALE","Training messages changed while the update was running. Retry training.");
+      }
+      const captured = await client.query<{count:number}>(
+        "SELECT count(*)::int AS count FROM training_session_messages WHERE training_session_id=$1",[current.id]);
+      if (Number(captured.rows[0]?.count??0) !== Number(snapshot.sessionEventCount??0)) {
+        throw new ApiError(409,"TRAINING_INPUT_STALE","New training messages arrived while the update was running. Retry training.");
+      }
+      const schemas = await client.query<{id:string;schema_version:number}>(`
+        SELECT c.id,c.schema_version FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id
+        WHERE acl.tenant_id=$1 AND acl.agent_profile_id=$2 AND c.tenant_id=$1
+          AND c.business_id=$3 AND c.status='active' ORDER BY c.id
+      `,[current.tenant_id,current.agent_profile_id,current.business_id]);
+      assertTrainingCollectionSnapshot(snapshot.collectionVersions,schemas.rows);
+      await client.query("UPDATE prompt_versions SET status='archived' WHERE agent_profile_id=$1 AND status='active' AND id<>$2",[current.agent_profile_id,input.candidatePromptVersionId]);
+      await client.query("UPDATE prompt_versions SET status='active',published_at=now() WHERE id=$1",[input.candidatePromptVersionId]);
+      await client.query("UPDATE agent_profiles SET active_prompt_version_id=$2,updated_at=now() WHERE id=$1",[current.agent_profile_id,input.candidatePromptVersionId]);
+      await client.query(`UPDATE training_jobs SET status='completed',candidate_prompt_version_id=$2,
+        evaluation_json=$3::jsonb,cost_metadata=$4::jsonb,error=NULL,completed_at=now()
+        WHERE id=$1`,[input.trainingJobId,input.candidatePromptVersionId,JSON.stringify(input.evaluation),JSON.stringify(input.usage??{})]);
+      await client.query("UPDATE training_sessions SET status='closed',updated_at=clock_timestamp() WHERE id=$1",[current.id]);
+      await restoreTrainingConversations(client,current.id,current.channel_account_id);
+      await releaseFinalizingMessages(client,current.channel_account_id,current.stopped_at);
+      await queueResumedTrainingMessages(client,current);
+      await client.query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload)
+        VALUES ($1,'AGENT_PROMPT_PUBLISHED',$2,'agent_profile',$3,$4::jsonb)`,
+        [current.tenant_id,current.business_id,current.agent_profile_id,JSON.stringify({promptVersionId:input.candidatePromptVersionId,autoPublished:true,trainingJobId:input.trainingJobId})]);
+      return {alreadyFinalized:false};
+    });
+    reply.send({ok:true,...outcome});
+  });
+
+  app.post("/v1/internal/training/fail", async (request, reply) => {
+    requireInternal(request);
+    const input = z.object({trainingJobId:z.string().uuid(),error:z.string().max(500)}).parse(request.body);
+    const scope = await query<{channel_account_id:string}>(`
+      SELECT ts.channel_account_id FROM training_sessions ts
+      JOIN training_jobs tj ON tj.id=ts.candidate_training_job_id
+      WHERE tj.id=$1 AND tj.input_snapshot->>'publishPolicy'='auto_session'
+    `,[input.trainingJobId]);
+    if (!scope.rows[0]?.channel_account_id) throw new ApiError(404,"TRAINING_SESSION_NOT_FOUND","Automatic training session not found.");
+    await transaction(async (client) => {
+      await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[scope.rows[0].channel_account_id]);
+      const session = await client.query<any>("SELECT * FROM training_sessions WHERE candidate_training_job_id=$1 FOR UPDATE",[input.trainingJobId]);
+      const current = session.rows[0];
+      if (!current || current.status !== "finalizing") return;
+      await client.query("UPDATE training_jobs SET status='failed',error=$2,completed_at=now() WHERE id=$1",[input.trainingJobId,input.error]);
+      await client.query("UPDATE training_sessions SET status='failed',updated_at=clock_timestamp() WHERE id=$1",[current.id]);
+      await restoreTrainingConversations(client,current.id,current.channel_account_id);
+      await releaseFinalizingMessages(client,current.channel_account_id,current.stopped_at);
+      await queueResumedTrainingMessages(client,current);
+    });
+    reply.send({ok:true});
   });
 
   app.post("/v1/internal/knowledge/index", async (request, reply) => {

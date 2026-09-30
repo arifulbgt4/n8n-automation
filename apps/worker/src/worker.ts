@@ -4,6 +4,7 @@ import {
   bullmqJobId,
   closeQueues,
   decryptSecret,
+  enqueue,
   env,
   mediaApiKeyForAsset,
   query,
@@ -57,7 +58,7 @@ async function channelTrainingActive(channelId: string): Promise<boolean> {
 async function automaticMessageFenced(channelId: string, queuedAt: string): Promise<boolean> {
   const fenced = await query(`SELECT id FROM training_sessions
     WHERE channel_account_id=$1 AND (
-      created_at >= $2::timestamptz OR
+      status='open' OR created_at >= $2::timestamptz OR
       (created_at <= $2::timestamptz AND (stopped_at IS NULL OR $2::timestamptz < stopped_at))
     ) LIMIT 1`,[channelId,queuedAt]);
   return Boolean(fenced.rows[0]);
@@ -606,9 +607,32 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
 
 async function trainingJob(job: Job<JobEnvelope<any>>) {
   const trainingJobId = String(job.data.payload.trainingJobId || job.data.jobId);
+  const initial = await query<any>(`SELECT tj.*,ts.status AS session_status
+    FROM training_jobs tj LEFT JOIN training_sessions ts ON ts.candidate_training_job_id=tj.id
+    WHERE tj.id=$1`,[trainingJobId]);
+  if (!initial.rows[0]) throw new Error("Training job not found");
+  const autoSession = initial.rows[0].input_snapshot?.publishPolicy === "auto_session";
+  if (autoSession && initial.rows[0].session_status !== "finalizing") return;
   await query("UPDATE training_jobs SET status='running',started_at=now() WHERE id=$1", [trainingJobId]);
   try {
-    const result = await internalFetch("/v1/internal/training/synthesize", { method: "POST", body: JSON.stringify({ trainingJobId }) });
+    let result:any;
+    if (autoSession && initial.rows[0].candidate_prompt_version_id && initial.rows[0].evaluation_json?.passed === true) {
+      result={candidatePromptVersionId:initial.rows[0].candidate_prompt_version_id,
+        evaluation:initial.rows[0].evaluation_json,usage:initial.rows[0].cost_metadata??{}};
+    } else {
+      result = await internalFetch("/v1/internal/training/synthesize", { method: "POST", body: JSON.stringify({ trainingJobId }) });
+    }
+    if (autoSession) {
+      if (result.evaluation?.passed !== true) throw new Error("The generated training prompt did not pass validation");
+      await query(`UPDATE training_jobs SET candidate_prompt_version_id=$2,evaluation_json=$3::jsonb,
+        cost_metadata=$4::jsonb WHERE id=$1`,
+        [trainingJobId,result.candidatePromptVersionId,JSON.stringify(result.evaluation),JSON.stringify(result.usage??{})]);
+      await internalFetch("/v1/internal/training/finalize",{method:"POST",body:JSON.stringify({
+        trainingJobId,candidatePromptVersionId:result.candidatePromptVersionId,
+        evaluation:result.evaluation,usage:result.usage??{},
+      })});
+      return;
+    }
     await query("UPDATE training_jobs SET status='completed',candidate_prompt_version_id=$2,evaluation_json=$3::jsonb,cost_metadata=$4::jsonb,completed_at=now() WHERE id=$1", [trainingJobId,result.candidatePromptVersionId,JSON.stringify(result.evaluation ?? {}),JSON.stringify(result.usage ?? {})]);
     const agent = await query<any>("SELECT a.*,tj.tenant_id FROM training_jobs tj JOIN agent_profiles a ON a.id=tj.agent_profile_id WHERE tj.id=$1",[trainingJobId]);
     const snapshot = await query<any>("SELECT input_snapshot FROM training_jobs WHERE id=$1",[trainingJobId]);
@@ -622,7 +646,22 @@ async function trainingJob(job: Job<JobEnvelope<any>>) {
       });
     }
   } catch (error) {
-    await query("UPDATE training_jobs SET status='failed',error=$2,completed_at=now() WHERE id=$1", [trainingJobId,error instanceof Error ? error.message : "training failed"]);
+    const message=(error instanceof Error ? error.message : "training failed").slice(0,500);
+    if (autoSession) {
+      const status=Number((error as any)?.status??0);
+      const permanent=[400,403,404,409,422].includes(status) || message==="The generated training prompt did not pass validation";
+      const terminal=permanent || job.attemptsMade+1>=Number(job.opts.attempts??1);
+      if (terminal) {
+        await query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload)
+          VALUES($1,'TRAINING_JOB_FAILED',$2,'training_job',$3,$4::jsonb)`,
+          [job.data.tenantId,job.data.businessId,trainingJobId,JSON.stringify({error:message})]);
+      } else {
+        await query("UPDATE training_jobs SET status='queued',error=$2 WHERE id=$1",[trainingJobId,message]);
+      }
+      if (permanent) throw new UnrecoverableError(message);
+    } else {
+      await query("UPDATE training_jobs SET status='failed',error=$2,completed_at=now() WHERE id=$1", [trainingJobId,message]);
+    }
     throw error;
   }
 }
@@ -676,14 +715,14 @@ async function dispatchOutboxBatch(limit = 100) {
   const events = await transaction(async (client) => {
     const selected = await client.query<any>(`
       SELECT * FROM outbox_events
-      WHERE status IN ('pending','failed') AND next_attempt_at<=now()
+      WHERE status IN ('pending','failed','dispatching') AND next_attempt_at<=now()
       ORDER BY created_at
       LIMIT $1
       FOR UPDATE SKIP LOCKED
     `, [limit]);
     if (!selected.rows.length) return [];
     await client.query(
-      "UPDATE outbox_events SET status='dispatching',attempt_count=attempt_count+1 WHERE id=ANY($1::uuid[])",
+      "UPDATE outbox_events SET status='dispatching',attempt_count=attempt_count+1,next_attempt_at=now()+interval '15 minutes' WHERE id=ANY($1::uuid[])",
       [selected.rows.map((row) => row.id)],
     );
     return selected.rows;
@@ -691,6 +730,48 @@ async function dispatchOutboxBatch(limit = 100) {
 
   for (const event of events) {
     try {
+      if (event.event_type === "TRAINING_JOB_QUEUED") {
+        const job = await query<any>(`SELECT tj.status,ts.status AS session_status,tj.agent_profile_id
+          FROM training_jobs tj JOIN training_sessions ts ON ts.candidate_training_job_id=tj.id
+          WHERE tj.id=$1 AND tj.tenant_id=$2`,[event.resource_id,event.tenant_id]);
+        if (job.rows[0]?.status === "queued" && job.rows[0]?.session_status === "finalizing") {
+          const jobId=String(event.resource_id);
+          await enqueue(QUEUES.training,{
+            jobId,jobType:"PROMPT_SYNTHESIS",tenantId:String(event.tenant_id),
+            businessId:String(event.business_id),correlationId:String(event.correlation_id??event.id),
+            idempotencyKey:`training:${jobId}`,createdAt:new Date().toISOString(),
+            payload:{trainingJobId:jobId,agentProfileId:job.rows[0].agent_profile_id},
+          });
+        }
+      }
+      if (event.event_type === "TRAINING_JOB_FAILED") {
+        const current = await query(`SELECT ts.id FROM training_sessions ts
+          JOIN training_jobs tj ON tj.id=ts.candidate_training_job_id
+          WHERE tj.id=$1 AND tj.tenant_id=$2`,[event.resource_id,event.tenant_id]);
+        if (current.rows[0]) {
+          await internalFetch("/v1/internal/training/fail",{method:"POST",body:JSON.stringify({
+            trainingJobId:String(event.resource_id),error:String(event.payload?.error??"training failed").slice(0,500),
+          })});
+        }
+      }
+      if (event.event_type === "TRAINING_RESUME_INBOUND") {
+        const conversationId=String(event.resource_id);
+        const state = await query<any>(`SELECT cv.id,cv.mode,cv.status,cv.channel_account_id,
+          EXISTS(SELECT 1 FROM training_sessions ts WHERE ts.channel_account_id=cv.channel_account_id AND ts.status='open') AS training_open
+          FROM conversations cv WHERE cv.id=$1 AND cv.tenant_id=$2 AND cv.business_id=$3`,
+          [conversationId,event.tenant_id,event.business_id]);
+        const cv=state.rows[0];
+        if (cv?.training_open) throw new Error("Training is currently on for the resumed conversation");
+        if (cv?.mode === "AI" && cv.status === "open") {
+          const jobId=`training-resume:${event.id}`;
+          await enqueue(QUEUES.inbound,{
+            jobId,jobType:"AGGREGATE_CONVERSATION",tenantId:String(event.tenant_id),
+            businessId:String(event.business_id),channelAccountId:cv.channel_account_id,
+            conversationId,correlationId:String(event.correlation_id??event.id),
+            idempotencyKey:jobId,createdAt:new Date().toISOString(),payload:{trainingSessionId:event.payload?.sessionId},
+          });
+        }
+      }
       if (config.N8N_HEALTH_WEBHOOK_URL && ["CHANNEL_CONNECTED","CHANNEL_DISCONNECTED"].includes(event.event_type)) {
         // Infrastructure-specific integration hooks can subscribe through the existing n8n runtime.
         const response = await fetch(config.N8N_HEALTH_WEBHOOK_URL, {
@@ -940,7 +1021,7 @@ async function applyRetentionPolicies(){
     }
     if(policy.training_days){
       const examples=await query(`DELETE FROM training_examples WHERE tenant_id=$1 AND created_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
-      const sessions=await query(`DELETE FROM training_sessions WHERE tenant_id=$1 AND status<>'open' AND updated_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
+      const sessions=await query(`DELETE FROM training_sessions WHERE tenant_id=$1 AND status NOT IN ('open','finalizing') AND updated_at<now()-($2||' days')::interval`,[tenantId,String(policy.training_days)]);
       counts.training=(examples.rowCount??0)+(sessions.rowCount??0);
     }
     if(policy.audit_days){

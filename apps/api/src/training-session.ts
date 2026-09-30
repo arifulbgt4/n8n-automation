@@ -148,7 +148,13 @@ export async function syncTrainingExamples(client: pg.PoolClient, sessionId: str
 
 // A candidate must represent the exact approved examples and native event
 // windows it saw. A late webhook can change a closed session after synthesis.
-export async function trainingDatasetState(db: Pick<pg.PoolClient,"query">, tenantId: string, agentId: string, lockSessions = false) {
+export async function trainingDatasetState(
+  db: Pick<pg.PoolClient,"query">,
+  tenantId: string,
+  agentId: string,
+  lockSessions = false,
+  source: "all" | "native_channel_training" = "all",
+) {
   // Publication holds these locks until commit; capture takes FOR UPDATE on
   // the same session. Creation does not lock all sessions, avoiding two OFF
   // requests on different channels waiting on each other's session rows.
@@ -159,7 +165,8 @@ export async function trainingDatasetState(db: Pick<pg.PoolClient,"query">, tena
     id:string;source:string;input_text:string|null;ideal_response:string;input_json:unknown;labels:string[];
   }>(`SELECT id,source,input_text,ideal_response,input_json,labels
     FROM training_examples WHERE tenant_id=$1 AND agent_profile_id=$2 AND approval_status='approved'
-    ORDER BY id`,[tenantId,agentId]);
+      AND ($3::text='all' OR source=$3)
+    ORDER BY id`,[tenantId,agentId,source]);
   const sessions = await db.query<{id:string;event_count:number}>(`
     SELECT ts.id,count(sm.id)::int AS event_count FROM training_sessions ts
     LEFT JOIN training_session_messages sm ON sm.training_session_id=ts.id
@@ -170,4 +177,47 @@ export async function trainingDatasetState(db: Pick<pg.PoolClient,"query">, tena
     exampleIds:examples.rows.map(row=>row.id),
     datasetDigest:createHash("sha256").update(JSON.stringify({examples:examples.rows,sessions:sessions.rows})).digest("hex"),
   };
+}
+
+export async function restoreTrainingConversations(client: pg.PoolClient, sessionId: string, channelId: string): Promise<string[]> {
+  const restored = await client.query<{id:string}>(`
+    UPDATE conversations SET mode='AI',state_version=state_version+1,
+      escalation_metadata=escalation_metadata-'trainingAutoHumanSessionId',updated_at=now()
+    WHERE channel_account_id=$1 AND status='open' AND mode='HUMAN'
+      AND escalation_metadata->>'trainingAutoHumanSessionId'=$2
+    RETURNING id
+  `,[channelId,sessionId]);
+  return restored.rows.map(row=>row.id);
+}
+
+export async function releaseFinalizingMessages(client: pg.PoolClient, channelId: string, stoppedAt: Date): Promise<string[]> {
+  const released = await client.query<{conversation_id:string}>(`
+    UPDATE messages SET metadata=metadata-'trainingSuppressed',updated_at=now()
+    WHERE channel_account_id=$1 AND direction='INBOUND' AND sender_type='CONTACT'
+      AND created_at >= $2 AND metadata->>'trainingSuppressed'='true'
+      AND NOT EXISTS (SELECT 1 FROM training_session_messages sm WHERE sm.source_message_id=messages.id)
+    RETURNING conversation_id
+  `,[channelId,stoppedAt]);
+  return [...new Set(released.rows.map(row=>row.conversation_id))];
+}
+
+export async function queueResumedTrainingMessages(client: pg.PoolClient, session: {
+  id:string;tenant_id:string;business_id:string;channel_account_id:string;stopped_at:Date;
+}): Promise<number> {
+  const pending = await client.query<{conversation_id:string}>(`
+    SELECT DISTINCT m.conversation_id FROM messages m
+    JOIN conversations cv ON cv.id=m.conversation_id AND cv.tenant_id=m.tenant_id
+    WHERE m.channel_account_id=$1 AND m.created_at >= $2
+      AND m.direction='INBOUND' AND m.sender_type='CONTACT' AND m.turn_id IS NULL
+      AND COALESCE(m.metadata->>'trainingSuppressed','false')<>'true'
+      AND NOT EXISTS (SELECT 1 FROM training_session_messages sm WHERE sm.source_message_id=m.id)
+      AND cv.mode='AI' AND cv.status='open'
+  `,[session.channel_account_id,session.stopped_at]);
+  for (const row of pending.rows) {
+    await client.query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload)
+      VALUES($1,'TRAINING_RESUME_INBOUND',$2,'conversation',$3,$4::jsonb)`,
+      [session.tenant_id,session.business_id,row.conversation_id,
+        JSON.stringify({sessionId:session.id,channelAccountId:session.channel_account_id,conversationId:row.conversation_id})]);
+  }
+  return pending.rows.length;
 }

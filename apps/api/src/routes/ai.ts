@@ -334,13 +334,19 @@ export async function aiRoutes(app: FastifyInstance) {
       const base = await query("SELECT id FROM prompt_versions WHERE id=$1 AND tenant_id=$2 AND agent_profile_id=$3", [input.baseVersionId, params.tenantId, params.agentId]);
       if (!base.rows[0]) throw new ApiError(400, "PROMPT_BASE_SCOPE_INVALID", "The base prompt must belong to this agent.");
     }
-    const latest = await query<{ version: number }>("SELECT COALESCE(max(version),0)::int AS version FROM prompt_versions WHERE agent_profile_id=$1", [params.agentId]);
-    const version = (latest.rows[0]?.version ?? 0) + 1;
     const assembled = Object.entries(input.sections).map(([key, value]) => `## ${key.replace(/_/g, " ")}\n${typeof value === "string" ? value : JSON.stringify(value, null, 2)}`).join("\n\n");
-    const result = await query(`
-      INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,sections_json,assembled_prompt,base_version_id,created_by)
-      VALUES ($1,$2,$3,$4,'draft',$5::jsonb,$6,$7,$8) RETURNING *
-    `, [params.tenantId, params.agentId, version, input.source, JSON.stringify(input.sections), assembled, input.baseVersionId ?? agent.active_prompt_version_id ?? null, principal.userId]);
+    const { result, version } = await transaction(async (client) => {
+      const currentAgent = await client.query<{active_prompt_version_id:string|null}>(
+        "SELECT active_prompt_version_id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.agentId,params.tenantId]);
+      if (!currentAgent.rows[0]) throw new ApiError(404,"AGENT_NOT_FOUND","AI agent not found.");
+      const latest = await client.query<{ version: number }>("SELECT COALESCE(max(version),0)::int AS version FROM prompt_versions WHERE agent_profile_id=$1", [params.agentId]);
+      const version = (latest.rows[0]?.version ?? 0) + 1;
+      const result = await client.query(`
+        INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,sections_json,assembled_prompt,base_version_id,created_by)
+        VALUES ($1,$2,$3,$4,'draft',$5::jsonb,$6,$7,$8) RETURNING *
+      `, [params.tenantId, params.agentId, version, input.source, JSON.stringify(input.sections), assembled, input.baseVersionId ?? currentAgent.rows[0].active_prompt_version_id ?? null, principal.userId]);
+      return {result,version};
+    });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: agent.business_id, action: "PROMPT_VERSION_CREATED", resourceType: "prompt_version", resourceId: result.rows[0].id, safeDiff: { version, source: input.source }, request });
     reply.code(201).send({ prompt: result.rows[0] });
   });
@@ -353,9 +359,11 @@ export async function aiRoutes(app: FastifyInstance) {
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
     await transaction(async (client) => {
+      await client.query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.agentId,params.tenantId]);
+      const training = await client.query("SELECT id FROM training_sessions WHERE agent_profile_id=$1 AND status IN ('open','finalizing') LIMIT 1",[params.agentId]);
+      if (training.rows[0]) throw new ApiError(409,"CHANNEL_TRAINING_ON","Finish this agent's channel training before publishing another prompt.");
       const prompt = await client.query<{id:string;training_job_id:string|null}>("SELECT id,training_job_id FROM prompt_versions WHERE id=$1 AND agent_profile_id=$2 AND tenant_id=$3 FOR UPDATE", [params.promptId, params.agentId, params.tenantId]);
       if (!prompt.rows[0]) throw new ApiError(404, "PROMPT_NOT_FOUND", "Prompt version not found.");
-      await client.query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[params.agentId,params.tenantId]);
       if (prompt.rows[0].training_job_id) {
         const job = await client.query<{input_snapshot:any}>("SELECT input_snapshot FROM training_jobs WHERE id=$1",[prompt.rows[0].training_job_id]);
         const snapshot = job.rows[0]?.input_snapshot;
