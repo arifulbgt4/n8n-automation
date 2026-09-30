@@ -34,11 +34,13 @@ test("an API echo or Instagram echo cannot become a native human training reply"
   assert.equal(isNativeHumanReply(instagramEcho),false);
 });
 
-test("unverified Instagram and WhatsApp channels cannot turn native training on", async () => {
+test("connected Instagram and WhatsApp can capture Customer Panel replies without claiming native echo attribution", async () => {
   for (const platform of ["instagram","whatsapp"]) {
     const capability=await inspectNativeTrainingCapability({platform,active:true,connection_status:"connected"});
-    assert.equal(capability.supported,false);
-    assert.notEqual(capability.status,"ready");
+    assert.equal(capability.supported,true);
+    assert.equal(capability.status,"ready");
+    assert.equal(capability.source,"customer_panel");
+    assert.match(capability.reason,/native-app|Business App/);
   }
 });
 
@@ -53,7 +55,7 @@ test("WhatsApp Business App echo uses smb_message_echoes recipient and excludes 
   assert.equal(messages[0].channelExternalId,"phone-1");
   assert.equal(messages[0].senderExternalId,"15551111111");
   assert.equal(messages[0].text,"Human reply");
-  assert.equal(isNativeHumanReply(messages[0]),true);
+  assert.equal(isNativeHumanReply(messages[0]),false);
 });
 
 test("training pairs use only customer messages and subsequent human replies from the same conversation", () => {

@@ -17,6 +17,7 @@ import {
   transaction,
   type JobEnvelope,
 } from "@n8n-automation/core";
+import { capturePanelTrainingReply, humanReplyOutcomeUnknown, ProviderOutcomeUnknownError } from "./panel-training-capture.js";
 
 const config = env();
 const workers: Worker[] = [];
@@ -227,10 +228,10 @@ async function loadAsset(tenantId: string, businessId: string, assetId: string) 
   return result.rows[0];
 }
 
-async function fetchAssetBytes(tenantId: string, asset: any): Promise<{ bytes: ArrayBuffer; mime: string }> {
+async function fetchAssetBytes(tenantId: string, asset: any, signal?: AbortSignal): Promise<{ bytes: ArrayBuffer; mime: string }> {
   if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
   const credential = await mediaApiKeyForAsset(tenantId, asset.storage_user_id);
-  const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}/content`, { headers: { authorization: `Bearer ${credential}` } });
+  const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}/content`, { headers: { authorization: `Bearer ${credential}` }, signal });
   if (!response.ok) throw new Error(`Media download failed with ${response.status}`);
   return { bytes: await response.arrayBuffer(), mime: response.headers.get("content-type") || asset.mime_type || "application/octet-stream" };
 }
@@ -394,8 +395,13 @@ async function loadChannelRuntime(channelId: string, conversationId: string, ten
   return { ...channel.rows[0], credentials: Object.fromEntries(credentials.rows.map((row) => [row.credential_type, decryptSecret(row.encrypted_value)])) };
 }
 
-async function providerJson(url: string, token: string, body: unknown) {
-  const response = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+async function providerJson(url: string, token: string, body: unknown, signal: AbortSignal) {
+  let response: Response;
+  try {
+    response = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body), signal });
+  } catch (error) {
+    throw new ProviderOutcomeUnknownError(error instanceof Error ? error.message : "Provider request outcome is unknown");
+  }
   const json = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error((json as any)?.error?.message || `Provider returned ${response.status}`);
@@ -406,7 +412,12 @@ async function providerJson(url: string, token: string, body: unknown) {
   return json as any;
 }
 
-async function facebookAttachment(tenantId: string, channel: any, asset: any): Promise<string> {
+function acceptedMessageId(id: unknown): string {
+  if (typeof id !== "string" || !id) throw new ProviderOutcomeUnknownError("Provider accepted the request without a message ID");
+  return id;
+}
+
+async function facebookAttachment(tenantId: string, channel: any, asset: any, signal: AbortSignal): Promise<string> {
   const cached = await query<{ remote_media_id: string; status: string }>("SELECT remote_media_id,status FROM channel_media_cache WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform=$3", [asset.id, channel.id, channel.platform]);
   if (cached.rows[0]?.status === "valid") return cached.rows[0].remote_media_id;
   const lockKey = redisKey("lock", "remote-media", channel.id, asset.id);
@@ -418,13 +429,13 @@ async function facebookAttachment(tenantId: string, channel: any, asset: any): P
     throw new Error("Remote media refresh is already in progress");
   }
   try {
-    const { bytes, mime } = await fetchAssetBytes(tenantId, asset);
+    const { bytes, mime } = await fetchAssetBytes(tenantId, asset, signal);
     const form = new FormData();
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : asset.kind === "document" ? "file" : "image";
     form.set("message", JSON.stringify({ attachment: { type, payload: { is_reusable: true } } }));
     form.set("filedata", new Blob([bytes], { type: mime }), asset.original_name || `asset-${asset.id}`);
     const url = `https://graph.facebook.com/${channel.graph_api_version || config.META_GRAPH_API_VERSION}/${encodeURIComponent(channel.external_account_id)}/message_attachments`;
-    const response = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${channel.credentials.access_token}` }, body: form });
+    const response = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${channel.credentials.access_token}` }, body: form, signal });
     const json = await response.json().catch(() => ({}));
     if (!response.ok || !(json as any).attachment_id) throw new Error((json as any)?.error?.message || `Facebook media upload failed with ${response.status}`);
     const remoteId = (json as any).attachment_id;
@@ -436,16 +447,16 @@ async function facebookAttachment(tenantId: string, channel: any, asset: any): P
   }
 }
 
-async function whatsappMedia(tenantId: string, channel: any, asset: any): Promise<string> {
+async function whatsappMedia(tenantId: string, channel: any, asset: any, signal: AbortSignal): Promise<string> {
   const cached = await query<{ remote_media_id: string; status: string; expires_at: Date | null }>("SELECT remote_media_id,status,expires_at FROM channel_media_cache WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='whatsapp'", [asset.id,channel.id]);
   if (cached.rows[0]?.status === "valid" && (!cached.rows[0].expires_at || cached.rows[0].expires_at.getTime() > Date.now())) return cached.rows[0].remote_media_id;
-  const { bytes, mime } = await fetchAssetBytes(tenantId, asset);
+  const { bytes, mime } = await fetchAssetBytes(tenantId, asset, signal);
   const form = new FormData();
   form.set("messaging_product", "whatsapp");
   form.set("type", mime);
   form.set("file", new Blob([bytes], { type: mime }), asset.original_name || `asset-${asset.id}`);
   const url = `https://graph.facebook.com/${channel.graph_api_version || config.META_GRAPH_API_VERSION}/${encodeURIComponent(channel.external_account_id)}/media`;
-  const response = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${channel.credentials.access_token}` }, body: form });
+  const response = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${channel.credentials.access_token}` }, body: form, signal });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || !(json as any).id) throw new Error((json as any)?.error?.message || `WhatsApp media upload failed with ${response.status}`);
   const remoteId = (json as any).id;
@@ -454,55 +465,56 @@ async function whatsappMedia(tenantId: string, channel: any, asset: any): Promis
   return remoteId;
 }
 
-async function sendProviderMessage(tenantId: string, channel: any, message: any): Promise<{ providerMessageId: string | null }> {
+async function sendProviderMessage(tenantId: string, channel: any, message: any, signal: AbortSignal): Promise<{ providerMessageId: string }> {
   const token = channel.credentials.access_token;
   if (!token) throw new Error("Channel access token is missing");
   const version = channel.graph_api_version || config.META_GRAPH_API_VERSION;
   if (channel.platform === "facebook") {
     const url = `https://graph.facebook.com/${version}/${encodeURIComponent(channel.external_account_id)}/messages`;
     if (message.type === "text") {
-      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, messaging_type: "RESPONSE", message: { text: message.text } });
-      return { providerMessageId: json.message_id ?? null };
+      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, messaging_type: "RESPONSE", message: { text: message.text } }, signal);
+      return { providerMessageId: acceptedMessageId(json.message_id) };
     }
     const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
-    const attachmentId = await facebookAttachment(tenantId, channel, asset);
+    const attachmentId = await facebookAttachment(tenantId, channel, asset, signal);
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : asset.kind === "document" ? "file" : "image";
     try {
-      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, messaging_type: "RESPONSE", message: { attachment: { type, payload: { attachment_id: attachmentId } } } });
+      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, messaging_type: "RESPONSE", message: { attachment: { type, payload: { attachment_id: attachmentId } } } }, signal);
       await query("UPDATE channel_media_cache SET last_used_at=now() WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='facebook'", [asset.id,channel.id]);
-      return { providerMessageId: json.message_id ?? null };
+      return { providerMessageId: acceptedMessageId(json.message_id) };
     } catch (error) {
+      if (error instanceof ProviderOutcomeUnknownError || ![400,404].includes(Number((error as any)?.status))) throw error;
       await query("UPDATE channel_media_cache SET status='stale',failure_metadata=$3::jsonb WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='facebook'", [asset.id,channel.id,JSON.stringify({ error: error instanceof Error ? error.message : "send failed" })]);
-      const fresh = await facebookAttachment(tenantId, channel, asset);
-      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, messaging_type: "RESPONSE", message: { attachment: { type, payload: { attachment_id: fresh } } } });
-      return { providerMessageId: json.message_id ?? null };
+      const fresh = await facebookAttachment(tenantId, channel, asset, signal);
+      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, messaging_type: "RESPONSE", message: { attachment: { type, payload: { attachment_id: fresh } } } }, signal);
+      return { providerMessageId: acceptedMessageId(json.message_id) };
     }
   }
 
   if (channel.platform === "instagram") {
     const url = `https://graph.facebook.com/${version}/${encodeURIComponent(channel.external_account_id)}/messages`;
     if (message.type === "text") {
-      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { text: message.text } });
-      return { providerMessageId: json.message_id ?? null };
+      const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { text: message.text } }, signal);
+      return { providerMessageId: acceptedMessageId(json.message_id) };
     }
     const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
     if (!asset.public_url) throw new Error("Instagram media delivery requires a provider-accessible public media URL");
-    const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { attachment: { type: asset.kind === "video" ? "video" : "image", payload: { url: asset.public_url } } } });
-    return { providerMessageId: json.message_id ?? null };
+    const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { attachment: { type: asset.kind === "video" ? "video" : "image", payload: { url: asset.public_url } } } }, signal);
+    return { providerMessageId: acceptedMessageId(json.message_id) };
   }
 
   if (channel.platform === "whatsapp") {
     const url = `https://graph.facebook.com/${version}/${encodeURIComponent(channel.external_account_id)}/messages`;
     if (message.type === "text") {
-      const json = await providerJson(url, token, { messaging_product: "whatsapp", to: channel.external_contact_id, type: "text", text: { body: message.text } });
-      return { providerMessageId: json.messages?.[0]?.id ?? null };
+      const json = await providerJson(url, token, { messaging_product: "whatsapp", to: channel.external_contact_id, type: "text", text: { body: message.text } }, signal);
+      return { providerMessageId: acceptedMessageId(json.messages?.[0]?.id) };
     }
     const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
-    const mediaId = await whatsappMedia(tenantId, channel, asset);
+    const mediaId = await whatsappMedia(tenantId, channel, asset, signal);
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : asset.kind === "document" ? "document" : "image";
-    const json = await providerJson(url, token, { messaging_product: "whatsapp", to: channel.external_contact_id, type, [type]: { id: mediaId, ...(message.caption && ["image","video"].includes(type) ? { caption: message.caption } : {}) } });
+    const json = await providerJson(url, token, { messaging_product: "whatsapp", to: channel.external_contact_id, type, [type]: { id: mediaId, ...(message.caption && ["image","video"].includes(type) ? { caption: message.caption } : {}) } }, signal);
     await query("UPDATE channel_media_cache SET last_used_at=now() WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='whatsapp'", [asset.id,channel.id]);
-    return { providerMessageId: json.messages?.[0]?.id ?? null };
+    return { providerMessageId: acceptedMessageId(json.messages?.[0]?.id) };
   }
   throw new Error(`Unsupported channel platform ${channel.platform}`);
 }
@@ -511,7 +523,7 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   const { tenantId, businessId, channelAccountId, conversationId, idempotencyKey, correlationId, payload } = job.data;
   if (!businessId || !channelAccountId || !conversationId) throw new Error("Outbound job is missing scope identifiers");
   const existing = await query("SELECT id,delivery_status FROM messages WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2 LIMIT 1", [tenantId,idempotencyKey]);
-  if (existing.rows[0]?.delivery_status === "sent") return;
+  if (["sent","unknown"].includes(existing.rows[0]?.delivery_status)) return;
   const channel = await loadChannelRuntime(channelAccountId, conversationId, tenantId, businessId);
   if (!channel.active || channel.connection_status !== "connected" || channel.conversation_status !== "open") throw new Error("Channel or conversation is not active");
   if (payload.senderType !== "HUMAN" && (await channelTrainingActive(channelAccountId) || await automaticMessageFenced(channelAccountId,job.data.createdAt))) {
@@ -561,11 +573,12 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   const persisted = await query<any>(`
     INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,direction,sender_type,message_type,text_content,delivery_status,metadata)
     VALUES ($1,$2,$3,$4,'OUTBOUND',$5,$6,$7,'sending',$8::jsonb) RETURNING id
-  `, [tenantId,businessId,channelAccountId,conversationId,payload.senderType || "AI",message.type,message.type === "text" ? message.text : message.caption ?? null,JSON.stringify({ outboundIdempotencyKey: idempotencyKey, logicalResponseId: payload.logicalResponseId, correlationId })]);
+  `, [tenantId,businessId,channelAccountId,conversationId,payload.senderType || "AI",message.type,message.type === "text" ? message.text : message.caption ?? null,JSON.stringify({ outboundIdempotencyKey: idempotencyKey, logicalResponseId: payload.logicalResponseId, correlationId, trainingQueuedSessionId: payload.trainingSessionId ?? null })]);
   const messageId = persisted.rows[0].id;
   if (message.type === "media") {
     await query("INSERT INTO message_media(message_id,media_asset_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [messageId,message.assetId,tenantId]);
   }
+  let acceptedProviderMessageId: string | null = null;
   try {
     const sent = payload.senderType !== "HUMAN"
       ? await transaction(async (client) => {
@@ -577,19 +590,51 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
               (created_at <= $2::timestamptz AND stopped_at>$2::timestamptz)) LIMIT 1`,
             [channelAccountId,job.data.createdAt]);
           if (active.rows[0]) return null;
-          return sendProviderMessage(tenantId, channel, message);
+          return sendProviderMessage(tenantId, channel, message, AbortSignal.timeout(45_000));
         })
-      : await sendProviderMessage(tenantId, channel, message);
+      : await transaction(async (client) => {
+          // Training OFF takes this same lock before freezing the dataset.
+          // A queued reply counts only if its own session is still open when
+          // the provider accepts it; an unsuccessful or later send does not.
+          await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channelAccountId]);
+          const accepted = await sendProviderMessage(tenantId, channel, message, AbortSignal.timeout(45_000));
+          acceptedProviderMessageId = accepted.providerMessageId;
+          await client.query("UPDATE messages SET platform_message_id=$2,delivery_status='sent',provider_timestamp=clock_timestamp(),updated_at=now() WHERE id=$1",[messageId,accepted.providerMessageId]);
+          await capturePanelTrainingReply(client,{
+            tenantId,businessId,channelId:channelAccountId,conversationId,
+            sessionId:payload.trainingSessionId,sourceMessageId:messageId,
+          });
+          await client.query("UPDATE channel_accounts SET last_delivery_at=now(),updated_at=now() WHERE id=$1", [channelAccountId]);
+          await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
+            VALUES ($1,$2,$3,$4,'outbound_message',1,'message',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`,
+            [tenantId,businessId,channelAccountId,conversationId,correlationId,`outbound:${idempotencyKey}`,JSON.stringify({ messageType: message.type, senderType: payload.senderType })]);
+          if (message.type === "media") await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key)
+            VALUES ($1,$2,$3,$4,'media_send',1,'media',$5,$6) ON CONFLICT DO NOTHING`,
+            [tenantId,businessId,channelAccountId,conversationId,correlationId,`media-send:${idempotencyKey}`]);
+          return accepted;
+        });
     if (!sent) {
       await query("UPDATE messages SET delivery_status='cancelled',updated_at=now() WHERE id=$1",[messageId]);
       return;
     }
+    if (payload.senderType === "HUMAN") return;
     await query("UPDATE messages SET platform_message_id=$2,delivery_status='sent',updated_at=now() WHERE id=$1", [messageId,sent.providerMessageId]);
     await query("UPDATE channel_accounts SET last_delivery_at=now(),updated_at=now() WHERE id=$1", [channelAccountId]);
     await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
       VALUES ($1,$2,$3,$4,'outbound_message',1,'message',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`, [tenantId,businessId,channelAccountId,conversationId,correlationId,`outbound:${idempotencyKey}`,JSON.stringify({ messageType: message.type, senderType: payload.senderType })]);
     if (message.type === "media") await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key) VALUES ($1,$2,$3,$4,'media_send',1,'media',$5,$6) ON CONFLICT DO NOTHING`, [tenantId,businessId,channelAccountId,conversationId,correlationId,`media-send:${idempotencyKey}`]);
   } catch (error) {
+    if (payload.senderType === "HUMAN" && humanReplyOutcomeUnknown(error, acceptedProviderMessageId)) {
+      // A provider may have accepted this reply even when its response or our
+      // transaction failed. Retrying automatically could send it twice.
+      await query("UPDATE messages SET delivery_status='unknown',metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1", [
+        messageId,
+        JSON.stringify({ providerOutcomeUnknown: true,
+          reason: acceptedProviderMessageId ? "acceptance_not_recorded" : "request_outcome_unknown",
+          providerMessageId: acceptedProviderMessageId }),
+      ]).catch((markError) => log("outbound_unknown_status_write_failed", { messageId, error: markError instanceof Error ? markError.message : "unknown" }));
+      throw new UnrecoverableError("Human reply provider outcome is unknown; reconcile before sending again");
+    }
     const status=Number((error as any)?.status || 0);
     const permanent=[400,401,403,404,410,422].includes(status);
     await query("UPDATE messages SET delivery_status=$2,metadata=metadata||$3::jsonb,updated_at=now() WHERE id=$1", [

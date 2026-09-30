@@ -26,6 +26,7 @@ export async function captureTrainingMessage(client: pg.PoolClient, input: {
   const session = await client.query<{ id: string }>(`
     SELECT id FROM training_sessions
     WHERE tenant_id=$1 AND business_id=$2 AND channel_account_id=$3
+      AND $4::timestamptz<=clock_timestamp()
       AND created_at<=$4 AND (stopped_at IS NULL OR $4<date_trunc('milliseconds',stopped_at))
     ORDER BY created_at DESC LIMIT 1 FOR UPDATE
   `, [input.tenantId, input.businessId, input.channelId, eventAt]);

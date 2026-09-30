@@ -88,7 +88,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       }
       return client.query(`
         UPDATE conversations SET mode=$3,state_version=state_version+1,
-          escalation_metadata=(escalation_metadata-'trainingAutoHumanSessionId') || $4::jsonb,updated_at=now()
+          escalation_metadata=(escalation_metadata - 'trainingAutoHumanSessionId') || $4::jsonb,updated_at=now()
         WHERE id=$1 AND tenant_id=$2 RETURNING *
       `, [params.conversationId, params.tenantId, input.mode, JSON.stringify({ lastModeReason: input.reason ?? null, lastModeChangedBy: principal.userId, lastModeChangedAt: new Date().toISOString() })]);
     });
@@ -119,22 +119,22 @@ export async function conversationRoutes(app: FastifyInstance) {
     }
     const logicalResponseId = randomToken(18);
     const trainingSessionId = await transaction(async (client) => {
-      // ON/OFF also lock this channel. A reply accepted while ON is a
-      // temporary human response; a reply after OFF is an explicit takeover.
-      await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[cv.channel_account_id]);
-      const training = await client.query<{id:string}>(
-        "SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[cv.channel_account_id]);
+      // Classify the reply under the same channel lock used by Training ON/OFF.
+      // The outbound worker later requires this exact session to remain open
+      // when the provider accepts the send; queueing alone never trains it.
+      await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",[cv.channel_account_id,params.tenantId]);
+      const training = await client.query<{id:string}>("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[cv.channel_account_id]);
       await client.query(`UPDATE conversations SET mode='HUMAN',assigned_user_id=$2,
-        state_version=state_version+1,
         escalation_metadata=CASE
-          WHEN $3::uuid IS NOT NULL AND (mode='AI' OR escalation_metadata->>'trainingAutoHumanSessionId'=$3::text)
-            THEN escalation_metadata||jsonb_build_object('trainingAutoHumanSessionId',$3::text)
-          ELSE escalation_metadata-'trainingAutoHumanSessionId' END,
-        updated_at=now() WHERE id=$1`,
-        [params.conversationId,principal.userId,training.rows[0]?.id??null]);
+          WHEN $3::uuid IS NULL THEN escalation_metadata - 'trainingAutoHumanSessionId'
+          WHEN mode='AI' THEN escalation_metadata || jsonb_build_object('trainingAutoHumanSessionId',$3::text)
+          ELSE escalation_metadata
+        END,
+        state_version=state_version+1,updated_at=now()
+        WHERE id=$1 AND tenant_id=$4`, [params.conversationId, principal.userId, training.rows[0]?.id??null,params.tenantId]);
       await client.query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,correlation_id,payload)
         VALUES ($1,'HUMAN_REPLY_ENQUEUED',$2,'conversation',$3,$4,$5::jsonb)`, [params.tenantId, cv.business_id, params.conversationId, requestId(request), JSON.stringify({ logicalResponseId, messages })]);
-      return training.rows[0]?.id ?? null;
+      return training.rows[0]?.id??null;
     });
     let index = 0;
     for (const message of messages) {
