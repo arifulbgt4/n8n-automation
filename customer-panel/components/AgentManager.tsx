@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { api, qs } from "../lib/api";
 import AgentCollectionSelector, { type AgentCollection } from "./AgentCollectionSelector";
 
@@ -31,7 +31,30 @@ function Field({ label, children, hint }: { label: string; children: ReactNode; 
 }
 
 function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-title"><h3>{title}</h3><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></div>{children}</div></div>;
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogRef.current?.focus();
+    return () => { if (previousFocus?.isConnected) previousFocus.focus(); };
+  }, []);
+
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
+    if (event.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'));
+    if (!focusable.length) { event.preventDefault(); return; }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const current = document.activeElement;
+    if (event.shiftKey && (current === first || current === dialog || !dialog.contains(current))) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && (current === last || current === dialog || !dialog.contains(current))) { event.preventDefault(); first.focus(); }
+  }
+
+  return <div className="modal-backdrop" onMouseDown={onClose}><div ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onKeyDown={handleKeyDown} onMouseDown={(event) => event.stopPropagation()}><div className="modal-title"><h3 id={titleId}>{title}</h3><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></div>{children}</div></div>;
 }
 
 export default function AgentManager({ tenantId, businessId, role, initialCapabilities = "" }: { tenantId: string; businessId: string; role?: string; initialCapabilities?: string }) {
@@ -43,6 +66,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   const [collections, setCollections] = useState<AgentCollection[]>([]);
   const [collectionsLoaded, setCollectionsLoaded] = useState(false);
   const [collectionsError, setCollectionsError] = useState("");
+  const [collectionLoadAttempt, setCollectionLoadAttempt] = useState(0);
   const [open, setOpen] = useState(false);
   const [test, setTest] = useState<{ agent: Agent; loading?: boolean; result?: { response: string; usage?: unknown }; error?: string } | null>(null);
   const [message, setMessage] = useState("What can you help me with?");
@@ -64,6 +88,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   const collectionsReady = collectionsLoaded && !collectionsError;
   const assignmentsChanged = !sameIds(editCollectionIds, originalCollectionIds);
   const unavailableSelected = editCollectionIds.some((id) => !collections.some((collection) => collection.id === id));
+  const canSaveAssignments = !assignmentsChanged || (collectionsReady && !unavailableSelected);
 
   const load = useCallback(async () => {
     if (!tenantId || !businessId) return;
@@ -102,11 +127,12 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       })
       .catch((reason) => { if (!cancelled) setCollectionsError(errorMessage(reason, "Unable to load collections.")); });
     return () => { cancelled = true; };
-  }, [tenantId, businessId]);
+  }, [tenantId, businessId, collectionLoadAttempt]);
 
   function closeEdit() { if (busy) return; editRequest.current += 1; setEditing(null); setEditLoadError(""); setFormError(""); }
   function openCreate() { setCreateCollectionIds([]); setFormError(""); setOpen(true); }
   function closeCreate() { if (!busy) { setOpen(false); setFormError(""); } }
+  function retryCollections() { setCollectionsLoaded(false); setCollectionsError(""); setCollectionLoadAttempt((attempt) => attempt + 1); }
 
   async function startEdit(agent: Agent) {
     const requestId = ++editRequest.current;
@@ -153,7 +179,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!editing || editLoading || editLoadError || !collectionsReady || (assignmentsChanged && unavailableSelected)) return;
+    if (!editing || editLoading || editLoadError || !canSaveAssignments) return;
     setBusy(editing.id);
     setFormError("");
     try {
@@ -212,7 +238,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       <Field label="Starting template"><select value={form.templateKey} onChange={(event) => setForm({ ...form, templateKey: event.target.value })}><option value="">Blank / manual</option>{templates.map((template) => <option key={template.key} value={template.key}>{template.name}</option>)}</select></Field>
       {selectedTemplate && <div className="result-box"><b>{selectedTemplate.name}</b><p>{selectedTemplate.description}</p><small>{(selectedTemplate.capabilities || []).join(", ")}</small></div>}
       <Field label="Additional capabilities" hint="Optional comma-separated capability keys added on top of the template."><textarea rows={3} value={form.capabilities} onChange={(event) => setForm({ ...form, capabilities: event.target.value })} /></Field>
-      <AgentCollectionSelector collections={collections} selectedIds={createCollectionIds} onChange={setCreateCollectionIds} loading={selectorLoading} loadError={collectionsError} />
+      <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={createCollectionIds} onChange={setCreateCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />
       {formError && <div role="alert" className="alert error">{formError}</div>}
       <button className="button primary" disabled={!!busy || !collectionsReady}>{busy ? "Creating…" : "Create agent"}</button>
     </form></Modal>}
@@ -221,9 +247,9 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       <Field label="Description"><textarea rows={4} value={editForm.description} onChange={(event) => setEditForm({ ...editForm, description: event.target.value })} /></Field>
       <Field label="Capabilities" hint="Comma-separated capability keys"><input value={editForm.capabilities} onChange={(event) => setEditForm({ ...editForm, capabilities: event.target.value })} /></Field>
       <Field label="Status"><select value={editForm.status} onChange={(event) => setEditForm({ ...editForm, status: event.target.value })}><option value="active">Active</option><option value="draft">Draft</option></select></Field>
-      {editLoading ? <p role="status" className="muted">Loading current collection assignments…</p> : editLoadError ? <div role="alert" className="alert error">{editLoadError}</div> : <AgentCollectionSelector collections={collections} selectedIds={editCollectionIds} onChange={setEditCollectionIds} loading={selectorLoading} loadError={collectionsError} />}
+      {editLoading ? <p role="status" className="muted">Loading current collection assignments…</p> : editLoadError ? <div role="alert" className="alert error">{editLoadError}</div> : <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={editCollectionIds} onChange={setEditCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />}
       {formError && <div role="alert" className="alert error">{formError}</div>}
-      <button className="button primary" disabled={!!busy || editLoading || !!editLoadError || !collectionsReady || (assignmentsChanged && unavailableSelected)}>{busy ? "Saving…" : "Save agent"}</button>
+      <button className="button primary" disabled={!!busy || editLoading || !!editLoadError || !canSaveAssignments}>{busy ? "Saving…" : "Save agent"}</button>
     </form></Modal>}
   </>;
 }

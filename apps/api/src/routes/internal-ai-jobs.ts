@@ -35,6 +35,29 @@ function chunkText(text: string, maxChars = 3500, overlap = 400): string[] {
   return chunks.filter(Boolean);
 }
 
+export function assertTrainingCollectionSnapshot(
+  captured: unknown,
+  current: Array<{ id: string; schema_version: number }>,
+): void {
+  // Older jobs did not capture collection versions; retain their existing behavior.
+  if (!Array.isArray(captured)) return;
+  const capturedIds = captured.map((collection) => collection.id).sort();
+  const currentIds = current.map((collection) => collection.id).sort();
+  if (JSON.stringify(capturedIds) !== JSON.stringify(currentIds)) {
+    throw new ApiError(409, "TRAINING_INPUT_STALE", "The agent's linked collections changed after the training job was created. Start a new training job.");
+  }
+  for (const collection of captured) {
+    const schema = current.find((candidate) => candidate.id === collection.id);
+    if (!schema || Number(schema.schema_version) !== Number(collection.schemaVersion)) {
+      throw new ApiError(409, "TRAINING_INPUT_STALE", "A linked collection schema changed after the training job was created. Start a new training job.", {
+        collectionId: collection.id,
+        capturedVersion: collection.schemaVersion,
+        currentVersion: schema?.schema_version ?? null,
+      });
+    }
+  }
+}
+
 export async function internalAiJobRoutes(app: FastifyInstance) {
   app.post("/v1/internal/training/synthesize", async (request, reply) => {
     requireInternal(request);
@@ -62,13 +85,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
       WHERE acl.agent_profile_id=$1 AND acl.tenant_id=$2 AND c.tenant_id=$2 AND c.business_id=$3 AND c.status='active'
       GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version,c.updated_at ORDER BY c.name
     `, [row.agent_profile_id, row.tenant_id, row.business_id]);
-    const capturedVersions=Array.isArray(row.input_snapshot?.collectionVersions)?row.input_snapshot.collectionVersions:[];
-    for(const captured of capturedVersions){
-      const current=schemas.rows.find((schema:any)=>schema.id===captured.id);
-      if(!current || Number(current.schema_version)!==Number(captured.schemaVersion)){
-        throw new ApiError(409,"TRAINING_INPUT_STALE","A linked collection schema changed after the training job was created. Start a new training job.",{collectionId:captured.id,capturedVersion:captured.schemaVersion,currentVersion:current?.schema_version??null});
-      }
-    }
+    assertTrainingCollectionSnapshot(row.input_snapshot?.collectionVersions, schemas.rows);
     const model = await resolveTaskModel(row.tenant_id, row.business_id, row.agent_profile_id, "PROMPT_SYNTHESIS", row.model_config_id);
     const system = `You are a prompt engineer for a multi-tenant business automation platform. Synthesize a production agent prompt from approved demonstrations. Preserve safety and grounding rules. Do not copy mutable product/service facts into the prompt. Return strict JSON with keys sections (object) and evaluation (object). The sections object should include core_role, tone_language, grounding, capabilities, business_process, human_handoff, restrictions, and custom_instructions.`;
     const result = await chat(model, { model: model.model, parameters: model.parameters ?? {} }, {
