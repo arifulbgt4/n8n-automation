@@ -18,6 +18,8 @@ import { requireAgentTrainingOff } from "../training-guards.js";
 
 const providerSchema = z.enum(["openai", "anthropic", "gemini", "openai_compatible"]);
 const taskKeys = ["DEFAULT_CHAT", "INTENT_CLASSIFICATION", "IMAGE_ANALYSIS", "AUDIO_TRANSCRIPTION", "STRUCTURED_EXTRACTION", "PROMPT_SYNTHESIS", "EMBEDDINGS"] as const;
+const collectionIdsSchema = z.array(z.string().uuid()).max(50)
+  .refine((ids) => new Set(ids).size === ids.length, "Collection IDs must be unique.");
 
 async function loadProvider(tenantId: string, id: string) {
   const result = await query<AiConnection & { id: string; tenant_id: string; business_id: string | null; name: string; status: string }>(
@@ -228,7 +230,7 @@ export async function aiRoutes(app: FastifyInstance) {
       capabilities: z.array(z.string().regex(/^[A-Z0-9_]+$/)).max(50).default([]),
       behaviorSettings: z.record(z.string(), z.unknown()).default({}),
       channelIds: z.array(z.string().uuid()).max(50).default([]),
-      collectionIds: z.array(z.string().uuid()).max(50).default([]),
+      collectionIds: collectionIdsSchema.default([]),
       templateKey: z.string().regex(/^[a-z0-9_-]+$/).max(100).optional(),
       initialPrompt: z.record(z.string(), z.unknown()).optional(),
     }).parse(request.body);
@@ -258,7 +260,7 @@ export async function aiRoutes(app: FastifyInstance) {
         await client.query("INSERT INTO agent_channel_links(agent_profile_id,channel_account_id,tenant_id) VALUES ($1,$2,$3)", [created.rows[0].id, channelId, tenantId]);
       }
       for (const collectionId of input.collectionIds) {
-        const collection = await client.query("SELECT id FROM collections WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [collectionId, tenantId, input.businessId]);
+        const collection = await client.query("SELECT id FROM collections WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND status='active' FOR SHARE", [collectionId, tenantId, input.businessId]);
         if (!collection.rows[0]) throw new ApiError(400, "COLLECTION_SCOPE_INVALID", "Agent collection must belong to the same business.");
         await client.query("INSERT INTO agent_collection_links(agent_profile_id,collection_id,tenant_id) VALUES ($1,$2,$3)", [created.rows[0].id, collectionId, tenantId]);
       }
@@ -286,9 +288,30 @@ export async function aiRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
-    const input = z.object({ name: z.string().trim().min(1).max(160).optional(), description: z.string().max(2000).nullable().optional(), capabilities: z.array(z.string()).max(50).optional(), behaviorSettings: z.record(z.string(), z.unknown()).optional(), status: z.enum(["active", "draft", "archived"]).optional() }).parse(request.body);
+    const input = z.object({ name: z.string().trim().min(1).max(160).optional(), description: z.string().max(2000).nullable().optional(), capabilities: z.array(z.string()).max(50).optional(), behaviorSettings: z.record(z.string(), z.unknown()).optional(), status: z.enum(["active", "draft", "archived"]).optional(), collectionIds: collectionIdsSchema.optional() }).parse(request.body);
     const result = await transaction(async (client) => {
-      if (input.status) await requireAgentTrainingOff(client,params.tenantId,params.agentId);
+      if (input.status || input.collectionIds !== undefined) await requireAgentTrainingOff(client,params.tenantId,params.agentId);
+      const current = await client.query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3 FOR UPDATE", [params.agentId, params.tenantId, agent.business_id]);
+      if (!current.rows[0]) throw new ApiError(404, "AGENT_NOT_FOUND", "AI agent not found.");
+      if (input.collectionIds !== undefined) {
+        const collections = await client.query<{ id: string }>(`
+          SELECT id FROM collections
+          WHERE tenant_id=$1 AND business_id=$2 AND status='active' AND id=ANY($3::uuid[])
+          ORDER BY id FOR SHARE
+        `, [params.tenantId, agent.business_id, input.collectionIds]);
+        if (collections.rows.length !== input.collectionIds.length) {
+          throw new ApiError(400, "COLLECTION_SCOPE_INVALID", "Agent collections must be active and belong to the same business.");
+        }
+        await client.query(`
+          DELETE FROM agent_collection_links
+          WHERE agent_profile_id=$1 AND tenant_id=$2 AND NOT (collection_id=ANY($3::uuid[]))
+        `, [params.agentId, params.tenantId, input.collectionIds]);
+        await client.query(`
+          INSERT INTO agent_collection_links(agent_profile_id,collection_id,tenant_id)
+          SELECT $1, id, $2 FROM unnest($3::uuid[]) AS selected(id)
+          ON CONFLICT (agent_profile_id,collection_id) DO NOTHING
+        `, [params.agentId, params.tenantId, input.collectionIds]);
+      }
       return client.query(`
         UPDATE agent_profiles SET name=COALESCE($3,name),description=CASE WHEN $4::boolean THEN $5 ELSE description END,
           capabilities=COALESCE($6,capabilities),behavior_settings=CASE WHEN $7::jsonb IS NULL THEN behavior_settings ELSE behavior_settings || $7::jsonb END,

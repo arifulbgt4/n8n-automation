@@ -12,6 +12,7 @@ import {
 } from "@n8n-automation/core";
 import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
 import { ApiError, requestId, safeSecretEqual } from "../lib.js";
+import { findRelevantItems } from "../catalog-lookup.js";
 import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
 import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
 
@@ -49,10 +50,12 @@ async function runtimeContext(turnId: string) {
     SELECT c.id,c.name,c.key,c.purpose,c.schema_version,
       COALESCE(jsonb_agg(jsonb_build_object('key',f.key,'label',f.label,'type',f.type,'required',f.required,'aiVisible',f.ai_visible,'options',f.options_json) ORDER BY f.display_order) FILTER (WHERE f.id IS NOT NULL),'[]'::jsonb) AS fields
     FROM agent_collection_links acl JOIN collections c ON c.id=acl.collection_id
-    LEFT JOIN collection_fields f ON f.collection_id=c.id
+    JOIN collection_channel_links ccl ON ccl.collection_id=c.id AND ccl.channel_account_id=$4
+      AND ccl.tenant_id=$2 AND ccl.active=true
+    LEFT JOIN collection_fields f ON f.collection_id=c.id AND f.tenant_id=$2 AND f.ai_visible=true
     WHERE acl.agent_profile_id=$1 AND acl.tenant_id=$2 AND c.tenant_id=$2 AND c.business_id=$3 AND c.status='active'
     GROUP BY c.id,c.name,c.key,c.purpose,c.schema_version ORDER BY max(acl.priority) DESC
-  `, [row.agent_profile_id, row.tenant_id, row.business_id]) : { rows: [] } as any;
+  `, [row.agent_profile_id, row.tenant_id, row.business_id, row.channel_account_id]) : { rows: [] } as any;
   const media = await query<any>(`
     SELECT mm.message_id,ma.id AS asset_id,ma.storage_file_id,ma.storage_user_id,ma.original_name,ma.mime_type,ma.kind,ma.size_bytes,ma.visibility
     FROM message_media mm
@@ -65,26 +68,6 @@ async function runtimeContext(turnId: string) {
     ORDER BY m.created_at,mm.display_order
   `, [turnId, row.tenant_id, row.business_id]);
   return { row, messages: messages.rows, recent: recent.rows.reverse(), schemas: schemas.rows, media: media.rows };
-}
-
-async function findRelevantItems(tenantId: string, businessId: string, agentId: string | null, text: string) {
-  if (!agentId || !text.trim()) return [];
-  const words = text.toLowerCase().split(/\s+/).filter((word) => word.length >= 3).slice(0, 8);
-  const needle = words.join(" ");
-  if (!needle) return [];
-  const result = await query(`
-    SELECT i.id,i.collection_id,i.title,i.data_jsonb,c.name AS collection_name,c.purpose
-    FROM collection_items i
-    JOIN collections c ON c.id=i.collection_id
-    JOIN agent_collection_links acl ON acl.collection_id=c.id AND acl.agent_profile_id=$3
-    WHERE i.tenant_id=$1 AND i.business_id=$2 AND c.tenant_id=$1 AND c.business_id=$2 AND c.status='active'
-      AND acl.tenant_id=$1 AND i.status='active'
-      AND (i.title ILIKE '%'||$4||'%' OR i.data_jsonb::text ILIKE '%'||$4||'%' OR EXISTS (
-        SELECT 1 FROM unnest(string_to_array($4,' ')) w WHERE length(w)>=3 AND (i.title ILIKE '%'||w||'%' OR i.data_jsonb::text ILIKE '%'||w||'%')
-      ))
-    ORDER BY i.updated_at DESC LIMIT 20
-  `, [tenantId, businessId, agentId, needle]);
-  return result.rows;
 }
 
 async function findKnowledge(tenantId: string, businessId: string, agentId: string | null, channelId: string, text: string, turnId: string) {
@@ -214,7 +197,7 @@ export async function internalRoutes(app: FastifyInstance) {
       await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:extra.task,model:extra.model,usage:extra.usage,correlationId:requestId(request),idempotencyKey:`ai-extra:${input.turnId}:${index}:${extra.task}`});
     }
     const turnText = [originalTurnText, multimodal.transcript, multimodal.imageAnalysis].filter(Boolean).join("\n\n");
-    const items = await findRelevantItems(row.tenant_id, row.business_id, row.agent_profile_id, turnText);
+    const items = await findRelevantItems(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText);
     const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText, input.turnId);
     const modelCandidates = await resolveModels(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, "DEFAULT_CHAT");
     if (!modelCandidates.length) throw new ApiError(409, "AI_MODEL_MISSING", "No platform DEFAULT_CHAT model is configured.");
