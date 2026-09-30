@@ -56,7 +56,7 @@ Show actionable state:
 - orders/bookings/leads by channel.
 - conversion summaries.
 - relevant queue/backlog warnings.
-- training candidates awaiting review.
+- optional manual training candidates awaiting review.
 - usage vs plan limits.
 - media storage usage/quota where plan exposes it.
 
@@ -225,8 +225,9 @@ Prompt versions support draft, test, publish, archive, rollback. Mutable busines
 Supports:
 
 - existing agent/channel selection and a session ON/OFF control.
-- captured customer/native-owner exchanges within the active session only.
-- clear provider capability status before enabling native reply capture.
+- customer messages paired with successfully delivered Customer Panel HUMAN replies during the active session.
+- verified Facebook Page Inbox echoes when the Page supports native capture; unsupported Instagram and WhatsApp native echoes are excluded without blocking Customer Panel reply training.
+- clear channel capability and eligible reply-source status.
 - approve/reject examples.
 - simulator customer message + ideal response pairs.
 - text/media examples.
@@ -235,7 +236,9 @@ Supports:
 - candidate diff.
 - sandbox test.
 - publish/discard/rollback.
-- explicit review/publish for native channel session candidates.
+- automatic publication after Training OFF from approved current and earlier retained examples, with the previous published prompt active during the update.
+- an unchanged prompt after an empty session, and a failed-update state with retry.
+- optional manual candidate review and publication, separate from the ON/OFF session flow.
 
 Training is behavior/prompt synthesis by default, not foundation-model fine-tuning.
 

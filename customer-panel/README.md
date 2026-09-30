@@ -16,7 +16,7 @@ Canonical specification: [`../docs/04_CUSTOMER_PANEL.md`](../docs/04_CUSTOMER_PA
 - Orders, bookings, leads, appointments, quotes, and capability-specific business actions.
 - AI provider/BYOK configuration.
 - AI agent profiles, prompts, versions, and channel assignments.
-- Training Studio with agent-and-channel Training ON/OFF, native conversation examples, and candidate review.
+- Training Studio with agent-and-channel Training ON/OFF, Customer Panel HUMAN replies and eligible native examples, automatic session publication, and optional manual candidate review.
 - Knowledge/RAG management.
 - Media library backed by the OpenMusk/VPS media storage service.
 - Messaging, AI, media, and follow-up limits.
