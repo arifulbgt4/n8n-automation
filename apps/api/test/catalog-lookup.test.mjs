@@ -16,8 +16,11 @@ test("recognizes general catalog questions without treating specific price quest
     "আপনাদের পণ্যের তালিকা দেখান",
     "What products do you have?",
     "Show me your catalog",
+    "ki ki product acy?",
+    "apnader kache ki ki product ache?",
+    "products ki ki ache?",
   ]) assert.equal(isCatalogBrowseRequest(text), true, text);
-  for (const text of ["Tangail suti saree এর দাম কত?", "What is the price of Tangail saree?"]) {
+  for (const text of ["Tangail suti saree এর দাম কত?", "What is the price of Tangail saree?", "Tangail product price koto?"]) {
     assert.equal(isCatalogBrowseRequest(text), false, text);
   }
 });
@@ -83,6 +86,8 @@ test("catalog lookup uses only active products linked to this agent, channel, te
     const lookup = (channel, text) => findRelevantItems(tenantId,businessId,agentId,channel,text,(sql,values) => client.query(sql,values));
     const browse = await lookup(channelId,"তোমাদের কাছে কি কি প্রোডাক্ট আছে?");
     assert.deepEqual(new Set(browse.map(row => row.id)),new Set([tangailId,scarfId]));
+    const banglishBrowse = await lookup(channelId,"ki ki product acy?");
+    assert.deepEqual(new Set(banglishBrowse.map(row => row.id)),new Set([tangailId,scarfId]));
     assert.equal(browse.find(row => row.id === tangailId).data_jsonb.price,799);
     assert.equal(browse.find(row => row.id === tangailId).data_jsonb.internal_margin,undefined);
     assert.equal((await lookup(channelId,"Tangail suti saree দাম কত?")).map(row => row.id).join(),tangailId);

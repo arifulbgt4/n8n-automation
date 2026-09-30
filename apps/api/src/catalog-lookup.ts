@@ -15,7 +15,7 @@ type CatalogQuery = (sql: string, values: unknown[]) => Promise<{ rows: CatalogI
 // are unlikely to match a product title or description.
 export function isCatalogBrowseRequest(text: string): boolean {
   const normalized = text.toLowerCase().normalize("NFC");
-  return /(?:কি\s*কি|কী\s*কী|কোন\s*কোন)\s*(?:প্রোডাক্ট|পণ্য|পন্য|জিনিস|আইটেম)|(?:প্রোডাক্ট|পণ্য|পন্য|জিনিস|আইটেম)(?:গুলো|গুলি|সমূহ)?\s*(?:কি\s*কি|কী\s*কী|তালিকা|লিস্ট)|(?:প্রোডাক্ট|পণ্য|পন্য|ক্যাটালগ|কালেকশন)(?:গুলোর|গুলো|গুলি|সমূহ|ের)?\s*(?:তালিকা|লিস্ট|দেখা[নও]?)|\b(?:what|which)\s+(?:are\s+)?(?:your\s+)?(?:available\s+)?(?:products?|items?)\b|\b(?:show|list|browse)\s+(?:me\s+)?(?:your\s+|the\s+)?(?:products?|items?|catalog(?:ue)?)\b|\b(?:products?|items?)\s+list\b/i.test(normalized);
+  return /(?:কি\s*কি|কী\s*কী|কোন\s*কোন)\s*(?:প্রোডাক্ট|পণ্য|পন্য|জিনিস|আইটেম)|(?:প্রোডাক্ট|পণ্য|পন্য|জিনিস|আইটেম)(?:গুলো|গুলি|সমূহ)?\s*(?:কি\s*কি|কী\s*কী|তালিকা|লিস্ট)|(?:প্রোডাক্ট|পণ্য|পন্য|ক্যাটালগ|কালেকশন)(?:গুলোর|গুলো|গুলি|সমূহ|ের)?\s*(?:তালিকা|লিস্ট|দেখা[নও]?)|\b(?:what|which)\s+(?:are\s+)?(?:your\s+)?(?:available\s+)?(?:products?|items?)\b|\b(?:show|list|browse)\s+(?:me\s+)?(?:your\s+|the\s+)?(?:products?|items?|catalog(?:ue)?)\b|\b(?:products?|items?)\s+list\b|\b(?:ki\s*ki|kiki|kon\s*kon)\b(?:\s+\w+){0,4}\s+\b(?:products?|items?|catalog(?:ue)?)\b|\b(?:products?|items?|catalog(?:ue)?)\b(?:\s+\w+){0,3}\s+\b(?:ki\s*ki|kiki|kon\s*kon|list|gulo|gula)\b/i.test(normalized);
 }
 
 export async function findRelevantItems(
