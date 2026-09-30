@@ -12,7 +12,8 @@ import {
 } from "@n8n-automation/core";
 import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
 import { ApiError, requestId, safeSecretEqual } from "../lib.js";
-import { findRelevantItems } from "../catalog-lookup.js";
+import { findRelevantItems, isCatalogMediaRequest, isSpecificCatalogMediaRequest } from "../catalog-lookup.js";
+import { buildGroundedCatalogResponse } from "../catalog-response.js";
 import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
 import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
 
@@ -124,9 +125,11 @@ async function readMedia(tenantId: string, item: any): Promise<BinaryAiInput> {
   };
 }
 
-async function multimodalContext(context: any) {
+async function multimodalContext(context: any, maxImages = 20) {
   const row = context.row;
-  const images = (context.media ?? []).filter((item: any) => item.kind === "image" || String(item.mime_type).startsWith("image/")).slice(0, 5);
+  const images = (context.media ?? [])
+    .filter((item: any) => item.kind === "image" || String(item.mime_type).startsWith("image/"))
+    .slice(0,Math.max(1,Math.min(20,maxImages)));
   const audio = (context.media ?? []).find((item: any) => item.kind === "audio" || String(item.mime_type).startsWith("audio/"));
   const result: { imageAnalysis?: string; transcript?: string; usage: Array<{task:string;model:PlatformAiModel;usage:any}> } = { usage: [] };
 
@@ -192,7 +195,8 @@ export async function internalRoutes(app: FastifyInstance) {
     if (row.mode !== "AI" || row.conversation_status !== "open") throw new ApiError(409, "CONVERSATION_NOT_AI_ELIGIBLE", "Conversation is not eligible for an AI response.");
     if (!row.agent_profile_id || !row.active_prompt_version_id) throw new ApiError(409, "AGENT_NOT_CONFIGURED", "Conversation has no active AI agent/prompt.");
     const originalTurnText = context.messages.map((message: any) => message.text_content).filter(Boolean).join("\n");
-    const multimodal = await multimodalContext(context);
+    const imageLimit = await maxImagesPerResponse(row.tenant_id,row.channel_account_id);
+    const multimodal = await multimodalContext(context,20);
     for (const [index, extra] of multimodal.usage.entries()) {
       await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:extra.task,model:extra.model,usage:extra.usage,correlationId:requestId(request),idempotencyKey:`ai-extra:${input.turnId}:${index}:${extra.task}`});
     }
@@ -210,7 +214,8 @@ export async function internalRoutes(app: FastifyInstance) {
       `\nRelevant knowledge: ${JSON.stringify(knowledge)}`,
       multimodal.transcript ? `\nAudio transcript: ${multimodal.transcript}` : "",
       multimodal.imageAnalysis ? `\nImage observations: ${multimodal.imageAnalysis}` : "",
-      "\nRespond as strict JSON with keys: messages (array of {type:'text',text:string} or {type:'media',assetId:string}), actions (array of {tool:string,arguments:object}), handoff (boolean), handoffReason (string|null). Keep responses concise and grounded.",
+      "\nOnly Relevant current items[].media[].assetId values are approved for catalog media replies. When the customer explicitly asks for a product photo or image, include appropriate approved media messages; never invent, copy from hidden fields, or guess an asset ID. The server may add other approved catalog images up to the configured limit.",
+      "\nRespond as strict JSON with keys: messages (array of {type:'text',text:string} or {type:'media',assetId:string,caption?:string}), actions (array of {tool:string,arguments:object}), handoff (boolean), handoffReason (string|null). Keep responses concise and grounded.",
     ].join("\n");
     const history = context.recent.filter((message: any) => message.text_content).map((message: any) => ({
       role: message.sender_type === "CONTACT" || message.sender_type === "TRAINER" ? "user" as const : "assistant" as const,
@@ -236,10 +241,14 @@ export async function internalRoutes(app: FastifyInstance) {
     } catch {
       parsed = { messages: [{ type: "text", text: result.text.trim() || "I’m unable to answer that right now." }], actions: [], handoff: false, handoffReason: null };
     }
-    const rawMessages = Array.isArray(parsed.messages) ? parsed.messages.slice(0, 20).filter((message: any) => message && (message.type === "text" || message.type === "media")) : [];
-    const imageLimit = await maxImagesPerResponse(row.tenant_id);
-    let mediaCount = 0;
-    const messages = rawMessages.filter((message: any) => message.type !== "media" || mediaCount++ < imageLimit).slice(0, 10);
+    const messages = buildGroundedCatalogResponse({
+      rawMessages:Array.isArray(parsed.messages) ? parsed.messages : [],
+      items,
+      explicitMediaRequest:isCatalogMediaRequest(originalTurnText),
+      specificMediaRequest:isSpecificCatalogMediaRequest(originalTurnText),
+      imageLimit,
+      totalMessageLimit:20,
+    });
     const actions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 5) : [];
     if (!messages.length && !parsed.handoff) messages.push({ type: "text", text: "I’m unable to answer that right now. A team member can help if needed." });
     await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:"DEFAULT_CHAT",model,usage:result.usage,correlationId:requestId(request),idempotencyKey:`ai:${input.turnId}:${row.active_prompt_version_id}`});
@@ -348,7 +357,7 @@ export async function internalRoutes(app: FastifyInstance) {
       channelAccountId: z.string().uuid(),
       conversationId: z.string().uuid(),
       stateVersion: z.number().int().positive().optional(),
-      messages: z.array(z.union([z.object({ type: z.literal("text"), text: z.string().min(1).max(20000) }), z.object({ type: z.literal("media"), assetId: z.string().uuid(), caption: z.string().max(2000).nullable().optional() })])).min(1).max(10),
+      messages: z.array(z.union([z.object({ type: z.literal("text"), text: z.string().min(1).max(20000) }), z.object({ type: z.literal("media"), assetId: z.string().uuid(), caption: z.string().max(2000).nullable().optional() })])).min(1).max(20),
       priority: z.enum(["HUMAN", "TRANSACTIONAL", "CUSTOMER_ACTIVE", "NORMAL", "FOLLOWUP"]).default("CUSTOMER_ACTIVE"),
       senderType: z.enum(["AI", "HUMAN", "SYSTEM"]).default("AI"),
       logicalResponseId: z.string().min(1).max(200).optional(),
@@ -371,7 +380,8 @@ export async function internalRoutes(app: FastifyInstance) {
           throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset is unavailable for this business.");
         }
       }
-      const jobId = `outbound:${logicalResponseId}:${i++}`;
+      const sequenceIndex = i++;
+      const jobId = `outbound:${logicalResponseId}:${sequenceIndex}`;
       const priorityMap={HUMAN:1,TRANSACTIONAL:2,CUSTOMER_ACTIVE:3,NORMAL:5,FOLLOWUP:8} as const;
       await enqueue(QUEUES.outbound, {
         jobId,
@@ -383,7 +393,7 @@ export async function internalRoutes(app: FastifyInstance) {
         correlationId: requestId(request),
         idempotencyKey: jobId,
         createdAt: new Date().toISOString(),
-        payload: { logicalResponseId, priority: input.priority, senderType: input.senderType, message },
+        payload: { logicalResponseId, sequenceIndex, sequenceLength:input.messages.length, priority: input.priority, senderType: input.senderType, message },
       }, { priority: priorityMap[input.priority] });
     }
     reply.code(202).send({ ok: true, logicalResponseId, queued: input.messages.length });

@@ -135,31 +135,42 @@ export function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
       for (const event of [...(entry.messaging ?? []),...(entry.standby ?? [])]) {
         if (!event.message) continue;
         const isEcho = Boolean(event.message.is_echo);
-        const attachment = event.message.attachments?.[0];
-        let type: NormalizedInboundMessage["type"] = "text";
-        if (attachment?.type === "image") type = "image";
-        else if (attachment?.type === "audio") type = "audio";
-        else if (attachment?.type === "video") type = "video";
-        else if (attachment?.type === "file") type = "document";
-        messages.push({
-          platform,
-          channelExternalId: String((isEcho ? event.sender?.id : event.recipient?.id) ?? entry.id ?? ""),
-          eventId: String(event.message.mid ?? `${entry.id}:${event.timestamp}:${event.sender?.id}`),
-          messageId: String(event.message.mid ?? randomToken(12)),
-          senderExternalId: String((isEcho ? event.recipient?.id : event.sender?.id) ?? ""),
-          type,
-          text: event.message.text ?? attachment?.payload?.title ?? null,
-          providerMediaUrl: attachment?.payload?.url ?? null,
-          providerTimestamp: event.timestamp ? new Date(Number(event.timestamp)).toISOString() : null,
-          metadata: {
-            isEcho,
-            appId: event.message.app_id ?? null,
-            attachments: event.message.attachments ?? [],
-            replyTo: event.message.reply_to?.mid ?? null,
-            recipientId: event.recipient?.id ?? null,
-            providerFilename: attachment?.payload?.title ?? null,
-          },
-        });
+        const attachments = Array.isArray(event.message.attachments) ? event.message.attachments : [];
+        const normalizedAttachments = attachments.length ? attachments : [null];
+        const originalEventId = String(event.message.mid ?? `${entry.id}:${event.timestamp}:${event.sender?.id}`);
+        const originalMessageId = String(event.message.mid ?? originalEventId);
+        const hasMultipleAttachments = attachments.length > 1;
+        for (const [attachmentIndex, attachment] of normalizedAttachments.entries()) {
+          let type: NormalizedInboundMessage["type"] = "text";
+          if (attachment?.type === "image") type = "image";
+          else if (attachment?.type === "audio") type = "audio";
+          else if (attachment?.type === "video") type = "video";
+          else if (attachment?.type === "file") type = "document";
+          messages.push({
+            platform,
+            channelExternalId: String((isEcho ? event.sender?.id : event.recipient?.id) ?? entry.id ?? ""),
+            eventId: hasMultipleAttachments ? `${originalEventId}:attachment:${attachmentIndex}` : originalEventId,
+            messageId: hasMultipleAttachments ? `${originalMessageId}:attachment:${attachmentIndex}` : String(event.message.mid ?? randomToken(12)),
+            senderExternalId: String((isEcho ? event.recipient?.id : event.sender?.id) ?? ""),
+            type,
+            text: attachmentIndex === 0 ? event.message.text ?? attachment?.payload?.title ?? null : null,
+            providerMediaUrl: attachment?.payload?.url ?? null,
+            providerTimestamp: event.timestamp ? new Date(Number(event.timestamp)).toISOString() : null,
+            metadata: {
+              isEcho,
+              appId: event.message.app_id ?? null,
+              attachments,
+              replyTo: event.message.reply_to?.mid ?? null,
+              recipientId: event.recipient?.id ?? null,
+              providerFilename: attachment?.payload?.title ?? null,
+              ...(hasMultipleAttachments ? {
+                originalMessageId,
+                attachmentIndex,
+                attachmentCount: attachments.length,
+              } : {}),
+            },
+          });
+        }
       }
     }
   }

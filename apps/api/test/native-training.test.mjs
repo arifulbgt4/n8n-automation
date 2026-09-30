@@ -21,6 +21,62 @@ test("Facebook Page Inbox echo resolves the Page as channel and the recipient as
   assert.equal(isNativeHumanReply(owner),true);
 });
 
+test("Facebook and Instagram normalize each attachment without duplicating message text", () => {
+  for (const object of ["page","instagram"]) {
+    const channelId = object === "page" ? "page-1" : "ig-1";
+    const messages = normalizeMetaPayload({object,entry:[{id:channelId,messaging:[{
+      sender:{id:"contact-1"},recipient:{id:channelId},timestamp:1_700_000_000_000,
+      message:{mid:"multi-1",text:"Two files",attachments:[
+        {type:"image",payload:{url:"https://example.test/photo.jpg",title:"photo.jpg"}},
+        {type:"file",payload:{url:"https://example.test/guide.pdf",title:"guide.pdf"}},
+      ]},
+    }]}]});
+
+    assert.equal(messages.length,2);
+    assert.deepEqual(messages.map(message=>message.messageId),[
+      "multi-1:attachment:0",
+      "multi-1:attachment:1",
+    ]);
+    assert.deepEqual(messages.map(message=>message.eventId),[
+      "multi-1:attachment:0",
+      "multi-1:attachment:1",
+    ]);
+    assert.deepEqual(messages.map(message=>message.type),["image","document"]);
+    assert.deepEqual(messages.map(message=>message.text),["Two files",null]);
+    assert.deepEqual(messages.map(message=>message.providerMediaUrl),[
+      "https://example.test/photo.jpg",
+      "https://example.test/guide.pdf",
+    ]);
+    assert.deepEqual(messages.map(message=>message.metadata.providerFilename),["photo.jpg","guide.pdf"]);
+    assert.deepEqual(messages.map(message=>({
+      originalMessageId:message.metadata.originalMessageId,
+      attachmentIndex:message.metadata.attachmentIndex,
+      attachmentCount:message.metadata.attachmentCount,
+    })),[
+      {originalMessageId:"multi-1",attachmentIndex:0,attachmentCount:2},
+      {originalMessageId:"multi-1",attachmentIndex:1,attachmentCount:2},
+    ]);
+  }
+});
+
+test("Facebook keeps the provider IDs for a single attachment", () => {
+  const [message] = normalizeMetaPayload({object:"page",entry:[{id:"page-1",messaging:[{
+    sender:{id:"contact-1"},recipient:{id:"page-1"},timestamp:1_700_000_000_000,
+    message:{mid:"single-1",text:"One file",attachments:[
+      {type:"image",payload:{url:"https://example.test/photo.jpg",title:"photo.jpg"}},
+    ]},
+  }]}]});
+
+  assert.equal(message.messageId,"single-1");
+  assert.equal(message.eventId,"single-1");
+  assert.equal(message.text,"One file");
+  assert.equal(message.providerMediaUrl,"https://example.test/photo.jpg");
+  assert.equal(message.metadata.providerFilename,"photo.jpg");
+  assert.equal(message.metadata.originalMessageId,undefined);
+  assert.equal(message.metadata.attachmentIndex,undefined);
+  assert.equal(message.metadata.attachmentCount,undefined);
+});
+
 test("an API echo or Instagram echo cannot become a native human training reply", () => {
   const [apiEcho] = normalizeMetaPayload({object:"page",entry:[{id:"page-1",messaging:[{
     sender:{id:"page-1"},recipient:{id:"contact-1"},timestamp:1_700_000_001_000,

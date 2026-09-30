@@ -116,11 +116,8 @@ async function aggregateConversation(job: Job<JobEnvelope<any>>) {
         AND metadata->>'mediaIngestStatus'='pending'
     `, [conversationId]);
     if (Number(mediaPending.rows[0]?.count ?? 0) > 0) {
-      const oldestAt = mediaPending.rows[0]?.oldest ? new Date(mediaPending.rows[0].oldest).getTime() : Date.now();
-      if (Date.now() - oldestAt < 30_000) {
-        await job.moveToDelayed(Date.now() + 750, job.token!);
-        return;
-      }
+      await job.moveToDelayed(Date.now() + 750, job.token!);
+      return;
     }
     const pending = await query<any>(`
       SELECT m.id,m.created_at,
@@ -236,6 +233,27 @@ async function fetchAssetBytes(tenantId: string, asset: any, signal?: AbortSigna
   return { bytes: await response.arrayBuffer(), mime: response.headers.get("content-type") || asset.mime_type || "application/octet-stream" };
 }
 
+async function ensureProviderAccessibleAsset(tenantId: string, asset: any, signal: AbortSignal) {
+  if (asset.public_url) return asset;
+  if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
+  const credential = await mediaApiKeyForAsset(tenantId,asset.storage_user_id);
+  const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{
+    method:"PATCH",
+    headers:{authorization:`Bearer ${credential}`,"content-type":"application/json"},
+    body:JSON.stringify({visibility:"public"}),
+    signal,
+  });
+  const body = await response.json().catch(()=>({}));
+  if (!response.ok) throw new Error((body as any)?.message || (body as any)?.error?.message || `Media publication failed with ${response.status}`);
+  const file = (body as any)?.file ?? body;
+  if (!file?.public_url) throw new Error("Media Storage did not return a provider-accessible public URL");
+  const updated = await query<any>(`UPDATE media_assets
+    SET visibility='public',public_url=$3,updated_at=now()
+    WHERE id=$1 AND tenant_id=$2 RETURNING *`,[asset.id,tenantId,String(file.public_url)]);
+  if (!updated.rows[0]) throw new Error("Media asset disappeared while publishing it for provider delivery");
+  return updated.rows[0];
+}
+
 
 async function fetchInboundMedia(tenantId: string, messageId: string) {
   const result = await query<any>(`
@@ -265,6 +283,7 @@ async function fetchInboundMedia(tenantId: string, messageId: string) {
     const version = row.graph_api_version || config.META_GRAPH_API_VERSION;
     const infoResponse = await fetch(`https://graph.facebook.com/${version}/${encodeURIComponent(mediaId)}`, {
       headers: { authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(45_000),
     });
     const info = await infoResponse.json().catch(() => ({}));
     if (!infoResponse.ok || !(info as any).url) {
@@ -275,7 +294,10 @@ async function fetchInboundMedia(tenantId: string, messageId: string) {
   }
 
   if (!sourceUrl) throw new Error("Inbound media source URL is missing");
-  const download = await fetch(sourceUrl, { headers: { authorization: `Bearer ${accessToken}` } });
+  const download = await fetch(sourceUrl, {
+    headers: { authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(45_000),
+  });
   if (!download.ok) throw new Error(`Inbound media download failed with ${download.status}`);
   mime = download.headers.get("content-type") || mime || "application/octet-stream";
   const disposition = download.headers.get("content-disposition") || "";
@@ -307,6 +329,7 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
       method: "POST",
       headers: { authorization: `Bearer ${credential}` },
       body: form,
+      signal: AbortSignal.timeout(120_000),
     });
     const body = await upload.json().catch(() => ({}));
     if (!upload.ok) throw new Error((body as any)?.error?.message || (body as any)?.message || `Media Storage upload failed with ${upload.status}`);
@@ -375,9 +398,15 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
       await releaseLock(lockKey, lock);
     }
   } catch (error) {
+    const finalAttempt = job.attemptsMade + 1 >= Number(job.opts.attempts ?? 1);
     await query(
       "UPDATE messages SET metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1",
-      [messageId,JSON.stringify({ mediaIngestStatus: "error", mediaIngestError: error instanceof Error ? error.message : "media ingestion failed" })],
+      [messageId,JSON.stringify({
+        mediaIngestStatus: finalAttempt ? "error" : "pending",
+        mediaIngestError: finalAttempt ? (error instanceof Error ? error.message : "media ingestion failed") : null,
+        mediaIngestLastError: error instanceof Error ? error.message : "media ingestion failed",
+        mediaIngestAttempt: job.attemptsMade + 1,
+      })],
     ).catch(() => undefined);
     throw error;
   }
@@ -497,8 +526,7 @@ async function sendProviderMessage(tenantId: string, channel: any, message: any,
       const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { text: message.text } }, signal);
       return { providerMessageId: acceptedMessageId(json.message_id) };
     }
-    const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
-    if (!asset.public_url) throw new Error("Instagram media delivery requires a provider-accessible public media URL");
+    const asset = await ensureProviderAccessibleAsset(tenantId,await loadAsset(tenantId, channel.business_id, message.assetId),signal);
     const json = await providerJson(url, token, { recipient: { id: channel.external_contact_id }, message: { attachment: { type: asset.kind === "video" ? "video" : "image", payload: { url: asset.public_url } } } }, signal);
     return { providerMessageId: acceptedMessageId(json.message_id) };
   }
@@ -512,9 +540,20 @@ async function sendProviderMessage(tenantId: string, channel: any, message: any,
     const asset = await loadAsset(tenantId, channel.business_id, message.assetId);
     const mediaId = await whatsappMedia(tenantId, channel, asset, signal);
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : asset.kind === "document" ? "document" : "image";
-    const json = await providerJson(url, token, { messaging_product: "whatsapp", to: channel.external_contact_id, type, [type]: { id: mediaId, ...(message.caption && ["image","video"].includes(type) ? { caption: message.caption } : {}) } }, signal);
-    await query("UPDATE channel_media_cache SET last_used_at=now() WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='whatsapp'", [asset.id,channel.id]);
-    return { providerMessageId: acceptedMessageId(json.messages?.[0]?.id) };
+    const payload = (id:string) => ({ messaging_product: "whatsapp", to: channel.external_contact_id, type, [type]: { id, ...(message.caption && ["image","video"].includes(type) ? { caption: message.caption } : {}) } });
+    try {
+      const json = await providerJson(url,token,payload(mediaId),signal);
+      await query("UPDATE channel_media_cache SET last_used_at=now() WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='whatsapp'", [asset.id,channel.id]);
+      return { providerMessageId: acceptedMessageId(json.messages?.[0]?.id) };
+    } catch (error) {
+      if (error instanceof ProviderOutcomeUnknownError || ![400,404].includes(Number((error as any)?.status))) throw error;
+      await query("UPDATE channel_media_cache SET status='stale',failure_metadata=$3::jsonb WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='whatsapp'",[
+        asset.id,channel.id,JSON.stringify({error:error instanceof Error ? error.message : "send failed"}),
+      ]);
+      const fresh = await whatsappMedia(tenantId,channel,asset,signal);
+      const json = await providerJson(url,token,payload(fresh),signal);
+      return { providerMessageId: acceptedMessageId(json.messages?.[0]?.id) };
+    }
   }
   throw new Error(`Unsupported channel platform ${channel.platform}`);
 }
@@ -524,6 +563,18 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   if (!businessId || !channelAccountId || !conversationId) throw new Error("Outbound job is missing scope identifiers");
   const existing = await query("SELECT id,delivery_status FROM messages WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2 LIMIT 1", [tenantId,idempotencyKey]);
   if (["sent","unknown"].includes(existing.rows[0]?.delivery_status)) return;
+  const sequenceIndex = Number(payload.sequenceIndex ?? 0);
+  if (sequenceIndex > 0 && payload.logicalResponseId) {
+    const previousJobId = `outbound:${payload.logicalResponseId}:${sequenceIndex - 1}`;
+    const previousJob = await queue(QUEUES.outbound).getJob(bullmqJobId(previousJobId));
+    if (previousJob) {
+      const previousState = await previousJob.getState();
+      if (!['completed','failed'].includes(previousState)) {
+        await job.moveToDelayed(Date.now()+250,job.token!);
+        return;
+      }
+    }
+  }
   const channel = await loadChannelRuntime(channelAccountId, conversationId, tenantId, businessId);
   if (!channel.active || channel.connection_status !== "connected" || channel.conversation_status !== "open") throw new Error("Channel or conversation is not active");
   if (payload.senderType !== "HUMAN" && (await channelTrainingActive(channelAccountId) || await automaticMessageFenced(channelAccountId,job.data.createdAt))) {

@@ -131,6 +131,8 @@ For inbound screenshots/photos:
 
 Multiple screenshots may be analyzed together or in bounded batches based on model limits/cost.
 
+The runtime normalizes every Facebook or Instagram attachment in one provider message as an individually durable message while retaining the original message ID and attachment order. WhatsApp's separate media message objects follow the same logical-turn aggregation path. AI processing waits while any selected inbound media upload is still retrying; only ready assets are analyzed, and a terminal ingest error is recorded instead of silently treating a pending image as ready. One turn can currently analyze up to 20 ready images within the configured turn byte/count bounds.
+
 ## 10. Logical response planning
 
 AI/business logic produces a provider-neutral response plan:
@@ -157,6 +159,8 @@ When a customer requests several product/service images or "all images":
 - if more assets exist, send a bounded initial batch and allow continuation.
 - enqueue each transport send separately when required by provider.
 - maintain logical response grouping for analytics.
+
+Catalog responses resolve media from the authoritative ordered `collection_item_media` links. Model-proposed asset IDs are accepted only when they belong to the matched current items. Explicit image requests are supplemented deterministically from those approved links, with primary images across matching items before gallery images. Specific-item requests prefer the highest relevance match. Transport jobs carry a sequence index so the provider receives one logical response in order even when the outbound worker has concurrent capacity.
 
 AI cannot bypass configured limits by generating many individual media actions.
 
@@ -209,6 +213,8 @@ Default private:
 - private documents.
 
 Public visibility may be used for approved catalog/business media when a provider needs a provider-fetchable HTTPS URL and policy permits it.
+
+For Instagram delivery, an approved private asset is published through the authenticated Media Storage API at send time and the returned provider-accessible URL is persisted before the Graph request. Facebook and WhatsApp continue to fetch private bytes server-side and upload/cache provider media identifiers.
 
 If public access is not appropriate, the delivery path fetches authenticated binary content server-side and uploads it to the channel provider.
 
