@@ -64,6 +64,7 @@ test("panel capture requires the queued open session and a live, accepted human 
       const duringNext = await addMessage();
       assert.equal(await capture(duringNext), false, `${platform}: old queued session cannot enter next ON`);
       assert.equal(await capture(duringNext,nextSessionId), true, `${platform}: next ON captures its own reply`);
+      await client.query("UPDATE training_sessions SET status='closed',stopped_at=clock_timestamp() WHERE id=$1",[nextSessionId]);
     }
   } finally {
     await client.query("ROLLBACK");
