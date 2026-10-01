@@ -229,9 +229,9 @@ async function loadAsset(tenantId: string, businessId: string, assetId: string, 
   return result.rows[0];
 }
 
-async function fetchAssetBytes(tenantId: string, asset: any, signal?: AbortSignal): Promise<{ bytes: ArrayBuffer; mime: string }> {
+async function fetchAssetBytes(tenantId: string, asset: any, signal: AbortSignal | undefined, client?: TransactionClient): Promise<{ bytes: ArrayBuffer; mime: string }> {
   if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
-  const credential = await mediaApiKeyForAsset(tenantId, asset.storage_user_id);
+  const credential = await mediaApiKeyForAsset(tenantId, asset.storage_user_id, client);
   const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}/content`, { headers: { authorization: `Bearer ${credential}` }, signal });
   if (!response.ok) throw new Error(`Media download failed with ${response.status}`);
   return { bytes: await response.arrayBuffer(), mime: response.headers.get("content-type") || asset.mime_type || "application/octet-stream" };
@@ -240,7 +240,7 @@ async function fetchAssetBytes(tenantId: string, asset: any, signal?: AbortSigna
 async function ensureProviderAccessibleAsset(tenantId: string, asset: any, signal: AbortSignal, client: TransactionClient) {
   if (asset.public_url) return asset;
   if (!config.MEDIA_BASE_URL) throw new Error("MEDIA_BASE_URL is not configured");
-  const credential = await mediaApiKeyForAsset(tenantId,asset.storage_user_id);
+  const credential = await mediaApiKeyForAsset(tenantId,asset.storage_user_id,client);
   const response = await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/, "")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{
     method:"PATCH",
     headers:{authorization:`Bearer ${credential}`,"content-type":"application/json"},
@@ -462,7 +462,7 @@ async function facebookAttachment(tenantId: string, channel: any, asset: any, si
     throw new Error("Remote media refresh is already in progress");
   }
   try {
-    const { bytes, mime } = await fetchAssetBytes(tenantId, asset, signal);
+    const { bytes, mime } = await fetchAssetBytes(tenantId, asset, signal, client);
     const form = new FormData();
     const type = asset.kind === "video" ? "video" : asset.kind === "audio" ? "audio" : asset.kind === "document" ? "file" : "image";
     form.set("message", JSON.stringify({ attachment: { type, payload: { is_reusable: true } } }));
@@ -483,7 +483,7 @@ async function facebookAttachment(tenantId: string, channel: any, asset: any, si
 async function whatsappMedia(tenantId: string, channel: any, asset: any, signal: AbortSignal, client: TransactionClient): Promise<string> {
   const cached = await client.query<{ remote_media_id: string; status: string; expires_at: Date | null }>("SELECT remote_media_id,status,expires_at FROM channel_media_cache WHERE media_asset_id=$1 AND channel_account_id=$2 AND platform='whatsapp'", [asset.id,channel.id]);
   if (cached.rows[0]?.status === "valid" && (!cached.rows[0].expires_at || cached.rows[0].expires_at.getTime() > Date.now())) return cached.rows[0].remote_media_id;
-  const { bytes, mime } = await fetchAssetBytes(tenantId, asset, signal);
+  const { bytes, mime } = await fetchAssetBytes(tenantId, asset, signal, client);
   const form = new FormData();
   form.set("messaging_product", "whatsapp");
   form.set("type", mime);
