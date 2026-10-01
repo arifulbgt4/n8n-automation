@@ -41,7 +41,7 @@ export async function channelAgentRoutes(app: FastifyInstance) {
 
     const result = await transaction(async (client) => {
       await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[params.channelId]);
-      const training = await client.query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[params.channelId]);
+      const training = await client.query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status IN ('open','finalizing') LIMIT 1",[params.channelId]);
       if (training.rows[0]) throw new ApiError(409,"CHANNEL_TRAINING_ON","Turn off channel training before changing its agent assignment.");
       const updated = await client.query<any>(
         `UPDATE channel_accounts

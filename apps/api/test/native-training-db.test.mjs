@@ -25,6 +25,7 @@ test("native training keeps strict session windows, deduplicates events, and reu
     });
 
     assert.equal(await capture("before","CONTACT","Old question","2026-09-28T09:59:59Z"),false);
+    assert.equal(await capture("future","CONTACT","Future question","2099-01-01T00:00:00Z"),false);
     assert.equal(await capture("q1","CONTACT","First question","2026-09-28T10:00:00Z"),true);
     assert.equal(await capture("a1","HUMAN","First answer","2026-09-28T10:01:00Z"),true);
     assert.equal(await capture("q1","CONTACT","First question","2026-09-28T10:00:00Z"),false);

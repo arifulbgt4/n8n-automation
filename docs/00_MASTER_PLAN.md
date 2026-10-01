@@ -150,7 +150,7 @@ The same business may also have a separate wholesale catalog attached only to Wh
 
 ## 6. Conversation and training model
 
-An agent and one of its assigned channels can enter a time-bounded training session. Training ON suppresses automated replies and follow-ups for that channel. Only customer messages and verifiable native business-inbox replies exchanged inside the session become examples; previously captured examples remain available for later sessions. Training OFF resumes normal AI routing and produces a reviewable prompt candidate from the cumulative approved examples. No trainer identity or special profile is selected. Channel-specific native reply eligibility is described in [Native channel training](28_NATIVE_CHANNEL_TRAINING.md).
+An agent and one of its assigned channels can enter a training session. Training ON suppresses automated replies and follow-ups for that channel. Customer messages can be paired with successfully delivered Customer Panel HUMAN replies, or with native business-inbox echoes when that source is verified. Both sides must belong to the same conversation and session. Training OFF immediately resumes AI using the existing published prompt, then synthesizes and automatically publishes an update from the cumulative approved examples, including earlier retained sessions. If synthesis fails, the previous prompt remains active and the update can be retried. An empty session leaves the prompt unchanged. No trainer identity, special profile, or WhatsApp number is selected for training. Channel-specific native reply eligibility is described in [Native channel training](28_NATIVE_CHANNEL_TRAINING.md).
 
 Prompt synthesis uses:
 
@@ -164,7 +164,7 @@ Training examples
 = proposed prompt/agent version
 ```
 
-The system stores a version history. By default, a generated candidate requires review/test/publish. Auto-publish is optional and must be an explicit customer policy.
+The system stores a version history. The ON/OFF session flow automatically publishes a successful validated update. Optional manual example and prompt-candidate tools retain explicit review, test, publish, and rollback actions.
 
 ## 7. Messaging/media requirements
 
@@ -314,8 +314,10 @@ Queue confirmation -> Send -> Customer Panel reflects transaction immediately
 ### 16.4 Training
 
 ```text
-Trainer identity / panel simulator -> Capture examples -> Analyze ->
-Generate candidate prompt/agent version -> Diff/Test -> Publish -> Audit
+Agent + assigned channel -> Training ON -> Capture eligible message/reply pairs ->
+Training OFF -> Resume AI -> Synthesize and publish approved examples -> Audit
+
+Optional manual examples -> Generate candidate -> Diff/Test -> Publish -> Audit
 ```
 
 ### 16.5 Human handoff

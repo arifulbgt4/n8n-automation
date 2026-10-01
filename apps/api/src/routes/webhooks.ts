@@ -135,31 +135,42 @@ export function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
       for (const event of [...(entry.messaging ?? []),...(entry.standby ?? [])]) {
         if (!event.message) continue;
         const isEcho = Boolean(event.message.is_echo);
-        const attachment = event.message.attachments?.[0];
-        let type: NormalizedInboundMessage["type"] = "text";
-        if (attachment?.type === "image") type = "image";
-        else if (attachment?.type === "audio") type = "audio";
-        else if (attachment?.type === "video") type = "video";
-        else if (attachment?.type === "file") type = "document";
-        messages.push({
-          platform,
-          channelExternalId: String((isEcho ? event.sender?.id : event.recipient?.id) ?? entry.id ?? ""),
-          eventId: String(event.message.mid ?? `${entry.id}:${event.timestamp}:${event.sender?.id}`),
-          messageId: String(event.message.mid ?? randomToken(12)),
-          senderExternalId: String((isEcho ? event.recipient?.id : event.sender?.id) ?? ""),
-          type,
-          text: event.message.text ?? attachment?.payload?.title ?? null,
-          providerMediaUrl: attachment?.payload?.url ?? null,
-          providerTimestamp: event.timestamp ? new Date(Number(event.timestamp)).toISOString() : null,
-          metadata: {
-            isEcho,
-            appId: event.message.app_id ?? null,
-            attachments: event.message.attachments ?? [],
-            replyTo: event.message.reply_to?.mid ?? null,
-            recipientId: event.recipient?.id ?? null,
-            providerFilename: attachment?.payload?.title ?? null,
-          },
-        });
+        const attachments = Array.isArray(event.message.attachments) ? event.message.attachments : [];
+        const normalizedAttachments = attachments.length ? attachments : [null];
+        const originalEventId = String(event.message.mid ?? `${entry.id}:${event.timestamp}:${event.sender?.id}`);
+        const originalMessageId = String(event.message.mid ?? originalEventId);
+        const hasMultipleAttachments = attachments.length > 1;
+        for (const [attachmentIndex, attachment] of normalizedAttachments.entries()) {
+          let type: NormalizedInboundMessage["type"] = "text";
+          if (attachment?.type === "image") type = "image";
+          else if (attachment?.type === "audio") type = "audio";
+          else if (attachment?.type === "video") type = "video";
+          else if (attachment?.type === "file") type = "document";
+          messages.push({
+            platform,
+            channelExternalId: String((isEcho ? event.sender?.id : event.recipient?.id) ?? entry.id ?? ""),
+            eventId: hasMultipleAttachments ? `${originalEventId}:attachment:${attachmentIndex}` : originalEventId,
+            messageId: hasMultipleAttachments ? `${originalMessageId}:attachment:${attachmentIndex}` : String(event.message.mid ?? randomToken(12)),
+            senderExternalId: String((isEcho ? event.recipient?.id : event.sender?.id) ?? ""),
+            type,
+            text: attachmentIndex === 0 ? event.message.text ?? attachment?.payload?.title ?? null : null,
+            providerMediaUrl: attachment?.payload?.url ?? null,
+            providerTimestamp: event.timestamp ? new Date(Number(event.timestamp)).toISOString() : null,
+            metadata: {
+              isEcho,
+              appId: event.message.app_id ?? null,
+              attachments,
+              replyTo: event.message.reply_to?.mid ?? null,
+              recipientId: event.recipient?.id ?? null,
+              providerFilename: attachment?.payload?.title ?? null,
+              ...(hasMultipleAttachments ? {
+                originalMessageId,
+                attachmentIndex,
+                attachmentCount: attachments.length,
+              } : {}),
+            },
+          });
+        }
       }
     }
   }
@@ -204,15 +215,18 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
           $3::timestamptz IS NOT NULL AND created_at<=$3::timestamptz
           AND (stopped_at IS NULL OR date_trunc('milliseconds',stopped_at)>$3::timestamptz)
         LIMIT 1`,[channel.tenant_id,channel.id,message.providerTimestamp??null]);
+      const heldTraining = await client.query<{id:string}>(
+        "SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channel.id]);
       let conversation = await client.query<{id:string}>(`SELECT id FROM conversations
         WHERE channel_account_id=$1 AND contact_id=$2 AND status='open'
         ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,[channel.id,contact.rows[0].id]);
       if (!conversation.rows[0]) {
         conversation = await client.query<{id:string}>(`INSERT INTO conversations(
-          tenant_id,business_id,channel_account_id,contact_id,mode,agent_profile_id,last_message_at
-        ) VALUES($1,$2,$3,$4,$5,$6,now()) RETURNING id`,
+          tenant_id,business_id,channel_account_id,contact_id,mode,agent_profile_id,escalation_metadata,last_message_at
+        ) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,now()) RETURNING id`,
           [channel.tenant_id,channel.business_id,channel.id,contact.rows[0].id,
-            inTraining.rows[0]?"AI":"HUMAN",channel.default_agent_profile_id??null]);
+            heldTraining.rows[0]||!inTraining.rows[0]?"HUMAN":"AI",channel.default_agent_profile_id??null,
+            JSON.stringify(heldTraining.rows[0]&&inTraining.rows[0]?{trainingAutoHumanSessionId:heldTraining.rows[0].id}:{})]);
       }
       const conversationId=conversation.rows[0].id;
       const inserted = await client.query<{id:string}>(`INSERT INTO messages(
@@ -229,7 +243,7 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
         platformMessageId:message.messageId,direction:"HUMAN",text:message.text,providerTimestamp:message.providerTimestamp,
       });
       if (!inTraining.rows[0]) {
-        await client.query("UPDATE conversations SET mode='HUMAN',state_version=state_version+1,updated_at=now() WHERE id=$1",[conversationId]);
+        await client.query("UPDATE conversations SET mode='HUMAN',escalation_metadata=escalation_metadata-'trainingAutoHumanSessionId',state_version=state_version+1,updated_at=now() WHERE id=$1",[conversationId]);
       }
       return {accepted:true,manualHuman:true};
     });
@@ -242,6 +256,8 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
 
   const created = await transaction(async (client) => {
     await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channel.id]);
+    const heldTraining = await client.query<{id:string}>(
+        "SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channel.id]);
     const contact = await client.query<{ id: string }>(`INSERT INTO contacts(tenant_id,business_id,channel_account_id,external_contact_id)
       VALUES ($1,$2,$3,$4) ON CONFLICT(channel_account_id,external_contact_id)
       DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
@@ -251,9 +267,17 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
     let conversation = await client.query<any>(`SELECT id,mode,agent_profile_id FROM conversations WHERE channel_account_id=$1 AND contact_id=$2 AND status='open' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [channel.id, contact.rows[0].id]);
     if (!conversation.rows[0]) {
       conversation = await client.query<any>(`
-        INSERT INTO conversations(tenant_id,business_id,channel_account_id,contact_id,mode,agent_profile_id,last_message_at)
-        VALUES ($1,$2,$3,$4,$5,$6,now()) RETURNING id,mode,agent_profile_id
-      `, [channel.tenant_id, channel.business_id, channel.id, contact.rows[0].id, "AI", channel.default_agent_profile_id ?? null]);
+        INSERT INTO conversations(tenant_id,business_id,channel_account_id,contact_id,mode,agent_profile_id,escalation_metadata,last_message_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now()) RETURNING id,mode,agent_profile_id
+      `, [channel.tenant_id, channel.business_id, channel.id, contact.rows[0].id,
+        heldTraining.rows[0]?"HUMAN":"AI", channel.default_agent_profile_id ?? null,
+        JSON.stringify(heldTraining.rows[0]?{trainingAutoHumanSessionId:heldTraining.rows[0].id}:{})]);
+    } else if (heldTraining.rows[0] && conversation.rows[0].mode === "AI") {
+      conversation = await client.query<any>(`
+        UPDATE conversations SET mode='HUMAN',state_version=state_version+1,
+          escalation_metadata=escalation_metadata||jsonb_build_object('trainingAutoHumanSessionId',$2::text),updated_at=now()
+        WHERE id=$1 RETURNING id,mode,agent_profile_id
+      `,[conversation.rows[0].id,heldTraining.rows[0].id]);
     }
     const inserted = await client.query<{ id: string }>(`
       INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,platform_message_id,platform_event_id,direction,sender_type,message_type,text_content,provider_timestamp,delivery_status,metadata)

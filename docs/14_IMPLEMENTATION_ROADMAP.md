@@ -215,7 +215,7 @@ This file is the delivery checklist and current implementation status. Repositor
 - [x] Use approved public URL only where allowed/useful.
 - [x] Re-upload and update remote mapping.
 - [x] Multi-image response batching.
-- [x] Continuation behavior when requested image count exceeds limit.
+- [ ] Continuation cursor when a customer asks for more images than the configured per-response limit.
 - [x] Track cache hit/miss/reupload metrics.
 
 ## Phase 10 — AI provider and model platform

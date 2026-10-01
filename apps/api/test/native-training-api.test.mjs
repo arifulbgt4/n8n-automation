@@ -7,6 +7,7 @@ import { closeDb, closeQueues, encryptSecret, query, sha256 } from "@n8n-automat
 import { trainingSessionRoutes } from "../src/routes/training-sessions.ts";
 import { webhookRoutes } from "../src/routes/webhooks.ts";
 import { internalRoutes } from "../src/routes/internal.ts";
+import { internalAiJobRoutes } from "../src/routes/internal-ai-jobs.ts";
 import { aiRoutes } from "../src/routes/ai.ts";
 
 test("Training ON/OFF captures native Page replies and later sessions reuse approved examples", {skip:!process.env.DATABASE_URL||!process.env.REDIS_URL}, async () => {
@@ -31,6 +32,7 @@ test("Training ON/OFF captures native Page replies and later sessions reuse appr
     await trainingSessionRoutes(app);
     await webhookRoutes(app);
     await internalRoutes(app);
+    await internalAiJobRoutes(app);
     await aiRoutes(app);
     await app.ready();
 
@@ -75,7 +77,7 @@ test("Training ON/OFF captures native Page replies and later sessions reuse appr
     assert.equal((await webhook(`q1-${suffix}`,"First customer question",false,firstEventAt)).statusCode,200);
     assert.equal((await webhook(`a1-${suffix}`,"First native answer",true,firstEventAt+1)).statusCode,200);
     const conversation=(await query("SELECT id,mode FROM conversations WHERE channel_account_id=$1 LIMIT 1",[channelId])).rows[0];
-    assert.equal(conversation.mode,"AI");
+    assert.equal(conversation.mode,"HUMAN");
     const aiOutbound=()=>post("/v1/internal/outbound/enqueue",{
       tenantId,businessId,channelAccountId:channelId,conversationId:conversation.id,
       messages:[{type:"text",text:"Automated reply"}],senderType:"AI",
@@ -85,7 +87,11 @@ test("Training ON/OFF captures native Page replies and later sessions reuse appr
     const firstOff=await post(`${route}/${firstId}/stop`,{});
     assert.equal(firstOff.statusCode,200,firstOff.body);
     assert.ok(firstOff.json().trainingJobId);
+    assert.equal(firstOff.json().session.status,"finalizing");
+    assert.equal((await query("SELECT mode FROM conversations WHERE id=$1",[conversationId])).rows[0].mode,"AI");
     assert.equal((await aiOutbound()).statusCode,202);
+    const onWhileFinalizing=await post(route,{channelAccountId:channelId});
+    assert.equal(onWhileFinalizing.statusCode,409,onWhileFinalizing.body);
     const oldAction=await post("/v1/internal/actions/execute",{
       tenantId,businessId,channelAccountId:channelId,conversationId,
       tool:"schedule_followup",arguments:{message:"Old automated follow-up"},
@@ -97,7 +103,9 @@ test("Training ON/OFF captures native Page replies and later sessions reuse appr
     assert.equal(repeatedOff.json().trainingJobId,firstOff.json().trainingJobId);
     const firstDataset=await query("SELECT input_snapshot FROM training_jobs WHERE id=$1",[firstOff.json().trainingJobId]);
     assert.equal(firstDataset.rows[0].input_snapshot.exampleIds.length,1);
-    assert.equal(firstDataset.rows[0].input_snapshot.publishPolicy,"manual");
+    assert.equal(firstDataset.rows[0].input_snapshot.publishPolicy,"auto_session");
+    const durableJob=await query("SELECT id FROM outbox_events WHERE event_type='TRAINING_JOB_QUEUED' AND resource_id=$1",[firstOff.json().trainingJobId]);
+    assert.equal(durableJob.rows.length,1);
     const active=await query("SELECT active_prompt_version_id FROM agent_profiles WHERE id=$1",[agentId]);
     assert.equal(active.rows[0].active_prompt_version_id,promptId);
 
@@ -111,8 +119,36 @@ test("Training ON/OFF captures native Page replies and later sessions reuse appr
     assert.equal(lateCaptured.rows[0].count,4);
     const stalePrompt=(await query(`INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,training_job_id)
       VALUES($1,$2,2,'training','candidate',$3) RETURNING id`,[tenantId,agentId,firstOff.json().trainingJobId])).rows[0].id;
-    const stalePublish=await post(`/v1/tenants/${tenantId}/agents/${agentId}/prompts/${stalePrompt}/publish`,{});
-    assert.equal(stalePublish.statusCode,409,stalePublish.body);
+    const internalHeaders={authorization:`Bearer ${process.env.INTERNAL_SERVICE_AUTH_SECRET}`};
+    const staleFinalize=await post("/v1/internal/training/finalize",{
+      trainingJobId:firstOff.json().trainingJobId,candidatePromptVersionId:stalePrompt,evaluation:{passed:true},
+    },internalHeaders);
+    assert.equal(staleFinalize.statusCode,409,staleFinalize.body);
+    assert.equal((await query("SELECT active_prompt_version_id FROM agent_profiles WHERE id=$1",[agentId])).rows[0].active_prompt_version_id,promptId);
+    const failed=await post("/v1/internal/training/fail",{
+      trainingJobId:firstOff.json().trainingJobId,error:"Training input changed after OFF",
+    },internalHeaders);
+    assert.equal(failed.statusCode,200,failed.body);
+    assert.equal((await query("SELECT status FROM training_sessions WHERE id=$1",[firstId])).rows[0].status,"failed");
+
+    const retried=await post(`${route}/${firstId}/retry`,{});
+    assert.equal(retried.statusCode,200,retried.body);
+    assert.equal(retried.json().session.status,"finalizing");
+    assert.notEqual(retried.json().trainingJobId,firstOff.json().trainingJobId);
+    assert.equal((await query("SELECT mode FROM conversations WHERE id=$1",[conversationId])).rows[0].mode,"AI");
+    const retryPrompt=(await query(`INSERT INTO prompt_versions(tenant_id,agent_profile_id,version,source,status,training_job_id)
+      VALUES($1,$2,3,'training','candidate',$3) RETURNING id`,[tenantId,agentId,retried.json().trainingJobId])).rows[0].id;
+    const finalized=await post("/v1/internal/training/finalize",{
+      trainingJobId:retried.json().trainingJobId,candidatePromptVersionId:retryPrompt,evaluation:{passed:true},
+    },internalHeaders);
+    assert.equal(finalized.statusCode,200,finalized.body);
+    assert.equal((await query("SELECT active_prompt_version_id FROM agent_profiles WHERE id=$1",[agentId])).rows[0].active_prompt_version_id,retryPrompt);
+    assert.equal((await query("SELECT status FROM training_sessions WHERE id=$1",[firstId])).rows[0].status,"closed");
+    const repeatedFinalize=await post("/v1/internal/training/finalize",{
+      trainingJobId:retried.json().trainingJobId,candidatePromptVersionId:retryPrompt,evaluation:{passed:true},
+    },internalHeaders);
+    assert.equal(repeatedFinalize.statusCode,200,repeatedFinalize.body);
+    assert.equal(repeatedFinalize.json().alreadyFinalized,true);
 
     const secondOn=await post(route,{channelAccountId:channelId});
     assert.equal(secondOn.statusCode,201,secondOn.body);

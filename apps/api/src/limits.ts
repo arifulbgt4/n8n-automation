@@ -65,9 +65,19 @@ export async function customerMediaStorageLimit(tenantId: string): Promise<numbe
   return cappedCustomerMediaLimit(planLimit);
 }
 
-export async function maxImagesPerResponse(tenantId: string): Promise<number> {
-  const limit = await tenantLimit(tenantId,"maxImagesPerResponse");
-  return Math.max(1, Math.min(20, Number.isFinite(limit ?? NaN) ? Number(limit) : 5));
+export async function maxImagesPerResponse(tenantId: string, channelAccountId?: string): Promise<number> {
+  const planLimit = await tenantLimit(tenantId,"maxImagesPerResponse");
+  let limit = Number.isFinite(planLimit ?? NaN) ? Number(planLimit) : 5;
+  if (channelAccountId) {
+    const override = await query<{ value: string }>(`
+      SELECT value::text FROM channel_limit_overrides
+      WHERE tenant_id=$1 AND channel_account_id=$2 AND key='maxImagesPerResponse'
+      LIMIT 1
+    `,[tenantId,channelAccountId]);
+    const channelLimit = Number(override.rows[0]?.value);
+    if (Number.isFinite(channelLimit)) limit = Math.min(limit,channelLimit);
+  }
+  return Math.max(1, Math.min(20,limit));
 }
 
 export async function assertChannelOverrideWithinPlan(tenantId: string, key: string, value: number): Promise<void> {

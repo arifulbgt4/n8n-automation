@@ -8,7 +8,7 @@ process.env.APP_ENCRYPTION_KEY ||= "0123456789abcdef0123456789abcdef0123456789ab
 process.env.INTERNAL_SERVICE_AUTH_SECRET ||= "catalog-test-internal-service-secret";
 
 const { closeDb, db } = await import("@n8n-automation/core");
-const { findRelevantItems, isCatalogBrowseRequest } = await import("../src/catalog-lookup.ts");
+const { findRelevantItems, isCatalogBrowseRequest, isCatalogMediaRequest, isSpecificCatalogMediaRequest } = await import("../src/catalog-lookup.ts");
 
 test("recognizes general catalog questions without treating specific price questions as browsing", () => {
   for (const text of [
@@ -23,6 +23,23 @@ test("recognizes general catalog questions without treating specific price quest
   for (const text of ["Tangail suti saree এর দাম কত?", "What is the price of Tangail saree?", "Tangail product price koto?"]) {
     assert.equal(isCatalogBrowseRequest(text), false, text);
   }
+});
+
+test("recognizes Bengali, English, and Banglish catalog image requests", () => {
+  for (const text of [
+    "টাঙ্গাইল শাড়ির ছবি দেখাও",
+    "প্রোডাক্টের ছবিগুলো পাঠান",
+    "Show me the product photos",
+    "Tangail saree er chobi dao",
+    "product chobi dekhaw",
+  ]) assert.equal(isCatalogMediaRequest(text),true,text);
+  for (const text of ["Tangail saree price koto?","What products do you have?"]) {
+    assert.equal(isCatalogMediaRequest(text),false,text);
+  }
+  assert.equal(isSpecificCatalogMediaRequest("Tangail saree er chobi dao"),true);
+  assert.equal(isSpecificCatalogMediaRequest("product chobi dekhaw"),false);
+  assert.equal(isSpecificCatalogMediaRequest("chobi acy?"),false);
+  assert.equal(isSpecificCatalogMediaRequest("Do you have product images?"),false);
 });
 
 test("catalog lookup uses only active products linked to this agent, channel, tenant, and business", {
@@ -60,6 +77,13 @@ test("catalog lookup uses only active products linked to this agent, channel, te
     ]) await client.query("INSERT INTO collection_fields(tenant_id,collection_id,key,label,type,ai_visible) VALUES($1,$2,$3,$3,$4,$5)", [tenantId,visibleCollection,key,type,aiVisible]);
     const tangailId = await item(tenantId,businessId,visibleCollection,"Tangail suti saree","active",{price:899,stock_qty:3,description:"Cotton saree",internal_margin:"secret-margin-value"});
     const scarfId = await item(tenantId,businessId,visibleCollection,"Cotton scarf","active",{price:499,description:"This product is light"});
+    const tangailAssetId = (await client.query(`INSERT INTO media_assets(
+      tenant_id,business_id,storage_file_id,original_name,mime_type,kind,processing_status
+    ) VALUES($1,$2,$3,'tangail.jpg','image/jpeg','image','ready') RETURNING id`,
+      [tenantId,businessId,`catalog-test-${suffix}`])).rows[0].id;
+    await client.query(`INSERT INTO collection_item_media(
+      collection_item_id,media_asset_id,tenant_id,role,display_order
+    ) VALUES($1,$2,$3,'primary',0)`,[tangailId,tangailAssetId,tenantId]);
     await client.query("INSERT INTO collection_item_channel_overrides(tenant_id,collection_item_id,channel_account_id,override_json) VALUES($1,$2,$3,$4::jsonb)", [tenantId,tangailId,channelId,JSON.stringify({price:799,internal_margin:"channel-secret-margin"})]);
     await item(tenantId,businessId,visibleCollection,"Hidden product","hidden");
     await item(tenantId,businessId,visibleCollection,"Archived product","archived");
@@ -90,7 +114,17 @@ test("catalog lookup uses only active products linked to this agent, channel, te
     assert.deepEqual(new Set(banglishBrowse.map(row => row.id)),new Set([tangailId,scarfId]));
     assert.equal(browse.find(row => row.id === tangailId).data_jsonb.price,799);
     assert.equal(browse.find(row => row.id === tangailId).data_jsonb.internal_margin,undefined);
+    assert.deepEqual(browse.find(row => row.id === tangailId).media,[{
+      assetId:tangailAssetId,
+      kind:"image",
+      mimeType:"image/jpeg",
+      role:"primary",
+      displayOrder:0,
+    }]);
+    assert.deepEqual(browse.find(row => row.id === scarfId).media,[]);
     assert.equal((await lookup(channelId,"Tangail suti saree দাম কত?")).map(row => row.id).join(),tangailId);
+    assert.equal((await lookup(channelId,"Tangail suti saree er chobi dao")).map(row => row.id).join(),tangailId);
+    assert.deepEqual(new Set((await lookup(channelId,"product chobi dekhaw")).map(row => row.id)),new Set([tangailId,scarfId]));
     assert.deepEqual(await lookup(channelId,"channel-secret-margin"),[]);
     assert.deepEqual(await lookup(channelId,"Return policy কী?"),[]);
     assert.deepEqual(await lookup(otherChannelId,"What products do you have?"),[]);
