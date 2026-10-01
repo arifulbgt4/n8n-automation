@@ -1,6 +1,7 @@
 import { decryptSecret } from "./crypto.js";
 import { query } from "./db.js";
 import { env } from "./env.js";
+import type pg from "pg";
 
 export const CUSTOMER_MEDIA_STORAGE_BYTES = 512 * 1024 * 1024;
 
@@ -54,9 +55,17 @@ export function chooseMediaApiKey(
 
 // Existing tenant Media users are retained only to read/delete files written before
 // the shared account cutover. New files must always use sharedMediaApiKey().
-export async function mediaApiKeyForAsset(tenantId: string, storageUserId: string | null | undefined): Promise<string> {
-  const result = await query<{ external_media_user_id: string | null; encrypted_api_key: string | null }>(
-    "SELECT external_media_user_id,encrypted_api_key FROM tenant_media_accounts WHERE tenant_id=$1",
+export async function mediaApiKeyForAsset(
+  tenantId: string,
+  storageUserId: string | null | undefined,
+  client?: Pick<pg.PoolClient, "query">,
+): Promise<string> {
+  const sql = "SELECT external_media_user_id,encrypted_api_key FROM tenant_media_accounts WHERE tenant_id=$1";
+  const result = client ? await client.query<{ external_media_user_id: string | null; encrypted_api_key: string | null }>(
+    sql,
+    [tenantId],
+  ) : await query<{ external_media_user_id: string | null; encrypted_api_key: string | null }>(
+    sql,
     [tenantId],
   );
   const legacy = result.rows[0];
