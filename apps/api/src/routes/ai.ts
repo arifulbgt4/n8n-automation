@@ -20,6 +20,8 @@ const providerSchema = z.enum(["openai", "anthropic", "gemini", "openai_compatib
 const taskKeys = ["DEFAULT_CHAT", "INTENT_CLASSIFICATION", "IMAGE_ANALYSIS", "AUDIO_TRANSCRIPTION", "STRUCTURED_EXTRACTION", "PROMPT_SYNTHESIS", "EMBEDDINGS"] as const;
 const collectionIdsSchema = z.array(z.string().uuid()).max(50)
   .refine((ids) => new Set(ids).size === ids.length, "Collection IDs must be unique.");
+const channelIdsSchema = z.array(z.string().uuid()).max(50)
+  .refine((ids) => new Set(ids).size === ids.length, "Channel IDs must be unique.");
 
 async function loadProvider(tenantId: string, id: string) {
   const result = await query<AiConnection & { id: string; tenant_id: string; business_id: string | null; name: string; status: string }>(
@@ -208,7 +210,7 @@ export async function aiRoutes(app: FastifyInstance) {
     const result = await query(`
       SELECT a.*,
         pv.version AS active_prompt_version,
-        (SELECT count(*)::int FROM agent_channel_links l WHERE l.agent_profile_id=a.id) AS channel_count,
+        (SELECT count(*)::int FROM channel_accounts c WHERE c.default_agent_profile_id=a.id) AS channel_count,
         (SELECT count(*)::int FROM agent_collection_links l WHERE l.agent_profile_id=a.id) AS collection_count
       FROM agent_profiles a LEFT JOIN prompt_versions pv ON pv.id=a.active_prompt_version_id
       WHERE a.tenant_id=$1 AND a.status<>'archived' AND ($2::uuid IS NULL OR a.business_id=$2)
@@ -229,12 +231,13 @@ export async function aiRoutes(app: FastifyInstance) {
       description: z.string().max(2000).optional(),
       capabilities: z.array(z.string().regex(/^[A-Z0-9_]+$/)).max(50).default([]),
       behaviorSettings: z.record(z.string(), z.unknown()).default({}),
-      channelIds: z.array(z.string().uuid()).max(50).default([]),
+      channelIds: channelIdsSchema.default([]),
       collectionIds: collectionIdsSchema.default([]),
       templateKey: z.string().regex(/^[a-z0-9_-]+$/).max(100).optional(),
       initialPrompt: z.record(z.string(), z.unknown()).optional(),
     }).parse(request.body);
     await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER", "ADMIN", "STAFF"]);
+    if (input.channelIds.length) await requireBusinessAccess(request, tenantId, input.businessId, ["OWNER", "ADMIN"]);
     const business = await query("SELECT id FROM businesses WHERE id=$1 AND tenant_id=$2", [input.businessId, tenantId]);
     if (!business.rows[0]) throw new ApiError(404, "BUSINESS_NOT_FOUND", "Business not found.");
     const template = input.templateKey
@@ -255,9 +258,15 @@ export async function aiRoutes(app: FastifyInstance) {
       `, [tenantId, created.rows[0].id, input.templateKey ? "template" : "manual", JSON.stringify(initialPrompt), Object.entries(initialPrompt).map(([key,value])=>`## ${key.replace(/_/g," ")}\n${typeof value==="string"?value:JSON.stringify(value,null,2)}`).join("\n\n"), principal.userId]);
       await client.query("UPDATE agent_profiles SET active_prompt_version_id=$2 WHERE id=$1", [created.rows[0].id, prompt.rows[0].id]);
       for (const channelId of input.channelIds) {
-        const channel = await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [channelId, tenantId, input.businessId]);
+        const channel = await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3 FOR UPDATE", [channelId, tenantId, input.businessId]);
         if (!channel.rows[0]) throw new ApiError(400, "CHANNEL_SCOPE_INVALID", "Agent channel must belong to the same business.");
+        const training = await client.query("SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status IN ('open','finalizing') LIMIT 1", [channelId]);
+        if (training.rows[0]) throw new ApiError(409,"CHANNEL_TRAINING_ON","Turn off channel training before changing its agent assignment.");
+        await client.query("UPDATE channel_accounts SET default_agent_profile_id=$2,updated_at=now() WHERE id=$1 AND tenant_id=$3", [channelId,created.rows[0].id,tenantId]);
         await client.query("INSERT INTO agent_channel_links(agent_profile_id,channel_account_id,tenant_id) VALUES ($1,$2,$3)", [created.rows[0].id, channelId, tenantId]);
+        await client.query(`UPDATE conversations SET agent_profile_id=$3,updated_at=now()
+          WHERE tenant_id=$1 AND channel_account_id=$2 AND business_id=$4 AND status='open' AND mode='AI' AND agent_profile_id IS NULL`,
+          [tenantId,channelId,created.rows[0].id,input.businessId]);
       }
       for (const collectionId of input.collectionIds) {
         const collection = await client.query("SELECT id FROM collections WHERE id=$1 AND tenant_id=$2 AND business_id=$3 AND status='active' FOR SHARE", [collectionId, tenantId, input.businessId]);
@@ -266,7 +275,7 @@ export async function aiRoutes(app: FastifyInstance) {
       }
       return created.rows[0];
     });
-    await audit({ actorUserId: principal.userId, tenantId, businessId: input.businessId, action: "AGENT_CREATED", resourceType: "agent_profile", resourceId: agent.id, safeDiff: { name: input.name, capabilities, templateKey: input.templateKey ?? null }, request });
+    await audit({ actorUserId: principal.userId, tenantId, businessId: input.businessId, action: "AGENT_CREATED", resourceType: "agent_profile", resourceId: agent.id, safeDiff: { name: input.name, capabilities, templateKey: input.templateKey ?? null, channelIds: input.channelIds, collectionIds: input.collectionIds }, request });
     reply.code(201).send({ agent });
   });
 
@@ -276,7 +285,9 @@ export async function aiRoutes(app: FastifyInstance) {
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
     const prompts = await query("SELECT * FROM prompt_versions WHERE agent_profile_id=$1 ORDER BY version DESC", [params.agentId]);
-    const channels = await query("SELECT channel_account_id,settings_json FROM agent_channel_links WHERE agent_profile_id=$1", [params.agentId]);
+    const channels = await query(`SELECT c.id AS channel_account_id,l.settings_json,c.name,c.platform,c.default_agent_profile_id
+      FROM channel_accounts c LEFT JOIN agent_channel_links l ON l.channel_account_id=c.id AND l.agent_profile_id=$1
+      WHERE c.default_agent_profile_id=$1 OR l.agent_profile_id=$1 ORDER BY c.name`, [params.agentId]);
     const collections = await query("SELECT collection_id,priority FROM agent_collection_links WHERE agent_profile_id=$1 ORDER BY priority DESC", [params.agentId]);
     reply.send({ agent, prompts: prompts.rows, channels: channels.rows, collections: collections.rows });
   });
@@ -288,11 +299,45 @@ export async function aiRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const agent = await loadAgent(params.tenantId, params.agentId);
     await requireBusinessAccess(request, params.tenantId, agent.business_id);
-    const input = z.object({ name: z.string().trim().min(1).max(160).optional(), description: z.string().max(2000).nullable().optional(), capabilities: z.array(z.string()).max(50).optional(), behaviorSettings: z.record(z.string(), z.unknown()).optional(), status: z.enum(["active", "draft", "archived"]).optional(), collectionIds: collectionIdsSchema.optional() }).parse(request.body);
+    const input = z.object({ name: z.string().trim().min(1).max(160).optional(), description: z.string().max(2000).nullable().optional(), capabilities: z.array(z.string()).max(50).optional(), behaviorSettings: z.record(z.string(), z.unknown()).optional(), status: z.enum(["active", "draft", "archived"]).optional(), channelIds: channelIdsSchema.optional(), collectionIds: collectionIdsSchema.optional() }).parse(request.body);
+    if (input.channelIds !== undefined) await requireBusinessAccess(request,params.tenantId,agent.business_id,["OWNER","ADMIN"]);
+    const nextStatus=input.status??agent.status;
+    if(input.channelIds?.length&&nextStatus!=="active") throw new ApiError(409,"AGENT_NOT_ACTIVE","Only an active agent can be assigned to a channel.");
+    if(input.status&&input.status!=="active"&&input.channelIds===undefined){
+      const assigned=await query("SELECT id FROM channel_accounts WHERE tenant_id=$1 AND default_agent_profile_id=$2 LIMIT 1",[params.tenantId,params.agentId]);
+      if(assigned.rows[0]) throw new ApiError(409,"AGENT_CHANNELS_ASSIGNED","Clear this agent's channel assignments before deactivating it.");
+    }
     const result = await transaction(async (client) => {
       if (input.status || input.collectionIds !== undefined) await requireAgentTrainingOff(client,params.tenantId,params.agentId);
       const current = await client.query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3 FOR UPDATE", [params.agentId, params.tenantId, agent.business_id]);
       if (!current.rows[0]) throw new ApiError(404, "AGENT_NOT_FOUND", "AI agent not found.");
+      if (input.channelIds !== undefined) {
+        const channelIds=[...new Set(input.channelIds)];
+        const channels=await client.query<{id:string}>(`SELECT id FROM channel_accounts
+          WHERE tenant_id=$1 AND business_id=$2 AND id=ANY($3::uuid[]) ORDER BY id FOR UPDATE`,
+          [params.tenantId,agent.business_id,channelIds]);
+        if(channels.rows.length!==channelIds.length) throw new ApiError(400,"CHANNEL_SCOPE_INVALID","Agent channels must belong to the same business.");
+        const linked=await client.query<{channel_account_id:string}>("SELECT channel_account_id FROM agent_channel_links WHERE agent_profile_id=$1 AND tenant_id=$2",[params.agentId,params.tenantId]);
+        const defaults=await client.query<{id:string}>("SELECT id FROM channel_accounts WHERE default_agent_profile_id=$1 AND tenant_id=$2",[params.agentId,params.tenantId]);
+        const changedChannelIds=[...new Set([...linked.rows.map(row=>row.channel_account_id),...defaults.rows.map(row=>row.id),...channelIds])];
+        const training=await client.query("SELECT id FROM training_sessions WHERE channel_account_id=ANY($1::uuid[]) AND status IN ('open','finalizing') LIMIT 1",[changedChannelIds]);
+        if(training.rows[0]) throw new ApiError(409,"CHANNEL_TRAINING_ON","Turn off channel training before changing its agent assignment.");
+        await client.query(`UPDATE channel_accounts SET default_agent_profile_id=NULL,updated_at=now()
+          WHERE tenant_id=$1 AND business_id=$2 AND default_agent_profile_id=$3
+            AND NOT (id=ANY($4::uuid[]))`,[params.tenantId,agent.business_id,params.agentId,channelIds]);
+        await client.query(`DELETE FROM agent_channel_links WHERE agent_profile_id=$1 AND tenant_id=$2
+          AND NOT (channel_account_id=ANY($3::uuid[]))`,[params.agentId,params.tenantId,channelIds]);
+        if(channelIds.length){
+          await client.query(`UPDATE channel_accounts SET default_agent_profile_id=$3,updated_at=now()
+            WHERE tenant_id=$1 AND business_id=$2 AND id=ANY($4::uuid[])`,[params.tenantId,agent.business_id,params.agentId,channelIds]);
+          await client.query(`INSERT INTO agent_channel_links(agent_profile_id,channel_account_id,tenant_id)
+            SELECT $1,id,$2 FROM unnest($3::uuid[]) AS selected(id)
+            ON CONFLICT(agent_profile_id,channel_account_id) DO NOTHING`,[params.agentId,params.tenantId,channelIds]);
+          await client.query(`UPDATE conversations SET agent_profile_id=$3,updated_at=now()
+            WHERE tenant_id=$1 AND business_id=$2 AND channel_account_id=ANY($4::uuid[])
+              AND status='open' AND mode='AI' AND agent_profile_id IS NULL`,[params.tenantId,agent.business_id,params.agentId,channelIds]);
+        }
+      }
       if (input.collectionIds !== undefined) {
         const collections = await client.query<{ id: string }>(`
           SELECT id FROM collections

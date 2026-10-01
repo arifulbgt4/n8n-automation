@@ -7,9 +7,7 @@ export type PlatformAiModel = AiConnection & {
   provider_connection_id: string;
   model: string;
   parameters: Record<string, unknown>;
-  input_credits_per_1k_tokens: number | string;
-  output_credits_per_1k_tokens: number | string;
-  request_credits: number | string;
+  tokens_per_credit: number | string;
   priority: number;
   ownership_mode: "PLATFORM";
 };
@@ -17,22 +15,21 @@ export type PlatformAiModel = AiConnection & {
 export type AiAllowance = {
   plan: { id: string | null; key: string | null; name: string | null };
   periodStart: string;
-  tokenLimit: number | null;
+  resetAt: string;
   creditLimit: number | null;
-  tokensUsed: number;
   creditsUsed: number;
-  tokensRemaining: number | null;
   creditsRemaining: number | null;
 };
 
 export async function resolvePlatformModels(taskKey: string, limit = 5): Promise<PlatformAiModel[]> {
   const result = await query<any>(`
     SELECT r.id,r.model,r.parameters,r.priority,
-      r.input_credits_per_1k_tokens,r.output_credits_per_1k_tokens,r.request_credits,
+      s.tokens_per_credit,
       p.id AS provider_connection_id,p.provider,p.encrypted_api_key,p.base_url,
       'PLATFORM'::text AS ownership_mode
     FROM platform_ai_model_routes r
     JOIN platform_ai_provider_connections p ON p.id=r.provider_connection_id
+    CROSS JOIN platform_ai_settings s
     WHERE r.task_key=$1 AND r.active=true AND p.status='active'
     ORDER BY r.priority ASC,r.created_at DESC
     LIMIT $2
@@ -44,11 +41,10 @@ export async function resolvePlatformModel(taskKey: string): Promise<PlatformAiM
   return (await resolvePlatformModels(taskKey,1))[0] ?? null;
 }
 
-export async function monthlyAiAllowance(tenantId: string): Promise<AiAllowance> {
+export async function dailyAiAllowance(tenantId: string): Promise<AiAllowance> {
   const tenant = await query<any>(`
     SELECT t.plan_id,p.key AS plan_key,p.name AS plan_name,p.limits,
-      (SELECT value FROM tenant_limit_overrides o WHERE o.tenant_id=t.id AND o.key='monthlyAiTokens' AND (o.expires_at IS NULL OR o.expires_at>now()) LIMIT 1) AS token_override,
-      (SELECT value FROM tenant_limit_overrides o WHERE o.tenant_id=t.id AND o.key='monthlyAiCredits' AND (o.expires_at IS NULL OR o.expires_at>now()) LIMIT 1) AS credit_override
+      (SELECT value FROM tenant_limit_overrides o WHERE o.tenant_id=t.id AND o.key='dailyAiCredits' AND (o.expires_at IS NULL OR o.expires_at>now()) LIMIT 1) AS credit_override
     FROM tenants t LEFT JOIN plans p ON p.id=t.plan_id
     WHERE t.id=$1
   `,[tenantId]);
@@ -56,36 +52,32 @@ export async function monthlyAiAllowance(tenantId: string): Promise<AiAllowance>
   if(!row) throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
 
   const usage=await query<any>(`
-    SELECT COALESCE(SUM(total_tokens),0)::bigint AS tokens,
-           COALESCE(SUM(credits),0)::numeric AS credits
+    SELECT COALESCE(SUM(credits),0)::numeric AS credits,
+      date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS period_start,
+      (date_trunc('day',now() AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' AS reset_at
     FROM usage_events
-    WHERE tenant_id=$1 AND occurred_at>=date_trunc('month',now())
+    WHERE tenant_id=$1
+      AND task_key IS NOT NULL
+      AND occurred_at >= date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
   `,[tenantId]);
 
-  const rawTokenLimit=row.token_override ?? row.limits?.monthlyAiTokens ?? null;
-  const rawCreditLimit=row.credit_override ?? row.limits?.monthlyAiCredits ?? null;
-  const tokenLimit=rawTokenLimit===null||rawTokenLimit===undefined?null:Number(rawTokenLimit);
+  const rawCreditLimit=row.credit_override ?? row.limits?.dailyAiCredits ?? null;
   const creditLimit=rawCreditLimit===null||rawCreditLimit===undefined?null:Number(rawCreditLimit);
-  const tokensUsed=Number(usage.rows[0]?.tokens ?? 0);
   const creditsUsed=Number(usage.rows[0]?.credits ?? 0);
   return {
     plan:{id:row.plan_id??null,key:row.plan_key??null,name:row.plan_name??null},
-    periodStart:new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString(),
-    tokenLimit:Number.isFinite(tokenLimit as number)?tokenLimit:null,
+    periodStart:new Date(usage.rows[0]?.period_start??Date.now()).toISOString(),
+    resetAt:new Date(usage.rows[0]?.reset_at??Date.now()).toISOString(),
     creditLimit:Number.isFinite(creditLimit as number)?creditLimit:null,
-    tokensUsed,creditsUsed,
-    tokensRemaining:tokenLimit===null?null:Math.max(0,tokenLimit-tokensUsed),
+    creditsUsed,
     creditsRemaining:creditLimit===null?null:Math.max(0,creditLimit-creditsUsed),
   };
 }
 
-export async function assertMonthlyAiAllowance(tenantId: string): Promise<AiAllowance> {
-  const allowance=await monthlyAiAllowance(tenantId);
-  if(allowance.tokenLimit!==null && allowance.tokensUsed>=allowance.tokenLimit){
-    throw new ApiError(402,"AI_TOKEN_LIMIT_REACHED","The monthly AI token allowance has been reached.",{...allowance});
-  }
+export async function assertDailyAiAllowance(tenantId: string): Promise<AiAllowance> {
+  const allowance=await dailyAiAllowance(tenantId);
   if(allowance.creditLimit!==null && allowance.creditsUsed>=allowance.creditLimit){
-    throw new ApiError(402,"AI_CREDIT_LIMIT_REACHED","The monthly AI credit allowance has been reached.",{...allowance});
+    throw new ApiError(402,"AI_DAILY_CREDIT_LIMIT_REACHED","The daily AI credit allowance has been reached.",{...allowance});
   }
   return allowance;
 }
@@ -99,10 +91,9 @@ export function normalizeAiUsage(usage: any): {inputTokens:number;outputTokens:n
 
 export function creditsForUsage(model: PlatformAiModel, usage: any): number {
   const normalized=normalizeAiUsage(usage);
-  const inputRate=Number(model.input_credits_per_1k_tokens ?? 1);
-  const outputRate=Number(model.output_credits_per_1k_tokens ?? 1);
-  const requestRate=Number(model.request_credits ?? 0);
-  const credits=requestRate+(normalized.inputTokens/1000)*inputRate+(normalized.outputTokens/1000)*outputRate;
+  const tokensPerCredit=Number(model.tokens_per_credit ?? 1000);
+  if(!Number.isFinite(tokensPerCredit)||tokensPerCredit<=0)return 0;
+  const credits=normalized.totalTokens/tokensPerCredit;
   return Number.isFinite(credits)?Math.max(0,credits):0;
 }
 

@@ -124,6 +124,10 @@ Against an isolated/test media user:
 - missing mandatory model config fails clearly.
 - permitted fallback works; forbidden fallback does not occur.
 - token/cost metadata emitted.
+- all providers/tasks use the one global tokens-per-credit conversion; model-level legacy rates do not change credits.
+- daily credits reset at 00:00 UTC and enforce the Free/Pro daily allowance.
+- customer allowance API/UI returns credit usage only, without token totals or token ceilings.
+- Super Admin can update the global conversion, edit/delete routes, and configure only Free/Pro daily allowances.
 - custom compatible base URL SSRF controls work.
 
 ## 11. Prompt/training tests
@@ -257,12 +261,12 @@ Expected behavior is bounded, observable, and non-corrupting.
 Customer completes:
 
 ```text
-signup -> business -> channel -> data -> AI config -> test -> activate
+signup -> business -> channel -> agent with selected channels and data -> test -> activate
 ```
 
 without editing DB rows, n8n workflows, Redis, or infrastructure administration.
 
-Customer can always see which business/channel is selected. Super Admin can diagnose common failures without direct DB edits.
+Customer can always see which business/channel is selected. Business channel management opens in a drawer. `/channel-ai` redirects to AI Agents, where Owners/Admins assign channel defaults directly. Super Admin can diagnose common failures without direct DB edits.
 
 ## 22. Release gates
 

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { query } from "@n8n-automation/core";
 import { chat } from "../ai-provider.js";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
-import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
+import { assertDailyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
 
 const customerProviderModelPattern=/^\/v1\/tenants\/([0-9a-f-]+)\/ai\/(providers|models)(?:\/|$)/i;
 const agentTestPattern=/^\/v1\/tenants\/([0-9a-f-]+)\/agents\/([0-9a-f-]+)\/test(?:\?|$)/i;
@@ -32,7 +32,7 @@ export async function platformAiCustomerGuard(app:FastifyInstance){
     await requireTenant(request,tenantId,["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
     const input=z.object({message:z.string().min(1).max(10000),promptVersionId:z.string().uuid().optional()}).parse(request.body);
-    await assertMonthlyAiAllowance(tenantId);
+    await assertDailyAiAllowance(tenantId);
     const agent=await query<any>(`
       SELECT a.id,a.business_id,a.active_prompt_version_id
       FROM agent_profiles a

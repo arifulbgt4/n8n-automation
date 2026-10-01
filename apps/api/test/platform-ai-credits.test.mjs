@@ -13,6 +13,7 @@ const model={
   input_credits_per_1k_tokens:0.5,
   output_credits_per_1k_tokens:2,
   request_credits:0.25,
+  tokens_per_credit:1000,
   priority:100,
   ownership_mode:"PLATFORM",
 };
@@ -27,11 +28,15 @@ test("falls back to input plus output when total is absent",()=>{
   assert.deepEqual(normalizeAiUsage({input_tokens:70,output_tokens:30}),{inputTokens:70,outputTokens:30,totalTokens:100});
 });
 
-test("calculates model-weighted credits",()=>{
+test("calculates credits using the single global tokens-per-credit rate",()=>{
   const credits=creditsForUsage(model,{inputTokens:1000,outputTokens:500,totalTokens:1500});
-  assert.equal(credits,1.75);
+  assert.equal(credits,1.5);
 });
 
-test("request credits apply even when a provider reports no tokens",()=>{
-  assert.equal(creditsForUsage(model,{}),0.25);
+test("per-route legacy rates do not add credits without token usage",()=>{
+  assert.equal(creditsForUsage(model,{}),0);
+});
+
+test("invalid global conversion rate fails closed",()=>{
+  assert.equal(creditsForUsage({...model,tokens_per_credit:0},{totalTokens:1000}),0);
 });

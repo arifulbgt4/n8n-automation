@@ -84,7 +84,7 @@ export async function authRoutes(app: FastifyInstance) {
       let slug = slugify(input.organizationName);
       const collision = await client.query("SELECT 1 FROM tenants WHERE slug=$1", [slug]);
       if (collision.rowCount) slug = `${slug}-${randomToken(4).toLowerCase()}`;
-      const plan = await client.query<{ id: string }>("SELECT id FROM plans WHERE key='starter' LIMIT 1");
+      const plan = await client.query<{ id: string }>("SELECT id FROM plans WHERE key='free' LIMIT 1");
       const tenant = await client.query<{ id: string }>(`
         INSERT INTO tenants(name,slug,plan_id)
         VALUES ($1,$2,$3)

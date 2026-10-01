@@ -20,7 +20,7 @@ function draft(plan:Plan):Draft{return{
 
 export default function MediaPlansPage(){
  const[plans,setPlans]=useState<Plan[]>([]);const[drafts,setDrafts]=useState<Record<string,Draft>>({});const[error,setError]=useState("");const[notice,setNotice]=useState("");const[busy,setBusy]=useState("");
- async function load(){try{const r=await api<any>("/v1/admin/plans");const rows=(r.plans??[]).filter((p:Plan)=>p.key!=="starter");setPlans(rows);setDrafts(Object.fromEntries(rows.map((p:Plan)=>[p.id,draft(p)])))}catch(e){setError(e instanceof Error?e.message:"Unable to load plans.")}}
+ async function load(){try{const r=await api<any>("/v1/admin/plans");const rows=(r.plans??[]).filter((p:Plan)=>p.key==="free"||p.key==="pro");setPlans(rows);setDrafts(Object.fromEntries(rows.map((p:Plan)=>[p.id,draft(p)])))}catch(e){setError(e instanceof Error?e.message:"Unable to load plans.")}}
  useEffect(()=>{void load()},[]);
  function change(id:string,key:keyof Draft,value:string){setDrafts(d=>({...d,[id]:{...d[id],[key]:Number(value)}}))}
  async function save(e:FormEvent,plan:Plan){e.preventDefault();const d=drafts[plan.id];if(!d)return;setBusy(plan.id);setError("");setNotice("");try{await api(`/v1/admin/plans/${plan.id}/media-allowance`,{method:"PATCH",body:JSON.stringify({maxImageMegapixels:d.maxImageMegapixels,maxImageAssets:d.maxImageAssets,maxImageBytes:Math.round(d.maxImageBytesMb*1024*1024),mediaStorageBytes:Math.round(d.mediaStorageMb*1024*1024)})});setNotice(`${plan.name} media limits saved.`);await load()}catch(err){setError(err instanceof Error?err.message:"Unable to save media limits.")}finally{setBusy("")}}

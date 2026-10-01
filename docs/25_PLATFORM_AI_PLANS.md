@@ -1,4 +1,4 @@
-# Platform-managed AI and monthly package allowances
+# Platform-managed AI and daily credit allowances
 
 The SaaS uses platform-managed AI. Customer workspaces do **not** provide AI API keys and do **not** choose provider model IDs.
 
@@ -6,140 +6,78 @@ The SaaS uses platform-managed AI. Customer workspaces do **not** provide AI API
 
 Super Admin owns:
 
-- AI provider credentials;
-- approved task model routes;
-- model fallback priority;
-- credit weighting per model;
-- Free/Pro package limits;
-- tenant plan assignment and optional tenant-specific limit overrides.
+- AI provider credentials and approved task model routes;
+- one global token-to-credit conversion rate;
+- the daily AI credit allowance for Free and Pro;
+- tenant plan assignment and optional tenant-specific daily-credit overrides.
 
-Customers own:
-
-- businesses and connected social channels;
-- business data and knowledge;
-- AI agents, prompts, training examples and channel-agent assignment;
-- consumption of the monthly AI allowance included in their package.
+Customers own businesses, connected channels, business data, agents, prompts, training examples, and agent/channel assignment. The Customer Panel shows credit use and limits only; token totals and token ceilings remain platform-internal.
 
 ## Platform model routes
 
-Super Admin configures global routes for these task keys:
+Super Admin configures global routes for `DEFAULT_CHAT`, `INTENT_CLASSIFICATION`, `IMAGE_ANALYSIS`, `AUDIO_TRANSCRIPTION`, `STRUCTURED_EXTRACTION`, `PROMPT_SYNTHESIS`, and `EMBEDDINGS`. Each route stores its provider/model, priority, provider parameters, and active state. Admins can enable, disable, edit, and delete routes from `/platform-ai`.
 
-- `DEFAULT_CHAT`
-- `INTENT_CLASSIFICATION`
-- `IMAGE_ANALYSIS`
-- `AUDIO_TRANSCRIPTION`
-- `STRUCTURED_EXTRACTION`
-- `PROMPT_SYNTHESIS`
-- `EMBEDDINGS`
+All routes share the global `tokens_per_credit` setting stored in `platform_ai_settings`. The initial migration default is 1,000 tokens per credit. Super Admin can select a preset or enter a custom positive value. Per-route credit weights are retained in the legacy schema for compatibility, but are not used for new metering.
 
-Each route stores a provider/model, priority, provider parameters and credit weighting:
+## Daily AI credits
 
-- `requestCredits`
-- `inputCreditsPer1kTokens`
-- `outputCreditsPer1kTokens`
-
-Runtime resolves platform routes by task and priority. Tenant/customer model configuration is not used for AI execution.
-
-## Monthly tokens and credits
-
-Each plan exposes two independent monthly ceilings:
-
-- `monthlyAiTokens`: actual provider-reported input + output token usage;
-- `monthlyAiCredits`: platform-weighted usage that can account for different model costs.
-
-Credit calculation:
+Every metered platform AI operation records provider-reported total tokens and credits in `usage_events`. Credit usage is calculated as:
 
 ```text
-credits = requestCredits
-        + (inputTokens / 1000)  * inputCreditsPer1kTokens
-        + (outputTokens / 1000) * outputCreditsPer1kTokens
+credits = totalTokens / tokensPerCredit
 ```
 
-The runtime checks both limits before new AI work. When either allowance is exhausted it returns a non-retryable plan-limit error (`AI_TOKEN_LIMIT_REACHED` or `AI_CREDIT_LIMIT_REACHED`).
+Usage is accumulated per tenant from 00:00 UTC to the next 00:00 UTC. The API enforces the daily credit allowance before AI work and returns `AI_DAILY_CREDIT_LIMIT_REACHED` when it is exhausted. The daily allowance covers chat, image/audio work, embeddings, prompt synthesis/training, and other platform routes that record AI usage.
 
-The monthly allowance covers all platform AI work, including:
+The public customer allowance response includes the plan, period start, UTC reset time, credit limit, credits used, and remaining credits. It does not return token counts or token ceilings.
 
-- conversation/chat generation;
-- image analysis;
-- audio transcription;
-- RAG query embeddings;
-- knowledge indexing embeddings;
-- prompt synthesis/training;
-- other task routes that emit usage events.
+## Plans and defaults
 
-Usage is recorded in `usage_events` with `input_tokens`, `output_tokens`, `total_tokens`, and `credits`.
+The supported plans are Free and Pro. Starter and other legacy plan rows are inactive, and tenants assigned to a legacy/custom plan are normalized to Free.
 
-## Packages
+Migration `018_daily_ai_credits.sql` defaults preserve the former monthly credit budget as a 30-day daily average:
 
-Migration `009_platform_ai_plans.sql` seeds editable starter values:
-
-| Package | Monthly AI tokens | Monthly AI credits |
+| Plan | Daily AI credits | Previous monthly credit equivalent |
 | --- | ---: | ---: |
-| Free | 100,000 | 100 |
-| Pro | 2,000,000 | 2,000 |
+| Free | 3.333333 | 100 |
+| Pro | 66.666667 | 2,000 |
 
-These values are initial operational defaults, **not final commercial pricing**. Super Admin can change them from `/platform-ai` without implementing a payment flow.
-
-New/legacy Starter workspaces are normalized to the Free package. Additional Pro-style plans can use the same `plans.limits` keys.
-
-## Payment scope
-
-Payment checkout, subscription charging, card collection and automatic renewals are intentionally out of scope for this phase. Plan assignment remains administrative/manual.
+These are configurable operational defaults, not final commercial pricing. The global conversion defaults to 1,000 tokens per credit. Payment checkout, subscription charging, card collection, and automatic renewals remain out of scope; plan assignment is administrative.
 
 ## UI
 
-Super Admin:
+Super Admin at `/platform-ai` can:
 
-```text
-/platform-ai
-```
+- create/rotate platform provider credentials and discover models;
+- add routes and enable, disable, edit, or delete them;
+- set the global tokens-per-credit conversion;
+- change Free and Pro daily credit allowances.
 
-- create/rotate platform provider credentials;
-- discover provider models;
-- configure task routes and credit weights;
-- enable/disable model routes;
-- edit monthly token/credit allowances for plans.
-
-Customer:
-
-```text
-/usage
-```
-
-- view current plan;
-- monthly tokens used / remaining;
-- monthly credits used / remaining.
-
-The Customer Panel has no AI models page or provider/model configuration.
+Customer usage at `/usage` shows only the current plan, credits used today, daily credits remaining, and the UTC reset time. No separate Channel AI setup page exists; owners/admins select channels in an Agent create/edit form.
 
 ## API boundary
 
-Customer provider/model mutation endpoints are blocked with:
-
-```text
-403 PLATFORM_AI_MANAGED
-```
-
-The Customer AI Agent screen does not request provider/model configuration or receive platform secrets.
+Customer provider/model mutation endpoints remain blocked with `403 PLATFORM_AI_MANAGED`. Customer workspaces do not receive platform secrets or token totals.
 
 Admin endpoints:
 
 ```text
+GET    /v1/admin/platform-ai/settings
+PATCH  /v1/admin/platform-ai/settings
 GET    /v1/admin/platform-ai/providers
 POST   /v1/admin/platform-ai/providers
 PATCH  /v1/admin/platform-ai/providers/:providerId
 POST   /v1/admin/platform-ai/providers/:providerId/test
 GET    /v1/admin/platform-ai/providers/:providerId/catalog
-
 GET    /v1/admin/platform-ai/models
 POST   /v1/admin/platform-ai/models
 PATCH  /v1/admin/platform-ai/models/:modelId
+DELETE /v1/admin/platform-ai/models/:modelId
 GET    /v1/admin/platform-ai/defaults
-
 PATCH  /v1/admin/plans/:planId/ai-allowance
 ```
 
-Customer allowance endpoint:
+`GET /v1/admin/plans` returns only Free and Pro. Creating more plans is disabled. Customer allowance endpoint:
 
 ```text
 GET /v1/tenants/:tenantId/ai/allowance

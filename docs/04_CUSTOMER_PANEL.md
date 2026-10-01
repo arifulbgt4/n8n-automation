@@ -244,7 +244,7 @@ Training is behavior/prompt synthesis by default, not foundation-model fine-tuni
 
 ## 13. AI model ownership
 
-The Super Admin Panel manages provider credentials, approved task models, and routing. The Customer Panel manages agents, training, channel assignment, business data, and monthly token/credit usage. It does not expose provider keys or model configuration.
+The Super Admin Panel manages provider credentials, approved task models, and routing. The Customer Panel manages agents, training, channel assignment, business data, and daily AI credits. Owners/Admins select channels directly in the Agent create/edit form; the separate Channel AI setup page is not part of the customer flow. Customer usage never exposes provider token counts or token ceilings.
 
 ## 14. Knowledge/RAG
 

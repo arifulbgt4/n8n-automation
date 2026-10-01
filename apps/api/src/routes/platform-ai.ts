@@ -3,7 +3,7 @@ import { z } from "zod";
 import { decryptSecret, encryptSecret, maskSecret, query } from "@n8n-automation/core";
 import { assertSafeAiBaseUrl, testConnection } from "../ai-provider.js";
 import { ApiError, audit, requireCsrf, requirePlatformAdmin, requireRecentPlatformAdmin, requireTenant } from "../lib.js";
-import { monthlyAiAllowance, resolvePlatformModel } from "../platform-ai.js";
+import { dailyAiAllowance, resolvePlatformModel } from "../platform-ai.js";
 
 const providerSchema=z.enum(["openai","anthropic","gemini","openai_compatible"]);
 const taskSchema=z.enum(["DEFAULT_CHAT","INTENT_CLASSIFICATION","IMAGE_ANALYSIS","AUDIO_TRANSCRIPTION","STRUCTURED_EXTRACTION","PROMPT_SYNTHESIS","EMBEDDINGS"]);
@@ -37,13 +37,27 @@ export async function platformAiRoutes(app:FastifyInstance){
   app.get("/v1/tenants/:tenantId/ai/allowance",async(request,reply)=>{
     const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
     await requireTenant(request,tenantId);
-    reply.send(await monthlyAiAllowance(tenantId));
+    reply.send(await dailyAiAllowance(tenantId));
   });
 
   app.get("/v1/admin/platform-ai/providers",async(request,reply)=>{
     await requirePlatformAdmin(request);
     const rows=await query(`SELECT id,name,provider,key_hint,base_url,status,metadata,last_tested_at,created_at,updated_at FROM platform_ai_provider_connections ORDER BY created_at DESC`);
     reply.send({providers:rows.rows});
+  });
+
+  app.get("/v1/admin/platform-ai/settings",async(request,reply)=>{
+    await requirePlatformAdmin(request);
+    const result=await query<any>("SELECT tokens_per_credit,updated_at FROM platform_ai_settings WHERE singleton=true");
+    reply.send({tokensPerCredit:Number(result.rows[0]?.tokens_per_credit??1000),updatedAt:result.rows[0]?.updated_at??null});
+  });
+
+  app.patch("/v1/admin/platform-ai/settings",async(request,reply)=>{
+    const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
+    const input=z.object({tokensPerCredit:z.number().positive().max(1_000_000_000)}).parse(request.body);
+    const result=await query<any>("UPDATE platform_ai_settings SET tokens_per_credit=$1,updated_by=$2,updated_at=now() WHERE singleton=true RETURNING tokens_per_credit,updated_at",[input.tokensPerCredit,principal.userId]);
+    await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"PLATFORM_AI_CREDIT_RATE_UPDATED",resourceType:"platform_ai_settings",resourceId:"global",safeDiff:input,request});
+    reply.send({tokensPerCredit:Number(result.rows[0]?.tokens_per_credit??input.tokensPerCredit),updatedAt:result.rows[0]?.updated_at??null});
   });
 
   app.post("/v1/admin/platform-ai/providers",async(request,reply)=>{
@@ -94,11 +108,11 @@ export async function platformAiRoutes(app:FastifyInstance){
 
   app.post("/v1/admin/platform-ai/models",async(request,reply)=>{
     const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
-    const input=z.object({providerConnectionId:z.string().uuid(),taskKey:taskSchema,model:z.string().trim().min(1).max(160),priority:z.number().int().min(0).max(10000).default(100),parameters:z.record(z.string(),z.unknown()).default({}),inputCreditsPer1kTokens:z.number().nonnegative().default(1),outputCreditsPer1kTokens:z.number().nonnegative().default(1),requestCredits:z.number().nonnegative().default(0),active:z.boolean().default(true)}).parse(request.body);
+    const input=z.object({providerConnectionId:z.string().uuid(),taskKey:taskSchema,model:z.string().trim().min(1).max(160),priority:z.number().int().min(0).max(10000).default(100),parameters:z.record(z.string(),z.unknown()).default({}),active:z.boolean().default(true)}).parse(request.body);
     const provider=await providerById(input.providerConnectionId);
     const test=await testConnection(provider,{model:input.model,parameters:input.parameters});
     if(!test.ok&&input.taskKey==="DEFAULT_CHAT") throw new ApiError(400,"PLATFORM_AI_MODEL_TEST_FAILED",test.detail);
-    const result=await query<any>(`INSERT INTO platform_ai_model_routes(provider_connection_id,task_key,model,parameters,priority,active,input_credits_per_1k_tokens,output_credits_per_1k_tokens,request_credits) VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9) RETURNING *`,[input.providerConnectionId,input.taskKey,input.model,JSON.stringify(input.parameters),input.priority,input.active,input.inputCreditsPer1kTokens,input.outputCreditsPer1kTokens,input.requestCredits]);
+    const result=await query<any>(`INSERT INTO platform_ai_model_routes(provider_connection_id,task_key,model,parameters,priority,active) VALUES($1,$2,$3,$4::jsonb,$5,$6) RETURNING *`,[input.providerConnectionId,input.taskKey,input.model,JSON.stringify(input.parameters),input.priority,input.active]);
     await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"PLATFORM_AI_MODEL_CREATED",resourceType:"platform_ai_model_route",resourceId:result.rows[0].id,safeDiff:{taskKey:input.taskKey,model:input.model,priority:input.priority},request});
     reply.code(201).send({model:result.rows[0]});
   });
@@ -106,7 +120,7 @@ export async function platformAiRoutes(app:FastifyInstance){
   app.patch("/v1/admin/platform-ai/models/:modelId",async(request,reply)=>{
     const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
     const {modelId}=z.object({modelId:z.string().uuid()}).parse(request.params);
-    const input=z.object({providerConnectionId:z.string().uuid().optional(),taskKey:taskSchema.optional(),model:z.string().trim().min(1).max(160).optional(),priority:z.number().int().min(0).max(10000).optional(),active:z.boolean().optional(),parameters:z.record(z.string(),z.unknown()).optional(),inputCreditsPer1kTokens:z.number().nonnegative().optional(),outputCreditsPer1kTokens:z.number().nonnegative().optional(),requestCredits:z.number().nonnegative().optional()}).parse(request.body);
+    const input=z.object({providerConnectionId:z.string().uuid().optional(),taskKey:taskSchema.optional(),model:z.string().trim().min(1).max(160).optional(),priority:z.number().int().min(0).max(10000).optional(),active:z.boolean().optional(),parameters:z.record(z.string(),z.unknown()).optional()}).parse(request.body);
     const current=await query<any>("SELECT * FROM platform_ai_model_routes WHERE id=$1",[modelId]);
     if(!current.rows[0]) throw new ApiError(404,"PLATFORM_AI_MODEL_NOT_FOUND","Platform AI model route not found.");
     const providerConnectionId=input.providerConnectionId??current.rows[0].provider_connection_id;
@@ -118,7 +132,7 @@ export async function platformAiRoutes(app:FastifyInstance){
       const test=await testConnection(provider,{model,parameters});
       if(!test.ok&&taskKey==="DEFAULT_CHAT") throw new ApiError(400,"PLATFORM_AI_MODEL_TEST_FAILED",test.detail);
     }
-    const result=await query<any>(`UPDATE platform_ai_model_routes SET provider_connection_id=$2,task_key=$3,model=$4,priority=COALESCE($5,priority),active=COALESCE($6,active),parameters=CASE WHEN $7::jsonb IS NULL THEN parameters ELSE $7::jsonb END,input_credits_per_1k_tokens=COALESCE($8,input_credits_per_1k_tokens),output_credits_per_1k_tokens=COALESCE($9,output_credits_per_1k_tokens),request_credits=COALESCE($10,request_credits),updated_at=now() WHERE id=$1 RETURNING *`,[modelId,providerConnectionId,taskKey,model,input.priority??null,input.active??null,input.parameters?JSON.stringify(input.parameters):null,input.inputCreditsPer1kTokens??null,input.outputCreditsPer1kTokens??null,input.requestCredits??null]);
+    const result=await query<any>(`UPDATE platform_ai_model_routes SET provider_connection_id=$2,task_key=$3,model=$4,priority=COALESCE($5,priority),active=COALESCE($6,active),parameters=CASE WHEN $7::jsonb IS NULL THEN parameters ELSE $7::jsonb END,updated_at=now() WHERE id=$1 RETURNING *`,[modelId,providerConnectionId,taskKey,model,input.priority??null,input.active??null,input.parameters?JSON.stringify(input.parameters):null]);
     await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"PLATFORM_AI_MODEL_UPDATED",resourceType:"platform_ai_model_route",resourceId:modelId,safeDiff:input,request});
     reply.send({model:result.rows[0]});
   });

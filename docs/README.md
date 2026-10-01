@@ -29,7 +29,7 @@ This directory is the implementation contract for the n8n Automation SaaS.
 23. [`22_N8N_WORKFLOW_USAGE.md`](22_N8N_WORKFLOW_USAGE.md) — final workflow bundle `2.0.0`, per-workflow usage, environment wiring, activation order, smoke tests, troubleshooting, and rollback.
 24. [`23_META_CHANNEL_ONBOARDING.md`](23_META_CHANNEL_ONBOARDING.md) — customer Meta OAuth, app-level webhook setup, automatic per-Page `subscribed_apps`, self-healing connection tests, and production diagnostics.
 25. [`24_CHANNEL_AI_ASSIGNMENT.md`](24_CHANNEL_AI_ASSIGNMENT.md) — channel default-agent assignment, conversation backfill/recovery, and AI readiness diagnostics.
-26. [`25_PLATFORM_AI_PLANS.md`](25_PLATFORM_AI_PLANS.md) — platform-owned AI providers/models, monthly token/credit allowances, Free/Pro packages, usage metering, and the no-payment phase boundary.
+26. [`25_PLATFORM_AI_PLANS.md`](25_PLATFORM_AI_PLANS.md) — platform-owned AI providers/models, daily credit allowances, one global token-to-credit rate, Free/Pro packages, and the no-payment phase boundary.
 27. [`27_META_APP_REVIEW_SUBMISSION_DRAFT.md`](27_META_APP_REVIEW_SUBMISSION_DRAFT.md) — source-backed Facebook Page permission explanations, reviewer walkthrough, screencast plan, and unresolved submission/data-deletion gates.
 28. [`28_NATIVE_CHANNEL_TRAINING.md`](28_NATIVE_CHANNEL_TRAINING.md) — session ON/OFF behavior, native reply feasibility, provider gates, and acceptance matrix.
 
@@ -55,7 +55,7 @@ The target platform has the following non-negotiable architecture decisions unle
 - Dynamic products/services/custom datasets are built through controlled schema definitions and JSONB data, not arbitrary customer-created PostgreSQL tables.
 - n8n is an orchestration engine, not the primary business-data store.
 - Raw Meta callbacks terminate at the SaaS API for signature verification; n8n receives only verified, persisted, turn-ready orchestration events.
-- AI provider credentials and task model routing are platform-owned. Customer workspaces consume approved platform AI routes within monthly token and credit allowances and do not manage provider secrets/model IDs.
+- AI provider credentials and task model routing are platform-owned. Customer workspaces consume approved platform AI routes within daily credit allowances and do not see token totals, provider secrets, or model IDs.
 
 ## Documentation change rule
 

@@ -3,6 +3,7 @@
 import { FormEvent, KeyboardEvent, ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { api, qs } from "../lib/api";
 import AgentCollectionSelector, { type AgentCollection } from "./AgentCollectionSelector";
+import AgentChannelSelector, { type AgentChannel } from "./AgentChannelSelector";
 
 type Agent = {
   id: string;
@@ -16,7 +17,7 @@ type Agent = {
   collection_count?: number;
 };
 type Template = { key: string; name: string; description?: string | null; capabilities: string[] };
-type AgentDetail = { collections?: { collection_id: string; priority: number }[] };
+type AgentDetail = { channels?: { channel_account_id: string; default_agent_profile_id?: string | null }[]; collections?: { collection_id: string; priority: number }[] };
 
 function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error ? reason.message : fallback;
@@ -64,6 +65,8 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   const [agentsReady, setAgentsReady] = useState(false);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [collections, setCollections] = useState<AgentCollection[]>([]);
+  const [channelResult, setChannelResult] = useState<{ scope: string; channels: AgentChannel[]; error: string } | null>(null);
+  const [channelLoadAttempt, setChannelLoadAttempt] = useState(0);
   const [collectionsLoaded, setCollectionsLoaded] = useState(false);
   const [collectionsError, setCollectionsError] = useState("");
   const [collectionLoadAttempt, setCollectionLoadAttempt] = useState(0);
@@ -72,10 +75,13 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   const [message, setMessage] = useState("What can you help me with?");
   const [form, setForm] = useState({ name: "", description: "", templateKey: "", capabilities: initialCapabilities });
   const [createCollectionIds, setCreateCollectionIds] = useState<string[]>([]);
+  const [createChannelIds, setCreateChannelIds] = useState<string[]>([]);
   const [editing, setEditing] = useState<Agent | null>(null);
   const [editForm, setEditForm] = useState({ name: "", description: "", capabilities: "", status: "active" });
   const [editCollectionIds, setEditCollectionIds] = useState<string[]>([]);
   const [originalCollectionIds, setOriginalCollectionIds] = useState<string[]>([]);
+  const [editChannelIds, setEditChannelIds] = useState<string[]>([]);
+  const [originalChannelIds, setOriginalChannelIds] = useState<string[]>([]);
   const [editLoading, setEditLoading] = useState(false);
   const [editLoadError, setEditLoadError] = useState("");
   const editRequest = useRef(0);
@@ -86,9 +92,16 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   const loading = !!businessId && !agentsReady && !error;
   const collectionsLoading = !!businessId && !collectionsLoaded && !collectionsError;
   const collectionsReady = collectionsLoaded && !collectionsError;
-  const assignmentsChanged = !sameIds(editCollectionIds, originalCollectionIds);
-  const unavailableSelected = editCollectionIds.some((id) => !collections.some((collection) => collection.id === id));
-  const canSaveAssignments = !assignmentsChanged || (collectionsReady && !unavailableSelected);
+  const channelScope = `${tenantId}:${businessId}:${channelLoadAttempt}`;
+  const channelsLoaded = channelResult?.scope === channelScope;
+  const channels = channelsLoaded ? channelResult.channels : [];
+  const channelsError = channelsLoaded ? channelResult.error : "";
+  const canAssignChannels = ["OWNER", "ADMIN"].includes(role || "");
+  const collectionAssignmentsChanged = !sameIds(editCollectionIds, originalCollectionIds);
+  const channelAssignmentsChanged = !sameIds(editChannelIds, originalChannelIds);
+  const assignmentsChanged = collectionAssignmentsChanged || channelAssignmentsChanged;
+  const canSaveAssignments = (!collectionAssignmentsChanged || (collectionsReady && !editCollectionIds.some((id) => !collections.some((collection) => collection.id === id))))
+    && (!channelAssignmentsChanged || (channelsLoaded && !channelsError && !editChannelIds.some((id) => !channels.some((channel) => channel.id === id))));
 
   const load = useCallback(async () => {
     if (!tenantId || !businessId) return;
@@ -119,6 +132,19 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   useEffect(() => {
     if (!tenantId || !businessId) return;
     let cancelled = false;
+    const scope = `${tenantId}:${businessId}:${channelLoadAttempt}`;
+    void api<{ channels?: AgentChannel[] }>(`/v1/tenants/${tenantId}/channels${qs({ businessId })}`)
+      .then((data) => {
+        if (cancelled) return;
+        setChannelResult({ scope, channels: (data.channels ?? []).filter((channel) => channel.business_id === undefined || channel.business_id === businessId), error: "" });
+      })
+      .catch((reason) => { if (!cancelled) setChannelResult({ scope, channels: [], error: errorMessage(reason, "Unable to load channels.") }); });
+    return () => { cancelled = true; };
+  }, [tenantId, businessId, channelLoadAttempt]);
+
+  useEffect(() => {
+    if (!tenantId || !businessId) return;
+    let cancelled = false;
     void api<{ collections?: AgentCollection[] }>(`/v1/tenants/${tenantId}/collections${qs({ businessId })}`)
       .then((data) => {
         if (cancelled) return;
@@ -130,7 +156,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   }, [tenantId, businessId, collectionLoadAttempt]);
 
   function closeEdit() { if (busy) return; editRequest.current += 1; setEditing(null); setEditLoadError(""); setFormError(""); }
-  function openCreate() { setCreateCollectionIds([]); setFormError(""); setOpen(true); }
+  function openCreate() { setCreateCollectionIds([]); setCreateChannelIds([]); setFormError(""); setOpen(true); }
   function closeCreate() { if (!busy) { setOpen(false); setFormError(""); } }
   function retryCollections() { setCollectionsLoaded(false); setCollectionsError(""); setCollectionLoadAttempt((attempt) => attempt + 1); }
 
@@ -140,6 +166,8 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
     setEditForm({ name: agent.name, description: agent.description || "", capabilities: (agent.capabilities || []).join(", "), status: agent.status === "draft" ? "draft" : "active" });
     setEditCollectionIds([]);
     setOriginalCollectionIds([]);
+    setEditChannelIds([]);
+    setOriginalChannelIds([]);
     setEditLoadError("");
     setFormError("");
     setEditLoading(true);
@@ -147,8 +175,11 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       const detail = await api<AgentDetail>(`/v1/tenants/${tenantId}/agents/${agent.id}`);
       if (editRequest.current === requestId) {
         const ids = (detail.collections ?? []).map((link) => link.collection_id);
+        const channelIds = (detail.channels ?? []).filter((link) => link.default_agent_profile_id === agent.id).map((link) => link.channel_account_id);
         setEditCollectionIds(ids);
         setOriginalCollectionIds(ids);
+        setEditChannelIds(channelIds);
+        setOriginalChannelIds(channelIds);
       }
     } catch (reason) {
       if (editRequest.current === requestId) setEditLoadError(errorMessage(reason, "Unable to load the agent's collections."));
@@ -166,10 +197,11 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       await api(`/v1/tenants/${tenantId}/agents`, {
         method: "POST",
         body: JSON.stringify({ businessId, name: form.name, description: form.description || undefined, templateKey: form.templateKey || undefined,
-          capabilities: form.capabilities.split(",").map((value) => value.trim()).filter(Boolean), collectionIds: createCollectionIds }),
+          capabilities: form.capabilities.split(",").map((value) => value.trim()).filter(Boolean), channelIds: canAssignChannels ? createChannelIds : [], collectionIds: createCollectionIds }),
       });
       setForm({ name: "", description: "", templateKey: "", capabilities: initialCapabilities });
       setCreateCollectionIds([]);
+      setCreateChannelIds([]);
       setOpen(false);
       setNotice("Agent created with the selected data sources.");
       void load().catch((reason) => setError(errorMessage(reason, "Unable to refresh agents.")));
@@ -188,10 +220,11 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
         body: JSON.stringify({ name: editForm.name, description: editForm.description,
           capabilities: editForm.capabilities.split(",").map((value) => value.trim()).filter(Boolean),
           ...(editForm.status !== editing.status ? { status: editForm.status } : {}),
-          ...(assignmentsChanged ? { collectionIds: editCollectionIds } : {}) }),
+          ...(collectionAssignmentsChanged ? { collectionIds: editCollectionIds } : {}),
+          ...(canAssignChannels && channelAssignmentsChanged ? { channelIds: editChannelIds } : {}) }),
       });
       closeEditAfterSave();
-      setNotice(assignmentsChanged ? "Agent and data sources updated." : "Agent updated.");
+      setNotice(assignmentsChanged ? "Agent, channels and data sources updated." : "Agent updated.");
       void load().catch((reason) => setError(errorMessage(reason, "Unable to refresh agents.")));
     } catch (reason) { setFormError(errorMessage(reason, "Unable to update agent.")); }
     finally { setBusy(""); }
@@ -223,7 +256,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   const selectorLoading = collectionsLoading;
 
   return <>
-    <div className="section-head"><div><h2>AI agents</h2><p>Create business agents and choose the collections they can search for live answers.</p></div>{canEdit && <button className="button primary" disabled={!businessId || !!busy} onClick={openCreate}>+ New agent</button>}</div>
+    <div className="section-head"><div><h2>AI agents</h2><p>Create business agents, assign their channels, and choose the data they can use for live answers.</p></div>{canEdit && <button className="button primary" disabled={!businessId || !!busy} onClick={openCreate}>+ New agent</button>}</div>
     {error && <div role="alert" className="alert error">{error}</div>}
     {notice && <div role="status" className="alert success">{notice}</div>}
     {!businessId && <div className="alert warn">Choose a business to manage its agents and data sources.</div>}
@@ -239,6 +272,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       {selectedTemplate && <div className="result-box"><b>{selectedTemplate.name}</b><p>{selectedTemplate.description}</p><small>{(selectedTemplate.capabilities || []).join(", ")}</small></div>}
       <Field label="Additional capabilities" hint="Optional comma-separated capability keys added on top of the template."><textarea rows={3} value={form.capabilities} onChange={(event) => setForm({ ...form, capabilities: event.target.value })} /></Field>
       <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={createCollectionIds} onChange={setCreateCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />
+      {canAssignChannels&&<AgentChannelSelector channels={channels} selectedIds={createChannelIds} onChange={setCreateChannelIds} loading={!channelsLoaded} error={channelsError} onRetry={()=>setChannelLoadAttempt(attempt=>attempt+1)}/>}
       {formError && <div role="alert" className="alert error">{formError}</div>}
       <button className="button primary" disabled={!!busy || !collectionsReady}>{busy ? "Creating…" : "Create agent"}</button>
     </form></Modal>}
@@ -246,8 +280,9 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       <Field label="Agent name"><input required value={editForm.name} onChange={(event) => setEditForm({ ...editForm, name: event.target.value })} /></Field>
       <Field label="Description"><textarea rows={4} value={editForm.description} onChange={(event) => setEditForm({ ...editForm, description: event.target.value })} /></Field>
       <Field label="Capabilities" hint="Comma-separated capability keys"><input value={editForm.capabilities} onChange={(event) => setEditForm({ ...editForm, capabilities: event.target.value })} /></Field>
-      <Field label="Status"><select value={editForm.status} onChange={(event) => setEditForm({ ...editForm, status: event.target.value })}><option value="active">Active</option><option value="draft">Draft</option></select></Field>
-      {editLoading ? <p role="status" className="muted">Loading current collection assignments…</p> : editLoadError ? <div role="alert" className="alert error">{editLoadError}</div> : <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={editCollectionIds} onChange={setEditCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />}
+      <Field label="Status" hint={editChannelIds.length ? "Clear the channel selections before saving this agent as a draft." : undefined}><select value={editForm.status} onChange={(event) => setEditForm({ ...editForm, status: event.target.value })}><option value="active">Active</option><option value="draft" disabled={editChannelIds.length>0}>Draft</option></select></Field>
+      {editLoading ? <p role="status" className="muted">Loading current agent assignments…</p> : editLoadError ? <div role="alert" className="alert error">{editLoadError}</div> : <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={editCollectionIds} onChange={setEditCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />}
+      {canAssignChannels&&<AgentChannelSelector channels={channels} selectedIds={editChannelIds} onChange={setEditChannelIds} loading={!channelsLoaded} error={channelsError} onRetry={()=>setChannelLoadAttempt(attempt=>attempt+1)}/>}
       {formError && <div role="alert" className="alert error">{formError}</div>}
       <button className="button primary" disabled={!!busy || editLoading || !!editLoadError || !canSaveAssignments}>{busy ? "Saving…" : "Save agent"}</button>
     </form></Modal>}

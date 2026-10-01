@@ -205,7 +205,17 @@ export async function collectionRoutes(app: FastifyInstance) {
       SELECT c.*,
         (SELECT count(*)::int FROM collection_fields f WHERE f.collection_id=c.id) AS field_count,
         (SELECT count(*)::int FROM collection_items i WHERE i.collection_id=c.id AND i.status<>'deleted') AS item_count,
-        (SELECT count(*)::int FROM collection_channel_links l WHERE l.collection_id=c.id AND l.active=true) AS channel_count
+        (SELECT count(*)::int FROM collection_channel_links l WHERE l.collection_id=c.id AND l.active=true) AS channel_count,
+        (SELECT jsonb_build_object('id',m.id,'url',m.public_url,'mimeType',m.mime_type)
+         FROM collection_items i
+         JOIN collection_item_media cim ON cim.collection_item_id=i.id AND cim.tenant_id=i.tenant_id
+         JOIN media_assets m ON m.id=cim.media_asset_id AND m.tenant_id=i.tenant_id
+         WHERE i.collection_id=c.id AND i.tenant_id=c.tenant_id AND i.status<>'deleted'
+           AND m.processing_status='ready' AND m.mime_type LIKE 'image/%'
+           AND COALESCE(m.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+           AND (m.business_id IS NULL OR m.business_id=c.business_id)
+         ORDER BY (cim.role='primary') DESC, (i.status='active') DESC, i.updated_at DESC, cim.display_order, cim.created_at
+         LIMIT 1) AS preview_image
       FROM collections c
       WHERE c.tenant_id=$1 AND c.status<>'archived' AND ($2::uuid IS NULL OR c.business_id=$2)
         AND ($3::uuid[] IS NULL OR c.business_id=ANY($3::uuid[]))

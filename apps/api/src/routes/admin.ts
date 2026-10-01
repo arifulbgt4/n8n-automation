@@ -68,6 +68,11 @@ export async function adminRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const { tenantId } = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const input = z.object({ status: z.enum(["active", "suspended"]).optional(), planId: z.string().uuid().nullable().optional(), settings: z.record(z.string(), z.unknown()).optional(), reason: z.string().max(1000).optional() }).parse(request.body);
+    if (Object.prototype.hasOwnProperty.call(input,"planId")) {
+      if (!input.planId) throw new ApiError(400,"PLAN_REQUIRED","Choose either the Free or Pro plan.");
+      const plan=await query("SELECT id FROM plans WHERE id=$1 AND key IN ('free','pro') AND active=true",[input.planId]);
+      if(!plan.rows[0]) throw new ApiError(400,"PLAN_NOT_ALLOWED","Only active Free and Pro plans can be assigned.");
+    }
     const result = await query(`UPDATE tenants SET status=COALESCE($2,status),plan_id=CASE WHEN $3::boolean THEN $4::uuid ELSE plan_id END,settings_json=CASE WHEN $5::jsonb IS NULL THEN settings_json ELSE settings_json||$5::jsonb END,updated_at=now() WHERE id=$1 RETURNING *`, [tenantId, input.status ?? null, Object.prototype.hasOwnProperty.call(input,"planId"), input.planId ?? null, input.settings ? JSON.stringify(input.settings) : null]);
     if (!result.rows[0]) throw new ApiError(404, "TENANT_NOT_FOUND", "Tenant not found.");
     await audit({ actorUserId: principal.userId, actorType: "platform_admin", tenantId, action: "ADMIN_TENANT_UPDATED", resourceType: "tenant", resourceId: tenantId, safeDiff: input, request });
@@ -285,16 +290,13 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get("/v1/admin/plans", async (request, reply) => {
     await requirePlatformAdmin(request);
-    const result = await query("SELECT * FROM plans ORDER BY created_at");
+    const result = await query("SELECT * FROM plans WHERE key IN ('free','pro') ORDER BY CASE key WHEN 'free' THEN 0 ELSE 1 END");
     reply.send({ plans: result.rows });
   });
 
   app.post("/v1/admin/plans", async (request, reply) => {
-    const principal = await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });
+    await requireRecentPlatformAdmin(request, { roles: ["SUPER_ADMIN", "BILLING_ADMIN"] });
     requireCsrf(request);
-    const input = z.object({ key: z.string().regex(/^[a-z0-9_-]+$/), name: z.string().min(1).max(120), features: z.record(z.string(),z.unknown()).default({}), limits: z.record(z.string(),z.unknown()).default({}), active: z.boolean().default(true) }).parse(request.body);
-    const result = await query(`INSERT INTO plans(key,name,features,limits,active) VALUES ($1,$2,$3::jsonb,$4::jsonb,$5) RETURNING *`, [input.key,input.name,JSON.stringify(input.features),JSON.stringify(input.limits),input.active]);
-    await audit({ actorUserId: principal.userId, actorType: "platform_admin", action: "PLAN_CREATED", resourceType: "plan", resourceId: result.rows[0].id, safeDiff: { key: input.key, name: input.name }, request });
-    reply.code(201).send({ plan: result.rows[0] });
+    throw new ApiError(405,"PLAN_CATALOG_FIXED","The platform currently supports only the Free and Pro plans.");
   });
 }

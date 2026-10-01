@@ -15,7 +15,7 @@ import { ApiError, requestId, safeSecretEqual } from "../lib.js";
 import { findRelevantItems, isCatalogMediaRequest, isSpecificCatalogMediaRequest } from "../catalog-lookup.js";
 import { buildGroundedCatalogResponse } from "../catalog-response.js";
 import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
-import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
+import { assertDailyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
 
 function requireInternal(request: FastifyRequest) {
   const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -158,7 +158,7 @@ async function multimodalContext(context: any, maxImages = 20) {
 }
 
 async function resolveModels(tenantId: string, _businessId: string, _agentId: string | null, _channelId: string, taskKey: string) {
-  await assertMonthlyAiAllowance(tenantId);
+  await assertDailyAiAllowance(tenantId);
   return resolvePlatformModels(taskKey,5);
 }
 
@@ -191,7 +191,7 @@ export async function internalRoutes(app: FastifyInstance) {
     ) LIMIT 1`,[row.channel_account_id,row.created_at]);
     if (training.rows[0]) throw new ApiError(409,"AI_SUPPRESSED_BY_TRAINING","AI responses are paused while channel training is on.");
     await assertMonthlyUsageLimit(row.tenant_id, "ai_call", "aiTurnsPerMonth");
-    await assertMonthlyAiAllowance(row.tenant_id);
+    await assertDailyAiAllowance(row.tenant_id);
     if (row.mode !== "AI" || row.conversation_status !== "open") throw new ApiError(409, "CONVERSATION_NOT_AI_ELIGIBLE", "Conversation is not eligible for an AI response.");
     if (!row.agent_profile_id || !row.active_prompt_version_id) throw new ApiError(409, "AGENT_NOT_CONFIGURED", "Conversation has no active AI agent/prompt.");
     const originalTurnText = context.messages.map((message: any) => message.text_content).filter(Boolean).join("\n");

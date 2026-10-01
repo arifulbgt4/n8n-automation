@@ -83,6 +83,8 @@ Track:
 
 For providers without exact token/cost metadata, label estimates clearly.
 
+Platform AI package enforcement uses one daily credit allowance per tenant. The global `tokens_per_credit` setting applies to every provider, model, and task; credits are `total_tokens / tokens_per_credit`. The UTC day begins at 00:00. Customers see credits used/remaining and the reset time, while token totals remain platform-internal.
+
 ## 7. Business outcome analytics
 
 Depending on enabled capabilities:

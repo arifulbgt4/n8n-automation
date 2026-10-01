@@ -12,16 +12,31 @@ AI response generation also requires an active platform-managed `DEFAULT_CHAT` m
 
 1. Super Admin configures and tests an active platform `DEFAULT_CHAT` route in the Super Admin Panel.
 2. Connect and test the Facebook/Instagram/WhatsApp channel in the Customer Panel.
-3. Create an AI agent. Agent creation publishes an initial prompt version automatically.
-4. Open Customer Panel → **AI Channel Setup** (`/channel-ai`).
-5. Select the default agent for the channel and save.
+3. Open Customer Panel → **AI Agents** and create or edit an agent for the business.
+4. Select the connected channels that should use that agent. Saving makes it the channel's default agent and backfills open AI conversations that have no explicit agent assignment.
+5. Select the data collections the agent should search. Collections also need the appropriate channel link in Data / Catalogs.
 6. Send a new customer message and verify the conversation/outbound delivery.
+
+Channel assignment is available only to tenant Owners and Admins, matching the existing channel-default-agent permission. A channel with Training ON cannot be reassigned. The former `/channel-ai` screen redirects to **AI Agents**; customers do not have to visit a separate setup page.
 
 ## Provider model discovery
 
 Super Admin discovers provider model IDs and configures task routes through the platform AI controls. Customer workspaces do not manage provider credentials or model IDs.
 
-## Assignment API
+## Agent-first assignment API
+
+The Customer Panel uses the agent create and update APIs so channel and collection setup stay together:
+
+```text
+POST  /v1/tenants/:tenantId/agents
+PATCH /v1/tenants/:tenantId/agents/:agentId
+```
+
+Both accept `channelIds`; PATCH applies the supplied list as the agent's selected channel defaults. The API validates tenant/business ownership, checks that each selected channel is not in an active training session, updates `channel_accounts.default_agent_profile_id` and `agent_channel_links`, and backfills open AI conversations with no explicit agent. Clearing a channel selection clears this agent as its default without overwriting conversations with an explicit assignment.
+
+## Compatibility assignment API
+
+The channel-scoped endpoint remains for older integrations:
 
 The Customer Panel uses:
 
@@ -58,9 +73,9 @@ If `/v1/internal/ai/respond` returns:
 Conversation has no active AI agent/prompt.
 ```
 
-first verify the channel default agent and the conversation's `agent_profile_id`. Assigning a default agent through `/channel-ai` with backfill enabled repairs open AI conversations that were created before the channel was configured.
+first verify the channel default agent and the conversation's `agent_profile_id`. Assigning channels from AI Agents backfills open AI conversations created before the channel was configured. The legacy `/channel-ai` URL redirects to AI Agents.
 
-After agent assignment, a missing model is reported separately as:
+After agent assignment from **AI Agents** (or the compatibility endpoint) a missing model is reported separately as:
 
 ```text
 409 AI_MODEL_MISSING

@@ -217,7 +217,7 @@ export async function platformConfigRoutes(app:FastifyInstance){
       trialEndsAt:z.string().datetime().nullable().optional(),
       metadata:z.record(z.string(),z.unknown()).default({})
     }).parse(request.body);
-    const [tenant,plan]=await Promise.all([query("SELECT id FROM tenants WHERE id=$1",[tenantId]),query("SELECT id FROM plans WHERE id=$1 AND active=true",[input.planId])]);
+    const [tenant,plan]=await Promise.all([query("SELECT id FROM tenants WHERE id=$1",[tenantId]),query("SELECT id FROM plans WHERE id=$1 AND key IN ('free','pro') AND active=true",[input.planId])]);
     if(!tenant.rows[0])throw new ApiError(404,"TENANT_NOT_FOUND","Tenant not found.");
     if(!plan.rows[0])throw new ApiError(400,"PLAN_NOT_FOUND","Plan not found or inactive.");
     const row=await transaction(async(client)=>{

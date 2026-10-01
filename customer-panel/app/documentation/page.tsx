@@ -87,7 +87,7 @@ const sections = [
     title: "8. Training",
     summary: "Teach the AI from real examples and improve its response behavior over time.",
     steps: [
-      "Assign an agent to a connected channel in AI Channel Setup, then select that agent and channel in Training.",
+      "Select connected channels in the AI Agent create/edit form, then choose that agent and channel in Training.",
       "Turn Training on to pause AI replies and automated follow-ups for the channel. Reply to customers from the original Page inbox; only messages exchanged during that session are captured.",
       "Turn Training off to resume AI with the current published prompt. Any separately handed-off conversations remain in Human or Paused mode.",
       "Review the captured examples and generated prompt candidate. Publish the candidate only when its behavior is right for the business.",

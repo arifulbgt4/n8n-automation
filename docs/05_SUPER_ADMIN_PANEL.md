@@ -63,6 +63,8 @@ Super admins can:
 
 Sensitive actions require confirmation and audit metadata.
 
+The active plan catalog contains Free and Pro. Super Admin configures daily AI credits and one global tokens-per-credit conversion from Platform AI. Platform routes can be enabled, disabled, edited, or deleted.
+
 ## 5. User/member support
 
 Admin tools may re-send invitation/verification where permitted, revoke sessions, disable compromised accounts, and assist ownership transfer safely.

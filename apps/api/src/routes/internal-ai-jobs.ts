@@ -3,7 +3,7 @@ import { z } from "zod";
 import { env, query, transaction } from "@n8n-automation/core";
 import { chat, embedding } from "../ai-provider.js";
 import { ApiError, requestId, safeSecretEqual } from "../lib.js";
-import { assertMonthlyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
+import { assertDailyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
 import { queueResumedTrainingMessages, releaseFinalizingMessages, restoreTrainingConversations, trainingDatasetState } from "../training-session.js";
 
 function requireInternal(request: FastifyRequest) {
@@ -12,7 +12,7 @@ function requireInternal(request: FastifyRequest) {
 }
 
 async function resolveTaskModel(tenantId: string, _businessId: string, _agentId: string | null, taskKey: string, _explicitConfigId?: string | null) {
-  await assertMonthlyAiAllowance(tenantId);
+  await assertDailyAiAllowance(tenantId);
   const model=await resolvePlatformModel(taskKey);
   if (!model) throw new ApiError(409, "AI_MODEL_MISSING", `No active platform ${taskKey} model is configured.`);
   return model;
@@ -246,7 +246,7 @@ export async function internalAiJobRoutes(app: FastifyInstance) {
       if (!chunks.length) throw new ApiError(400,"KNOWLEDGE_EMPTY","Knowledge source has no indexable text.");
       const vectors: Array<{ content: string; vector: number[]; usage: any }> = [];
       for (let index=0;index<chunks.length;index++) {
-        if(index>0) await assertMonthlyAiAllowance(row.tenant_id);
+        if(index>0) await assertDailyAiAllowance(row.tenant_id);
         const content=chunks[index];
         const embedded = await embedding(model,{model:model.model,parameters:model.parameters ?? {}},content);
         if (embedded.vector.length !== env().EMBEDDING_DIMENSIONS) throw new ApiError(400,"EMBEDDING_DIMENSION_MISMATCH",`Expected ${env().EMBEDDING_DIMENSIONS} embedding dimensions but provider returned ${embedded.vector.length}.`);

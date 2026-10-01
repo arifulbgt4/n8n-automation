@@ -18,6 +18,7 @@ type Collection = {
   field_count?: number;
   item_count?: number;
   channel_count?: number;
+  preview_image?: { id: string; url: string | null; mimeType: string } | null;
 };
 type FieldRow = {
   id: string;
@@ -114,6 +115,27 @@ function CatalogItemMedia({ item, tenantId }: { item: Item; tenantId: string }) 
       />
     </div>)}
     {images.length > 2 && <span className="catalog-item-media-more">+{images.length - 2}</span>}
+  </div>;
+}
+
+function CollectionPreview({ collection, tenantId }: { collection: Collection; tenantId: string }) {
+  const preview = collection.preview_image;
+  if (preview?.mimeType?.startsWith("image/")) {
+    return <div className="catalog-collection-preview">
+      <Image
+        src={preview.url || API_URL + "/v1/tenants/" + tenantId + "/media/" + preview.id + "/content"}
+        alt={collection.name + " catalog preview"}
+        width={440}
+        height={168}
+        sizes="(max-width: 700px) 90vw, (max-width: 1100px) 45vw, 360px"
+        unoptimized
+      />
+      <span>{collection.item_count ?? 0} item{collection.item_count === 1 ? "" : "s"}</span>
+    </div>;
+  }
+  return <div className="catalog-collection-preview catalog-collection-preview-empty" aria-label="No catalog image yet">
+    <span aria-hidden="true">▧</span>
+    <small>Add an item image to preview this collection</small>
   </div>;
 }
 
@@ -574,7 +596,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
     if (field.type === "single_select") return <select style={control} required={field.required} value={String(value ?? "")} onChange={(event) => setValue(field.key, event.target.value)}><option value="">Select…</option>{options.map((option) => <option key={option}>{option}</option>)}</select>;
     if (field.type === "multi_select") return <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{options.map((option) => <label key={option} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: "7px 10px", display: "flex", gap: 7 }}><input type="checkbox" checked={Array.isArray(value) && value.includes(option)} onChange={(event) => setValue(field.key, event.target.checked ? [...(Array.isArray(value) ? value : []), option] : (Array.isArray(value) ? value : []).filter((entry) => entry !== option))} />{option}</label>)}{!options.length && <span style={{ color: "#667085", fontSize: 13 }}>No choices configured for this field.</span>}</div>;
     if (field.type === "relation") return <select style={control} required={field.required} value={String(value ?? "")} onChange={(event) => setValue(field.key, event.target.value)}><option value="">Select related item…</option>{(relatedItems[field.key] ?? []).map((item) => <option key={item.id} value={item.id}>{item.title || item.id.slice(0, 8)}</option>)}</select>;
-    if (field.type === "media") return <div><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(115px,1fr))", gap: 8 }}>{assets.filter((asset) => asset.mime_type?.startsWith("image/")).map((asset) => { const checked = mediaIds(value).includes(asset.id); return <label key={asset.id} style={{ border: checked ? "2px solid #4f46e5" : "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden", cursor: "pointer", background: checked ? "#eef2ff" : "#fff" }}><div style={{ height: 82, background: "#f3f4f6" }}><img src={asset.public_url || `${API_URL}/v1/tenants/${tenantId}/media/${asset.id}/content`} alt={asset.original_name || "Image"} style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div><div style={{ padding: 7, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><input type="checkbox" checked={checked} onChange={(event) => setValue(field.key, event.target.checked ? [...mediaIds(value), asset.id] : mediaIds(value).filter((id) => id !== asset.id))} /> {asset.original_name || "Image"}</div></label>; })}</div><div style={{ marginTop: 9, display: "flex", gap: 10, alignItems: "center" }}><label style={{ ...button, padding: "7px 10px", background: "#eef2ff", color: "#4338ca", display: "inline-flex" }}>+ Upload image<input type="file" accept="image/*" onChange={uploadMedia} style={{ display: "none" }} /></label>{!embedded && <Link href="/media-library" style={{ fontSize: 13, color: "#4f46e5", fontWeight: 700 }}>Open Media library</Link>}</div></div>;
+    if (field.type === "media") return <div><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(115px,1fr))", gap: 8 }}>{assets.filter((asset) => asset.mime_type?.startsWith("image/")).map((asset) => { const checked = mediaIds(value).includes(asset.id); return <label key={asset.id} style={{ border: checked ? "2px solid #4f46e5" : "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden", cursor: "pointer", background: checked ? "#eef2ff" : "#fff" }}><div style={{ height: 82, background: "#f3f4f6" }}><Image src={asset.public_url || `${API_URL}/v1/tenants/${tenantId}/media/${asset.id}/content`} alt={asset.original_name || "Image"} width={150} height={82} sizes="150px" unoptimized style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div><div style={{ padding: 7, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><input type="checkbox" checked={checked} onChange={(event) => setValue(field.key, event.target.checked ? [...mediaIds(value), asset.id] : mediaIds(value).filter((id) => id !== asset.id))} /> {asset.original_name || "Image"}</div></label>; })}</div><div style={{ marginTop: 9, display: "flex", gap: 10, alignItems: "center" }}><label style={{ ...button, padding: "7px 10px", background: "#eef2ff", color: "#4338ca", display: "inline-flex" }}>+ Upload image<input type="file" accept="image/*" onChange={uploadMedia} style={{ display: "none" }} /></label>{!embedded && <Link href="/media-library" style={{ fontSize: 13, color: "#4f46e5", fontWeight: 700 }}>Open Media library</Link>}</div></div>;
     if (field.type === "json") return <textarea style={{ ...control, minHeight: 90, fontFamily: "ui-monospace,monospace" }} value={typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2)} onChange={(event) => setValue(field.key, event.target.value)} />;
     return <input style={control} type={field.type === "email" ? "email" : field.type === "url" ? "url" : field.type === "phone" ? "tel" : "text"} required={field.required} value={String(value ?? "")} onChange={(event) => setValue(field.key, event.target.value)} />;
   }
@@ -589,7 +611,20 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
     {!businessId && <div style={{ ...card, color: "#92400e", background: "#fffbeb", borderColor: "#fde68a" }}>Create or select a business before managing its catalog.</div>}
     {!selected && businessId && <section style={card}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 16 }}><div><h2 style={{ margin: 0 }}>Collections</h2><p style={{ margin: "5px 0 0", color: "#667085" }}>Each collection has its own schema, channel links and item form.</p></div><button disabled={busy} onClick={() => setCollectionOpen(true)} style={{ ...button, background: "#4f46e5", color: "#fff" }}>+ New collection</button></div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(250px,1fr))", gap: 12 }}>{collections.map((collection) => <div key={collection.id} style={{ border: "1px solid #e5e7eb", background: "#fff", borderRadius: 12, padding: 16 }}><button disabled={busy} onClick={() => void openCollection(collection)} style={{ width: "100%", textAlign: "left", border: 0, background: "transparent", padding: 0, cursor: "pointer" }}><div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><strong>{collection.name}</strong><span style={{ fontSize: 12, color: "#4f46e5", fontWeight: 700 }}>{collection.purpose}</span></div><div style={{ fontSize: 13, color: "#667085", marginTop: 9 }}>{collection.field_count ?? 0} fields · {collection.item_count ?? 0} items · {collection.channel_count ?? 0} channels</div></button><div style={{ display: "flex", gap: 8, marginTop: 14 }}><button disabled={busy} onClick={() => startEditCollection(collection)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Edit</button><button disabled={busy} onClick={() => void removeCollection(collection)} style={{ ...button, background: "#fff1f2", color: "#be123c" }}>Delete</button></div></div>)}</div>
+      <div className="catalog-collection-grid">{collections.map((collection) => <article className="catalog-collection-card" key={collection.id}>
+        <button disabled={busy} onClick={() => void openCollection(collection)} className="catalog-collection-open">
+          <CollectionPreview collection={collection} tenantId={tenantId} />
+          <div className="catalog-collection-card-body">
+            <div className="catalog-collection-title-row"><strong>{collection.name}</strong><span>{collection.purpose || "Custom"}</span></div>
+            <div className="catalog-collection-stats">
+              <span><b>{collection.item_count ?? 0}</b> items</span>
+              <span><b>{collection.field_count ?? 0}</b> fields</span>
+              <span><b>{collection.channel_count ?? 0}</b> channels</span>
+            </div>
+          </div>
+        </button>
+        <div className="catalog-collection-actions"><button disabled={busy} onClick={() => startEditCollection(collection)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Edit</button><button disabled={busy} onClick={() => void removeCollection(collection)} style={{ ...button, background: "#fff1f2", color: "#be123c" }}>Delete</button><button disabled={busy} onClick={() => void openCollection(collection)} style={{ ...button, background: "#4f46e5", color: "#fff", marginLeft: "auto" }}>Open</button></div>
+      </article>)}</div>
       {!collections.length && <div style={{ padding: 30, textAlign: "center", color: "#667085" }}>No collections yet. Create one to add products, services or custom business data.</div>}
     </section>}
     {selected && <>
