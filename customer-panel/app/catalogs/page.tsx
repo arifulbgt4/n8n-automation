@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { ChangeEvent, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { API_URL, api, qs } from "../../lib/api";
 
@@ -33,7 +34,8 @@ type FieldRow = {
   display_order?: number;
 };
 type ItemValue = string | number | boolean | string[] | Record<string, unknown> | null | undefined;
-type Item = { id: string; title?: string | null; status: string; data_jsonb: Record<string, ItemValue>; updated_at: string };
+type ItemMedia = { id: string; url: string | null; mimeType: string; role: string; order: number };
+type Item = { id: string; title?: string | null; status: string; data_jsonb: Record<string, ItemValue>; updated_at: string; media?: ItemMedia[] };
 type Asset = { id: string; original_name?: string | null; mime_type: string; public_url?: string | null };
 type CatalogsPageProps = {
   embedded?: boolean;
@@ -89,6 +91,30 @@ function formatItemValue(value: ItemValue) {
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (Array.isArray(value)) return value.join(", ");
   return String(value ?? "—");
+}
+
+function CatalogItemMedia({ item, tenantId }: { item: Item; tenantId: string }) {
+  const images = (item.media ?? []).filter((media) => media.mimeType?.startsWith("image/"));
+  if (!images.length) {
+    return <div className="catalog-item-media-empty" aria-label="No image">
+      <span aria-hidden="true">▧</span>
+      <small>No image</small>
+    </div>;
+  }
+
+  return <div className="catalog-item-media-preview" aria-label={images.length + " images for " + (item.title || "catalog item")}>
+    {images.slice(0, 2).map((image, index) => <div className="catalog-item-media-thumb" key={image.id}>
+      <Image
+        src={image.url || API_URL + "/v1/tenants/" + tenantId + "/media/" + image.id + "/content"}
+        alt={(item.title || "Catalog item") + " image " + (index + 1)}
+        width={56}
+        height={56}
+        sizes="56px"
+        unoptimized
+      />
+    </div>)}
+    {images.length > 2 && <span className="catalog-item-media-more">+{images.length - 2}</span>}
+  </div>;
 }
 
 export default function CatalogsPage({ embedded = false, tenantId: suppliedTenantId, businessId: suppliedBusinessId, onChanged }: CatalogsPageProps) {
@@ -585,6 +611,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid #e5e7eb" }}>
+                <th style={{ textAlign: "left", padding: 10, width: 112 }}>Image</th>
                 <th style={{ textAlign: "left", padding: 10 }}>Item</th>
                 {summaryFields.map((field) => <th key={field.id} style={{ textAlign: "left", padding: 10 }}>{field.label}</th>)}
                 <th style={{ textAlign: "left", padding: 10 }}>Status</th>
@@ -593,6 +620,9 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
             </thead>
             <tbody>
               {items.map((item) => <tr key={item.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                <td style={{ padding: "8px 10px", width: 112 }}>
+                  <CatalogItemMedia item={item} tenantId={tenantId} />
+                </td>
                 <td style={{ padding: 10 }}>
                   <strong>{item.title || "Untitled"}</strong>
                   <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 3 }}>Updated {new Date(item.updated_at).toLocaleString()}</div>
