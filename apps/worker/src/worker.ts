@@ -565,9 +565,20 @@ async function sendProviderMessage(tenantId: string, channel: any, message: any,
 async function outboundMessage(job: Job<JobEnvelope<any>>) {
   const { tenantId, businessId, channelAccountId, conversationId, idempotencyKey, correlationId, payload } = job.data;
   if (!businessId || !channelAccountId || !conversationId) throw new Error("Outbound job is missing scope identifiers");
-  const existing = await query("SELECT id,delivery_status FROM messages WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2 LIMIT 1", [tenantId,idempotencyKey]);
-  if (["sent","unknown"].includes(existing.rows[0]?.delivery_status)) return;
-  const sequenceIndex = Number(payload.sequenceIndex ?? 0);
+  const existing = await query<any>(`SELECT id,delivery_status FROM messages
+    WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2 ORDER BY created_at,id`, [tenantId,idempotencyKey]);
+  const completed = existing.rows.find((row:any) => ["sent","unknown"].includes(row.delivery_status));
+  if (completed) {
+    await query(`UPDATE messages SET delivery_status='cancelled',
+        metadata=metadata||jsonb_build_object('idempotencyDuplicateOf',$3::text),updated_at=now()
+      WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2 AND id<>$3
+        AND delivery_status NOT IN ('sent','unknown','cancelled')`,[tenantId,idempotencyKey,completed.id]);
+    return;
+  }
+  const canonical = existing.rows[0];
+  if (["cancelled","dead_letter"].includes(canonical?.delivery_status)) return;
+  const legacySequenceIndex = idempotencyKey.match(/:(\d+)$/)?.[1];
+  const sequenceIndex = Number(payload.sequenceIndex ?? legacySequenceIndex ?? 0);
   if (sequenceIndex > 0 && payload.logicalResponseId) {
     const previousJobId = `outbound:${payload.logicalResponseId}:${sequenceIndex - 1}`;
     const previousJob = await queue(QUEUES.outbound).getJob(bullmqJobId(previousJobId));
@@ -582,10 +593,17 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   const channel = await loadChannelRuntime(channelAccountId, conversationId, tenantId, businessId);
   if (!channel.active || channel.connection_status !== "connected" || channel.conversation_status !== "open") throw new Error("Channel or conversation is not active");
   if (payload.senderType !== "HUMAN" && (await channelTrainingActive(channelAccountId) || await automaticMessageFenced(channelAccountId,job.data.createdAt))) {
-    if (existing.rows[0]) await query("UPDATE messages SET delivery_status='cancelled',updated_at=now() WHERE id=$1 AND delivery_status<>'sent'",[existing.rows[0].id]);
+    await query(`UPDATE messages SET delivery_status='cancelled',updated_at=now()
+      WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2
+        AND delivery_status NOT IN ('sent','unknown','cancelled')`,[tenantId,idempotencyKey]);
     return;
   }
-  if (payload.senderType === "AI" && channel.mode !== "AI") return;
+  if (payload.senderType === "AI" && channel.mode !== "AI") {
+    await query(`UPDATE messages SET delivery_status='cancelled',updated_at=now()
+      WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2
+        AND delivery_status NOT IN ('sent','unknown','cancelled')`,[tenantId,idempotencyKey]);
+    return;
+  }
   const tenant = await query<{ status: string }>("SELECT status FROM tenants WHERE id=$1", [tenantId]);
   if (tenant.rows[0]?.status !== "active") throw new Error("Tenant is not active");
 
@@ -625,73 +643,67 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
 
   const message = payload.message;
   if (message.type === "media") await loadAsset(tenantId, businessId, message.assetId);
-  const persisted = await query<any>(`
-    INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,direction,sender_type,message_type,text_content,delivery_status,metadata)
-    VALUES ($1,$2,$3,$4,'OUTBOUND',$5,$6,$7,'sending',$8::jsonb) RETURNING id
-  `, [tenantId,businessId,channelAccountId,conversationId,payload.senderType || "AI",message.type,message.type === "text" ? message.text : message.caption ?? null,JSON.stringify({ outboundIdempotencyKey: idempotencyKey, logicalResponseId: payload.logicalResponseId, correlationId, trainingQueuedSessionId: payload.trainingSessionId ?? null })]);
-  const messageId = persisted.rows[0].id;
+  const messageId = canonical?.id ?? (await query<any>(`
+      INSERT INTO messages(tenant_id,business_id,channel_account_id,conversation_id,direction,sender_type,message_type,text_content,delivery_status,metadata)
+      VALUES ($1,$2,$3,$4,'OUTBOUND',$5,$6,$7,'sending',$8::jsonb) RETURNING id
+    `, [tenantId,businessId,channelAccountId,conversationId,payload.senderType || "AI",message.type,message.type === "text" ? message.text : message.caption ?? null,JSON.stringify({ outboundIdempotencyKey: idempotencyKey, logicalResponseId: payload.logicalResponseId, correlationId, trainingQueuedSessionId: payload.trainingSessionId ?? null })])).rows[0].id;
+  await query(`UPDATE messages SET delivery_status='cancelled',
+      metadata=metadata||jsonb_build_object('idempotencyDuplicateOf',$3::text),updated_at=now()
+    WHERE tenant_id=$1 AND metadata->>'outboundIdempotencyKey'=$2 AND id<>$3
+      AND delivery_status NOT IN ('sent','unknown','cancelled')`,[tenantId,idempotencyKey,messageId]);
+  await query(`UPDATE messages SET delivery_status='sending',metadata=metadata-'error'-'providerStatus'-'permanent',updated_at=now()
+    WHERE id=$1 AND delivery_status NOT IN ('sent','unknown','cancelled','dead_letter')`,[messageId]);
   if (message.type === "media") {
     await query("INSERT INTO message_media(message_id,media_asset_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [messageId,message.assetId,tenantId]);
   }
   let acceptedProviderMessageId: string | null = null;
   try {
-    const sent = payload.senderType !== "HUMAN"
-      ? await transaction(async (client) => {
-          // Starting training holds the same channel row lock. An ON response
-          // therefore means every earlier AI provider request has finished.
-          await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channelAccountId]);
-          const active = await client.query(`SELECT id FROM training_sessions
-            WHERE channel_account_id=$1 AND (status='open' OR created_at >= $2::timestamptz OR
-              (created_at <= $2::timestamptz AND stopped_at>$2::timestamptz)) LIMIT 1`,
-            [channelAccountId,job.data.createdAt]);
-          if (active.rows[0]) return null;
-          // Provider media helpers must use this client while the channel row
-          // is locked. A pool query here can wait on this transaction's own
-          // foreign-key lock and leave the worker idle in transaction forever.
-          return sendProviderMessage(tenantId, channel, message, AbortSignal.timeout(45_000),client);
-        })
-      : await transaction(async (client) => {
-          // Training OFF takes this same lock before freezing the dataset.
-          // A queued reply counts only if its own session is still open when
-          // the provider accepts it; an unsuccessful or later send does not.
-          await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channelAccountId]);
-          const accepted = await sendProviderMessage(tenantId, channel, message, AbortSignal.timeout(45_000),client);
-          acceptedProviderMessageId = accepted.providerMessageId;
-          await client.query("UPDATE messages SET platform_message_id=$2,delivery_status='sent',provider_timestamp=clock_timestamp(),updated_at=now() WHERE id=$1",[messageId,accepted.providerMessageId]);
-          await capturePanelTrainingReply(client,{
-            tenantId,businessId,channelId:channelAccountId,conversationId,
-            sessionId:payload.trainingSessionId,sourceMessageId:messageId,
-          });
-          await client.query("UPDATE channel_accounts SET last_delivery_at=now(),updated_at=now() WHERE id=$1", [channelAccountId]);
-          await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
-            VALUES ($1,$2,$3,$4,'outbound_message',1,'message',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`,
-            [tenantId,businessId,channelAccountId,conversationId,correlationId,`outbound:${idempotencyKey}`,JSON.stringify({ messageType: message.type, senderType: payload.senderType })]);
-          if (message.type === "media") await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key)
-            VALUES ($1,$2,$3,$4,'media_send',1,'media',$5,$6) ON CONFLICT DO NOTHING`,
-            [tenantId,businessId,channelAccountId,conversationId,correlationId,`media-send:${idempotencyKey}`]);
-          return accepted;
-        });
+    const sent = await transaction(async (client) => {
+      // Serialize against Training ON/OFF and concurrent stalled-job recovery.
+      await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channelAccountId]);
+      const current = await client.query<{delivery_status:string}>("SELECT delivery_status FROM messages WHERE id=$1 FOR UPDATE",[messageId]);
+      if (!current.rows[0]) throw new Error("Outbound message persistence record is missing");
+      if (["sent","unknown","cancelled","dead_letter"].includes(current.rows[0]?.delivery_status)) return null;
+      if (payload.senderType !== "HUMAN") {
+        const active = await client.query(`SELECT id FROM training_sessions
+          WHERE channel_account_id=$1 AND (status='open' OR created_at >= $2::timestamptz OR
+            (created_at <= $2::timestamptz AND stopped_at>$2::timestamptz)) LIMIT 1`,
+          [channelAccountId,job.data.createdAt]);
+        if (active.rows[0]) return null;
+      }
+      // Provider media helpers use this same transaction client while the
+      // channel row is locked, avoiding a pool-query self-deadlock.
+      const accepted = await sendProviderMessage(tenantId, channel, message, AbortSignal.timeout(45_000),client);
+      acceptedProviderMessageId = accepted.providerMessageId;
+      await client.query("UPDATE messages SET platform_message_id=$2,delivery_status='sent',provider_timestamp=clock_timestamp(),updated_at=now() WHERE id=$1",[messageId,accepted.providerMessageId]);
+      if (payload.senderType === "HUMAN") await capturePanelTrainingReply(client,{
+        tenantId,businessId,channelId:channelAccountId,conversationId,
+        sessionId:payload.trainingSessionId,sourceMessageId:messageId,
+      });
+      await client.query("UPDATE channel_accounts SET last_delivery_at=now(),updated_at=now() WHERE id=$1", [channelAccountId]);
+      await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
+        VALUES ($1,$2,$3,$4,'outbound_message',1,'message',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`,
+        [tenantId,businessId,channelAccountId,conversationId,correlationId,`outbound:${idempotencyKey}`,JSON.stringify({ messageType: message.type, senderType: payload.senderType })]);
+      if (message.type === "media") await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key)
+        VALUES ($1,$2,$3,$4,'media_send',1,'media',$5,$6) ON CONFLICT DO NOTHING`,
+        [tenantId,businessId,channelAccountId,conversationId,correlationId,`media-send:${idempotencyKey}`]);
+      return accepted;
+    });
     if (!sent) {
-      await query("UPDATE messages SET delivery_status='cancelled',updated_at=now() WHERE id=$1",[messageId]);
+      await query("UPDATE messages SET delivery_status='cancelled',updated_at=now() WHERE id=$1 AND delivery_status='sending'",[messageId]);
       return;
     }
-    if (payload.senderType === "HUMAN") return;
-    await query("UPDATE messages SET platform_message_id=$2,delivery_status='sent',updated_at=now() WHERE id=$1", [messageId,sent.providerMessageId]);
-    await query("UPDATE channel_accounts SET last_delivery_at=now(),updated_at=now() WHERE id=$1", [channelAccountId]);
-    await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key,metadata)
-      VALUES ($1,$2,$3,$4,'outbound_message',1,'message',$5,$6,$7::jsonb) ON CONFLICT DO NOTHING`, [tenantId,businessId,channelAccountId,conversationId,correlationId,`outbound:${idempotencyKey}`,JSON.stringify({ messageType: message.type, senderType: payload.senderType })]);
-    if (message.type === "media") await query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key) VALUES ($1,$2,$3,$4,'media_send',1,'media',$5,$6) ON CONFLICT DO NOTHING`, [tenantId,businessId,channelAccountId,conversationId,correlationId,`media-send:${idempotencyKey}`]);
   } catch (error) {
-    if (payload.senderType === "HUMAN" && humanReplyOutcomeUnknown(error, acceptedProviderMessageId)) {
-      // A provider may have accepted this reply even when its response or our
-      // transaction failed. Retrying automatically could send it twice.
+    if (humanReplyOutcomeUnknown(error, acceptedProviderMessageId)) {
+      // Any provider may have accepted the request even when its response or
+      // our transaction failed. Do not retry an ambiguous send automatically.
       await query("UPDATE messages SET delivery_status='unknown',metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1", [
         messageId,
         JSON.stringify({ providerOutcomeUnknown: true,
           reason: acceptedProviderMessageId ? "acceptance_not_recorded" : "request_outcome_unknown",
           providerMessageId: acceptedProviderMessageId }),
       ]).catch((markError) => log("outbound_unknown_status_write_failed", { messageId, error: markError instanceof Error ? markError.message : "unknown" }));
-      throw new UnrecoverableError("Human reply provider outcome is unknown; reconcile before sending again");
+      throw new UnrecoverableError("Provider outcome is unknown; reconcile before sending again");
     }
     const status=Number((error as any)?.status || 0);
     const permanent=[400,401,403,404,410,422].includes(status);
