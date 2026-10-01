@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import AdminAccessGuard from "../../components/AdminAccessGuard";
 
@@ -37,10 +37,14 @@ export default function PlatformAiPage(){
   const[providerForm,setProviderForm]=useState({name:"",provider:"openai",apiKey:"",baseUrl:""});
   const[modelForm,setModelForm]=useState<ModelDraft>(emptyDraft());
   const[editing,setEditing]=useState<ModelRoute|null>(null);
+  const[deleteTarget,setDeleteTarget]=useState<ModelRoute|null>(null);
   const[editDraft,setEditDraft]=useState<ModelDraft>(emptyDraft());
   const[planDrafts,setPlanDrafts]=useState<Record<string,number>>({});
   const[tokensPerCredit,setTokensPerCredit]=useState(1000);
   const[selectedPreset,setSelectedPreset]=useState("1000");
+  const[dialogRoot,setDialogRoot]=useState<HTMLElement|null>(null);
+  const dialogOpen=Boolean(editing||deleteTarget);
+  const closeDialogRef=useRef<()=>void>(()=>{});
 
   const applyData=useCallback((data:PlatformAiData)=>{
     const providerRows=data.providers;
@@ -54,6 +58,29 @@ export default function PlatformAiPage(){
   },[]);
   const load=useCallback(async()=>{applyData(await fetchPlatformAiData());},[applyData]);
   useEffect(()=>{let active=true;void fetchPlatformAiData().then(data=>{if(active)applyData(data)}).catch(e=>{if(active)setError(e instanceof Error?e.message:"Unable to load platform AI settings.")});return()=>{active=false};},[applyData]);
+  useEffect(()=>{closeDialogRef.current=()=>{if(busy)return;if(deleteTarget)setDeleteTarget(null);else setEditing(null)};},[busy,deleteTarget]);
+
+  useEffect(()=>{
+    if(!dialogOpen)return;
+    const previousFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
+    const previousOverflow=document.body.style.overflow;
+    document.body.style.overflow="hidden";
+    const focusTimer=window.requestAnimationFrame(()=>{
+      const first=dialogRoot?.querySelector<HTMLElement>('input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled])');
+      (first??dialogRoot)?.focus();
+    });
+    function onKeyDown(event:KeyboardEvent){
+      if(event.key==="Escape"){event.preventDefault();closeDialogRef.current();return}
+      if(event.key!=="Tab"||!dialogRoot)return;
+      const items=Array.from(dialogRoot.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'));
+      if(!items.length){event.preventDefault();dialogRoot.focus();return}
+      const first=items[0],last=items[items.length-1];
+      if(event.shiftKey&&(document.activeElement===first||!dialogRoot.contains(document.activeElement))){event.preventDefault();last.focus()}
+      else if(!event.shiftKey&&(document.activeElement===last||!dialogRoot.contains(document.activeElement))){event.preventDefault();first.focus()}
+    }
+    document.addEventListener("keydown",onKeyDown);
+    return()=>{window.cancelAnimationFrame(focusTimer);document.body.style.overflow=previousOverflow;document.removeEventListener("keydown",onKeyDown);if(previousFocus?.isConnected)previousFocus.focus()};
+  },[dialogOpen,dialogRoot]);
 
   const selectedProvider=useMemo(()=>providers.find(provider=>provider.id===modelForm.providerConnectionId),[providers,modelForm.providerConnectionId]);
   const catalog=catalogResult.providerId===modelForm.providerConnectionId?catalogResult.models:[];
@@ -87,9 +114,8 @@ export default function PlatformAiPage(){
     catch(e){setError(e instanceof Error?e.message:"Unable to update route.");}finally{setBusy("");}
   }
   async function deleteModel(row:ModelRoute){
-    if(!confirm(`Delete the ${row.task_key} route for ${row.model}?`))return;
     setError("");setNotice("");setBusy(row.id);
-    try{await api(`/v1/admin/platform-ai/models/${row.id}`,{method:"DELETE"});setNotice("Platform route deleted.");await load();}
+    try{await api(`/v1/admin/platform-ai/models/${row.id}`,{method:"DELETE"});setDeleteTarget(null);setNotice("Platform route deleted.");await load();}
     catch(e){setError(e instanceof Error?e.message:"Unable to delete route.");}finally{setBusy("");}
   }
   async function saveCreditRate(event:FormEvent){
@@ -127,18 +153,19 @@ export default function PlatformAiPage(){
 
     <section className="platform-ai-card platform-ai-section"><div className="platform-ai-card-head"><div><h2>Global credit conversion</h2><p>One credit rate applies to every provider, model, and AI task.</p></div><span className="platform-ai-rate-chip">1 credit = {tokensPerCredit.toLocaleString()} tokens</span></div><form className="platform-ai-rate-form" onSubmit={saveCreditRate}><label>Tokens per credit<select style={inputStyle} value={selectedPreset} onChange={event=>{const value=event.target.value;setSelectedPreset(value);if(value!=="custom")setTokensPerCredit(Number(value));}}>{presets.map(rate=><option key={rate} value={rate}>{rate.toLocaleString()} tokens / credit</option>)}<option value="custom">Custom rate</option></select></label>{selectedPreset==="custom"&&<label>Custom tokens per credit<input type="number" min="0.000001" step="any" style={inputStyle} value={tokensPerCredit} onChange={event=>setTokensPerCredit(Number(event.target.value))}/></label>}<button style={primaryStyle} disabled={busy==="credit-rate"}>{busy==="credit-rate"?"Saving…":"Save conversion"}</button></form></section>
 
-    <section className="platform-ai-card platform-ai-section"><div className="platform-ai-card-head"><div><h2>Platform routes</h2><p>Enable or disable traffic, edit route configuration, or remove a route.</p></div><span className="platform-ai-rate-chip">Global rate · {tokensPerCredit.toLocaleString()} tokens / credit</span></div><div className="platform-ai-table-wrap"><table className="platform-ai-table"><thead><tr><th>Task</th><th>Provider</th><th>Model</th><th>Priority</th><th>Status</th><th>Actions</th></tr></thead><tbody>{models.map(route=><tr key={route.id}><td><strong>{route.task_key}</strong></td><td>{route.provider_name}<small>{route.provider}</small></td><td><code>{route.model}</code></td><td>{route.priority}</td><td><span className={`badge ${route.active?"good":"neutral"}`}>{route.active?"Active":"Disabled"}</span></td><td><div className="platform-ai-actions"><button type="button" className="button ghost smallbtn" disabled={busy===route.id} onClick={()=>startEdit(route)}>Edit</button><button type="button" className="button" disabled={busy===route.id} onClick={()=>void toggleModel(route)}>{route.active?"Disable":"Enable"}</button><button type="button" className="button danger smallbtn" disabled={busy===route.id} onClick={()=>void deleteModel(route)}>{busy===route.id?"Working…":"Delete"}</button></div></td></tr>)}</tbody></table>{!models.length&&<p className="platform-ai-empty">No routes configured. Add a task route above.</p>}</div></section>
+    <section className="platform-ai-card platform-ai-section"><div className="platform-ai-card-head"><div><h2>Platform routes</h2><p>Enable or disable traffic, edit route configuration, or remove a route.</p></div><span className="platform-ai-rate-chip">Global rate · {tokensPerCredit.toLocaleString()} tokens / credit</span></div><div className="platform-ai-table-wrap"><table className="platform-ai-table"><thead><tr><th>Task</th><th>Provider</th><th>Model</th><th>Priority</th><th>Status</th><th>Actions</th></tr></thead><tbody>{models.map(route=><tr key={route.id}><td><strong>{route.task_key}</strong></td><td>{route.provider_name}<small>{route.provider}</small></td><td><code>{route.model}</code></td><td>{route.priority}</td><td><span className={`badge ${route.active?"good":"neutral"}`}>{route.active?"Active":"Disabled"}</span></td><td><div className="platform-ai-actions"><button type="button" className="button ghost smallbtn" disabled={busy===route.id} onClick={()=>startEdit(route)}>Edit</button><button type="button" className="button" disabled={busy===route.id} onClick={()=>void toggleModel(route)}>{route.active?"Disable":"Enable"}</button><button type="button" className="button danger smallbtn" disabled={busy===route.id} onClick={()=>{setError("");setDeleteTarget(route)}}>{busy===route.id?"Working…":"Delete"}</button></div></td></tr>)}</tbody></table>{!models.length&&<p className="platform-ai-empty">No routes configured. Add a task route above.</p>}</div></section>
 
     <section className="platform-ai-card platform-ai-section"><div className="platform-ai-card-head"><div><h2>Daily package allowances</h2><p>Customers see credits only. Usage resets at 00:00 UTC every day.</p></div><span className="platform-ai-fixed-plans">Free · Pro</span></div><div className="platform-ai-plan-list">{plans.map(plan=><form className="platform-ai-plan-row" key={plan.id} onSubmit={event=>{event.preventDefault();void savePlan(plan);}}><div><b>{plan.name}</b><small>{plan.key} plan · {plan.active?"active":"inactive"}</small></div><label>Credits per day<input type="number" min="0" max="1000000" step="0.001" style={inputStyle} value={planDrafts[plan.id]??0} onChange={event=>setPlanDrafts({...planDrafts,[plan.id]:Number(event.target.value)})}/></label><button style={primaryStyle} disabled={busy===plan.id}>{busy===plan.id?"Saving…":"Save"}</button></form>)}</div></section>
 
-    {editing&&<div className="platform-ai-modal-backdrop" onMouseDown={()=>setEditing(null)}><section className="platform-ai-modal" role="dialog" aria-modal="true" aria-labelledby="edit-route-title" onMouseDown={event=>event.stopPropagation()}><header><div><h2 id="edit-route-title">Edit platform route</h2><p>Changes apply to future AI calls for this route.</p></div><button type="button" className="button ghost" onClick={()=>setEditing(null)} aria-label="Close">×</button></header><form onSubmit={saveEdit} className="platform-ai-form">
+    {editing&&<div className="platform-ai-modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&busy!==editing.id)setEditing(null)}}><section ref={setDialogRoot} tabIndex={-1} className="platform-ai-modal" role="dialog" aria-modal="true" aria-labelledby="edit-route-title" onMouseDown={event=>event.stopPropagation()}><header><div><h2 id="edit-route-title">Edit platform route</h2><p>Changes apply to future AI calls for this route.</p></div><button type="button" className="button ghost" onClick={()=>setEditing(null)} disabled={busy===editing.id} aria-label="Close">×</button></header><form onSubmit={saveEdit} className="platform-ai-form">
       <label>Provider<select required style={inputStyle} value={editDraft.providerConnectionId} onChange={event=>setEditDraft({...editDraft,providerConnectionId:event.target.value})}>{providers.map(provider=><option key={provider.id} value={provider.id}>{provider.name} · {provider.provider}</option>)}</select></label>
       <label>Task<select style={inputStyle} value={editDraft.taskKey} onChange={event=>setEditDraft({...editDraft,taskKey:event.target.value})}>{tasks.map(task=><option key={task}>{task}</option>)}</select></label>
       <label>Model ID<input required style={inputStyle} value={editDraft.model} onChange={event=>setEditDraft({...editDraft,model:event.target.value})}/></label>
       <div className="platform-ai-form-row"><label>Priority<input type="number" min="0" max="10000" style={inputStyle} value={editDraft.priority} onChange={event=>setEditDraft({...editDraft,priority:Number(event.target.value)})}/></label><label>Parameters JSON<textarea rows={4} style={inputStyle} value={editDraft.parametersJson} onChange={event=>setEditDraft({...editDraft,parametersJson:event.target.value})}/></label></div>
       <label className="platform-ai-toggle"><input type="checkbox" checked={editDraft.active} onChange={event=>setEditDraft({...editDraft,active:event.target.checked})}/> Route enabled</label>
       {error&&<div role="alert" className="platform-ai-alert error">{error}</div>}
-      <div className="platform-ai-modal-actions"><button type="button" className="button" onClick={()=>setEditing(null)}>Cancel</button><button style={primaryStyle} disabled={busy===editing.id}>{busy===editing.id?"Saving…":"Save route"}</button></div>
+      <div className="platform-ai-modal-actions"><button type="button" className="button" onClick={()=>setEditing(null)} disabled={busy===editing.id}>Cancel</button><button style={primaryStyle} disabled={busy===editing.id}>{busy===editing.id?"Saving…":"Save route"}</button></div>
     </form></section></div>}
+    {deleteTarget&&<div className="platform-ai-modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&busy!==deleteTarget.id)setDeleteTarget(null)}}><section ref={setDialogRoot} tabIndex={-1} className="platform-ai-modal platform-ai-confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-route-title" aria-describedby="delete-route-description" onMouseDown={event=>event.stopPropagation()}><header><div><h2 id="delete-route-title">Delete platform route?</h2><p>This takes effect immediately for future AI requests.</p></div><button type="button" className="button ghost" onClick={()=>setDeleteTarget(null)} disabled={busy===deleteTarget.id} aria-label="Close">×</button></header><p id="delete-route-description" className="platform-ai-confirm-copy">Delete the <strong>{deleteTarget.task_key}</strong> route for <code>{deleteTarget.model}</code>? This route will be removed from the active configuration.</p>{error&&<div role="alert" className="platform-ai-alert error">{error}</div>}<div className="platform-ai-modal-actions"><button type="button" className="button" disabled={busy===deleteTarget.id} onClick={()=>setDeleteTarget(null)}>Cancel</button><button type="button" className="button danger" disabled={busy===deleteTarget.id} onClick={()=>void deleteModel(deleteTarget)}>{busy===deleteTarget.id?"Deleting…":"Delete route"}</button></div></section></div>}
   </main></AdminAccessGuard>;
 }

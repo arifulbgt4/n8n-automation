@@ -136,7 +136,7 @@ export async function tenantRoutes(app: FastifyInstance) {
     const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const result = await query(`
       SELECT b.*,
-        (SELECT count(*)::int FROM channel_accounts c WHERE c.business_id=b.id AND c.active=true) AS channel_count,
+        (SELECT count(*)::int FROM channel_accounts c WHERE c.business_id=b.id AND NOT (c.settings_json ? 'deletedAt')) AS channel_count,
         (SELECT count(*)::int FROM collections col WHERE col.business_id=b.id AND col.status='active') AS collection_count
       FROM businesses b
       WHERE b.tenant_id=$1 AND b.status <> 'archived' AND ($2::uuid[] IS NULL OR b.id=ANY($2::uuid[]))

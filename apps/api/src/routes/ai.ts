@@ -210,7 +210,7 @@ export async function aiRoutes(app: FastifyInstance) {
     const result = await query(`
       SELECT a.*,
         pv.version AS active_prompt_version,
-        (SELECT count(*)::int FROM channel_accounts c WHERE c.default_agent_profile_id=a.id) AS channel_count,
+        (SELECT count(*)::int FROM channel_accounts c WHERE c.default_agent_profile_id=a.id AND NOT (c.settings_json ? 'deletedAt')) AS channel_count,
         (SELECT count(*)::int FROM agent_collection_links l WHERE l.agent_profile_id=a.id) AS collection_count
       FROM agent_profiles a LEFT JOIN prompt_versions pv ON pv.id=a.active_prompt_version_id
       WHERE a.tenant_id=$1 AND a.status<>'archived' AND ($2::uuid IS NULL OR a.business_id=$2)

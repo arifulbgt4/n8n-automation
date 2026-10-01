@@ -271,8 +271,10 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       <Field label="Starting template"><select value={form.templateKey} onChange={(event) => setForm({ ...form, templateKey: event.target.value })}><option value="">Blank / manual</option>{templates.map((template) => <option key={template.key} value={template.key}>{template.name}</option>)}</select></Field>
       {selectedTemplate && <div className="result-box"><b>{selectedTemplate.name}</b><p>{selectedTemplate.description}</p><small>{(selectedTemplate.capabilities || []).join(", ")}</small></div>}
       <Field label="Additional capabilities" hint="Optional comma-separated capability keys added on top of the template."><textarea rows={3} value={form.capabilities} onChange={(event) => setForm({ ...form, capabilities: event.target.value })} /></Field>
-      <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={createCollectionIds} onChange={setCreateCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />
-      {canAssignChannels&&<AgentChannelSelector channels={channels} selectedIds={createChannelIds} onChange={setCreateChannelIds} loading={!channelsLoaded} error={channelsError} onRetry={()=>setChannelLoadAttempt(attempt=>attempt+1)}/>}
+      <div className="agent-assignment-grid">
+        {canAssignChannels&&<AgentChannelSelector channels={channels} selectedIds={createChannelIds} onChange={setCreateChannelIds} loading={!channelsLoaded} error={channelsError} onRetry={()=>setChannelLoadAttempt(attempt=>attempt+1)}/>}
+        <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={createCollectionIds} onChange={setCreateCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />
+      </div>
       {formError && <div role="alert" className="alert error">{formError}</div>}
       <button className="button primary" disabled={!!busy || !collectionsReady}>{busy ? "Creating…" : "Create agent"}</button>
     </form></Modal>}
@@ -281,8 +283,10 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
       <Field label="Description"><textarea rows={4} value={editForm.description} onChange={(event) => setEditForm({ ...editForm, description: event.target.value })} /></Field>
       <Field label="Capabilities" hint="Comma-separated capability keys"><input value={editForm.capabilities} onChange={(event) => setEditForm({ ...editForm, capabilities: event.target.value })} /></Field>
       <Field label="Status" hint={editChannelIds.length ? "Clear the channel selections before saving this agent as a draft." : undefined}><select value={editForm.status} onChange={(event) => setEditForm({ ...editForm, status: event.target.value })}><option value="active">Active</option><option value="draft" disabled={editChannelIds.length>0}>Draft</option></select></Field>
-      {editLoading ? <p role="status" className="muted">Loading current agent assignments…</p> : editLoadError ? <div role="alert" className="alert error">{editLoadError}</div> : <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={editCollectionIds} onChange={setEditCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />}
-      {canAssignChannels&&<AgentChannelSelector channels={channels} selectedIds={editChannelIds} onChange={setEditChannelIds} loading={!channelsLoaded} error={channelsError} onRetry={()=>setChannelLoadAttempt(attempt=>attempt+1)}/>}
+      {editLoading ? <p role="status" className="muted">Loading current agent assignments…</p> : editLoadError ? <div role="alert" className="alert error">{editLoadError}</div> : <div className="agent-assignment-grid">
+        {canAssignChannels&&<AgentChannelSelector channels={channels} selectedIds={editChannelIds} onChange={setEditChannelIds} loading={!channelsLoaded} error={channelsError} onRetry={()=>setChannelLoadAttempt(attempt=>attempt+1)}/>}
+        <AgentCollectionSelector tenantId={tenantId} businessId={businessId} collections={collections} selectedIds={editCollectionIds} onChange={setEditCollectionIds} loading={selectorLoading} loadError={collectionsError} onRetry={retryCollections} />
+      </div>}
       {formError && <div role="alert" className="alert error">{formError}</div>}
       <button className="button primary" disabled={!!busy || editLoading || !!editLoadError || !canSaveAssignments}>{busy ? "Saving…" : "Save agent"}</button>
     </form></Modal>}
