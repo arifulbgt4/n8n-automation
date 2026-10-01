@@ -303,12 +303,12 @@ export async function aiRoutes(app: FastifyInstance) {
     if (input.channelIds !== undefined) await requireBusinessAccess(request,params.tenantId,agent.business_id,["OWNER","ADMIN"]);
     const nextStatus=input.status??agent.status;
     if(input.channelIds?.length&&nextStatus!=="active") throw new ApiError(409,"AGENT_NOT_ACTIVE","Only an active agent can be assigned to a channel.");
-    if(input.status&&input.status!=="active"&&input.channelIds===undefined){
-      const assigned=await query("SELECT id FROM channel_accounts WHERE tenant_id=$1 AND default_agent_profile_id=$2 LIMIT 1",[params.tenantId,params.agentId]);
-      if(assigned.rows[0]) throw new ApiError(409,"AGENT_CHANNELS_ASSIGNED","Clear this agent's channel assignments before deactivating it.");
-    }
     const result = await transaction(async (client) => {
       if (input.status || input.collectionIds !== undefined) await requireAgentTrainingOff(client,params.tenantId,params.agentId);
+      if(input.status&&input.status!=="active"&&input.channelIds===undefined){
+        const assigned=await client.query("SELECT id FROM channel_accounts WHERE tenant_id=$1 AND default_agent_profile_id=$2 LIMIT 1",[params.tenantId,params.agentId]);
+        if(assigned.rows[0]) throw new ApiError(409,"AGENT_CHANNELS_ASSIGNED","Clear this agent's channel assignments before deactivating it.");
+      }
       const current = await client.query("SELECT id FROM agent_profiles WHERE id=$1 AND tenant_id=$2 AND business_id=$3 FOR UPDATE", [params.agentId, params.tenantId, agent.business_id]);
       if (!current.rows[0]) throw new ApiError(404, "AGENT_NOT_FOUND", "AI agent not found.");
       if (input.channelIds !== undefined) {
