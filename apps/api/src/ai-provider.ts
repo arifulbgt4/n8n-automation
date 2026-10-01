@@ -246,7 +246,7 @@ export async function analyzeImages(
     const body: Record<string, unknown> = {
       model: config.model,
       messages: [{ role: "user", content }],
-      max_tokens: typeof config.parameters.maxOutputTokens === "number" ? config.parameters.maxOutputTokens : 1000,
+      max_completion_tokens: typeof config.parameters.maxOutputTokens === "number" ? config.parameters.maxOutputTokens : 1000,
     };
     if (typeof config.parameters.temperature === "number") {
       body.temperature = config.parameters.temperature;
