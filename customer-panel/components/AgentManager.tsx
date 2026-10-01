@@ -4,6 +4,7 @@ import { FormEvent, KeyboardEvent, ReactNode, useCallback, useEffect, useId, use
 import { api, qs } from "../lib/api";
 import AgentCollectionSelector, { type AgentCollection } from "./AgentCollectionSelector";
 import AgentChannelSelector, { type AgentChannel } from "./AgentChannelSelector";
+import { useConfirmAction } from "./ConfirmProvider";
 
 type Agent = {
   id: string;
@@ -59,6 +60,7 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
 }
 
 export default function AgentManager({ tenantId, businessId, role, initialCapabilities = "" }: { tenantId: string; businessId: string; role?: string; initialCapabilities?: string }) {
+  const confirmAction = useConfirmAction();
   const canEdit = ["OWNER", "ADMIN", "STAFF"].includes(role || "");
   const canDelete = ["OWNER", "ADMIN"].includes(role || "");
   const [rows, setRows] = useState<Agent[]>([]);
@@ -233,7 +235,7 @@ export default function AgentManager({ tenantId, businessId, role, initialCapabi
   function closeEditAfterSave() { editRequest.current += 1; setEditing(null); setEditLoadError(""); setFormError(""); }
 
   async function remove(agent: Agent) {
-    if (!confirm(`Delete ${agent.name}? Linked channels will no longer use it, and open AI conversations will pause. History is retained.`)) return;
+    if (!await confirmAction({ title: `Delete ${agent.name}?`, description: "Linked channels will no longer use this agent, and open AI conversations will pause. History is retained." })) return;
     setBusy(agent.id);
     setError("");
     try {

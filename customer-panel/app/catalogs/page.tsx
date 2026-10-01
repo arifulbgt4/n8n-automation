@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { ChangeEvent, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { API_URL, api, qs } from "../../lib/api";
+import { useConfirmAction } from "../../components/ConfirmProvider";
 
 type Membership = { tenant_id: string; tenant_name: string; role: string };
 type Business = { id: string; name: string };
@@ -140,6 +141,7 @@ function CollectionPreview({ collection, tenantId }: { collection: Collection; t
 }
 
 export default function CatalogsPage({ embedded = false, tenantId: suppliedTenantId, businessId: suppliedBusinessId, onChanged }: CatalogsPageProps) {
+  const confirmAction = useConfirmAction();
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState("");
   const tenantId = suppliedTenantId ?? selectedTenantId;
@@ -315,7 +317,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
   }
 
   async function removeCollection(collection: Collection) {
-    if (!confirm(`Delete ${collection.name}? Its items will be hidden, and its channel and AI agent links removed. Historical data is retained.`)) return;
+    if (!await confirmAction({ title: `Delete ${collection.name}?`, description: "Its items will be hidden and its channel and AI agent links removed. Historical data is retained." })) return;
     setBusy(true);
     setError("");
     try {
@@ -394,7 +396,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
   }
 
   async function removeItem(item: Item) {
-    if (!selected || !confirm(`Delete ${item.title || "this item"}?`)) return;
+    if (!selected || !await confirmAction({ title: `Delete ${item.title || "this item"}?`, description: "This catalog item will be removed from the collection." })) return;
     setBusy(true);
     setError("");
     try {

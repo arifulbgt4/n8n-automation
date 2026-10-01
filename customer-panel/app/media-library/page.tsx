@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ChangeEvent, useCallback, useEffect, useState } from "react";
 import { API_URL, api, qs } from "../../lib/api";
+import { useConfirmAction } from "../../components/ConfirmProvider";
 
 type Membership={tenant_id:string;tenant_name:string;role:string};
 type Business={id:string;name:string};
@@ -21,6 +22,7 @@ async function validateImage(file:File,quota:MediaQuota|null){
 }
 
 export default function MediaLibraryPage(){
+  const confirmAction=useConfirmAction();
   const[memberships,setMemberships]=useState<Membership[]>([]);const[tenantId,setTenantId]=useState("");const[businesses,setBusinesses]=useState<Business[]>([]);const[businessId,setBusinessId]=useState("");const[assets,setAssets]=useState<Asset[]>([]);const[quota,setQuota]=useState<MediaQuota|null>(null);const[error,setError]=useState("");const[notice,setNotice]=useState("");const[deleteGuidanceAssetId,setDeleteGuidanceAssetId]=useState("");const[busy,setBusy]=useState(false);
   useEffect(()=>{api<any>("/v1/auth/me").then(d=>{const rows=d?.memberships??[];setMemberships(rows);setTenantId(rows[0]?.tenant_id??"")}).catch(e=>setError(e instanceof Error?e.message:"Unable to load account."))},[]);
   useEffect(()=>{if(!tenantId)return;api<any>(`/v1/tenants/${tenantId}/businesses`).then(d=>{const rows=d.businesses??[];setBusinesses(rows);setBusinessId(v=>rows.some((b:Business)=>b.id===v)?v:(rows[0]?.id??""))}).catch(e=>setError(e instanceof Error?e.message:"Unable to load businesses."))},[tenantId]);
@@ -36,7 +38,7 @@ export default function MediaLibraryPage(){
       setNotice("");
       return;
     }
-    if(!confirm("Delete "+(asset.original_name||"this file")+"?"))return;
+    if(!await confirmAction({title:`Delete ${asset.original_name||"this file"}?`,description:"This unlinked file will be permanently removed from workspace storage."}))return;
     setBusy(true);
     setError("");
     setDeleteGuidanceAssetId("");

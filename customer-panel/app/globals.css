@@ -119,3 +119,13 @@ input[type=checkbox]{width:17px;height:17px;accent-color:var(--brand);flex:none}
 .agent-collection-unavailable input{width:16px}
 .channel-load-error{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-top:1px solid var(--line);color:var(--bad);font-size:12px}
 @media(max-width:700px){.agent-assignment-grid{grid-template-columns:1fr}}
+.confirm-dialog-backdrop{position:fixed;inset:0;z-index:140;display:grid;place-items:center;padding:20px;background:rgba(11,16,28,.58);backdrop-filter:blur(2px)}
+.confirm-dialog{width:min(480px,100%);padding:23px;border:1px solid var(--line);border-radius:16px;background:white;box-shadow:0 30px 85px rgba(0,0,0,.25)}
+.confirm-dialog:focus{outline:none}
+.confirm-dialog h2{margin:0;font-size:20px;letter-spacing:-.02em}
+.confirm-dialog p{margin:10px 0 22px;color:var(--muted);font-size:14px;line-height:1.55}
+.confirm-dialog-actions{display:flex;justify-content:flex-end;gap:9px;flex-wrap:wrap}
+.confirm-dialog-actions button{min-height:38px;padding:8px 13px;border:1px solid var(--line);border-radius:9px;font-weight:700}
+.confirm-dialog-cancel{background:var(--surface2);color:var(--text)}
+.confirm-dialog-danger{background:#fff1f0;color:var(--bad);border-color:#ffd2cf!important}
+@media(max-width:520px){.confirm-dialog{padding:19px}.confirm-dialog-actions{display:grid;grid-template-columns:1fr 1fr}.confirm-dialog-actions button{width:100%}}
