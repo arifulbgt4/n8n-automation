@@ -17,6 +17,7 @@ import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requi
 import { assertChannelOverrideWithinPlan, assertTenantCountLimit } from "../limits.js";
 import { ensureMetaPageSubscription, type MetaPageSubscriptionResult } from "../meta-page-subscription.js";
 import { requireChannelTrainingOff } from "../training-guards.js";
+import { assignSoleActiveAgentToChannel } from "../channel-agent-assignment.js";
 
 const platformSchema = z.enum(["facebook", "instagram", "whatsapp"]);
 const credentialInput = z.object({
@@ -258,15 +259,25 @@ export async function channelRoutes(app: FastifyInstance) {
       subscribedFields:metaSubscription.subscribedFields ?? metaSubscription.requestedFields,
       verifiedAt:new Date().toISOString(),
     };
-    const created = await query<any>(`
-      INSERT INTO channel_accounts(tenant_id,business_id,platform,name,external_account_id,connection_status,graph_api_version,settings_json)
-      VALUES ($1,$2,$3,$4,$5,'connected',$6,$7::jsonb) RETURNING *
-    `, [params.tenantId,discovery.businessId,input.platform,name,externalAccountId,env().META_GRAPH_API_VERSION,JSON.stringify({connectedVia:"meta_oauth",facebookPageId:page.id,metaSubscription:subscriptionMetadata})]);
-    await upsertCredential(params.tenantId,created.rows[0].id,"access_token",page.accessToken);
-    if (env().META_APP_SECRET) await upsertCredential(params.tenantId,created.rows[0].id,"app_secret",env().META_APP_SECRET!);
+    const created = await transaction(async (client) => {
+      const result = await client.query<any>(`
+        INSERT INTO channel_accounts(tenant_id,business_id,platform,name,external_account_id,connection_status,graph_api_version,settings_json)
+        VALUES ($1,$2,$3,$4,$5,'connected',$6,$7::jsonb) RETURNING *
+      `, [params.tenantId,discovery.businessId,input.platform,name,externalAccountId,env().META_GRAPH_API_VERSION,JSON.stringify({connectedVia:"meta_oauth",facebookPageId:page.id,metaSubscription:subscriptionMetadata})]);
+      const channel = result.rows[0];
+      await upsertCredential(params.tenantId,channel.id,"access_token",page.accessToken,client);
+      if (env().META_APP_SECRET) await upsertCredential(params.tenantId,channel.id,"app_secret",env().META_APP_SECRET!,client);
+      const assignedAgentId = await assignSoleActiveAgentToChannel(client, {
+        tenantId: params.tenantId,
+        businessId: discovery.businessId,
+        channelId: channel.id,
+      });
+      if (assignedAgentId) channel.default_agent_profile_id = assignedAgentId;
+      return channel;
+    });
     await redis().del(key);
-    await audit({ actorUserId:principal.userId,tenantId:params.tenantId,businessId:discovery.businessId,action:"CHANNEL_CONNECTED",resourceType:"channel_account",resourceId:created.rows[0].id,safeDiff:{platform:input.platform,externalAccountId,via:"meta_oauth",metaSubscribed:true,subscribedFields:subscriptionMetadata.subscribedFields},request });
-    reply.code(201).send({ channel:created.rows[0], metaSubscription });
+    await audit({ actorUserId:principal.userId,tenantId:params.tenantId,businessId:discovery.businessId,action:"CHANNEL_CONNECTED",resourceType:"channel_account",resourceId:created.id,safeDiff:{platform:input.platform,externalAccountId,via:"meta_oauth",metaSubscribed:true,subscribedFields:subscriptionMetadata.subscribedFields},request });
+    reply.code(201).send({ channel:created, metaSubscription });
   });
 
   app.get("/v1/tenants/:tenantId/channels", async (request, reply) => {
@@ -320,6 +331,12 @@ export async function channelRoutes(app: FastifyInstance) {
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
         RETURNING *
       `, [params.tenantId, input.businessId, input.platform, input.name, input.externalAccountId, input.publicIdentifier ?? null, input.graphApiVersion ?? env().META_GRAPH_API_VERSION, JSON.stringify(input.settings)]);
+      const assignedAgentId = await assignSoleActiveAgentToChannel(client, {
+        tenantId: params.tenantId,
+        businessId: input.businessId,
+        channelId: created.rows[0].id,
+      });
+      if (assignedAgentId) created.rows[0].default_agent_profile_id = assignedAgentId;
       return created.rows[0];
     });
 

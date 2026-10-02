@@ -138,6 +138,7 @@ test("catalog lookup uses only active products linked to this agent, channel, te
 
     const hiddenTitleCollection = await collection(tenantId,businessId,"Hidden name catalog");
     await link(hiddenTitleCollection);
+    await client.query("UPDATE agent_collection_links SET priority=100 WHERE agent_profile_id=$1 AND collection_id=$2", [agentId,hiddenTitleCollection]);
     await client.query("INSERT INTO collection_fields(tenant_id,collection_id,key,label,type,ai_visible) VALUES($1,$2,'name','Name','text',false),($1,$2,'price','Price','currency',true)", [tenantId,hiddenTitleCollection]);
     const hiddenTitleId = await item(tenantId,businessId,hiddenTitleCollection,"Private sample name","active",{name:"Private sample name",price:120});
     const withHiddenTitle = await lookup(channelId,"What products do you have?");
@@ -146,6 +147,7 @@ test("catalog lookup uses only active products linked to this agent, channel, te
     assert.equal(hiddenTitleRow.title,null);
     assert.deepEqual(hiddenTitleRow.data_jsonb,{price:120});
     assert.deepEqual(await lookup(channelId,"Private sample name"),[]);
+    await client.query("UPDATE agent_collection_links SET priority=0 WHERE agent_profile_id=$1 AND collection_id=$2", [agentId,hiddenTitleCollection]);
 
     const services = await collection(tenantId,businessId,"Services","active","service");
     await link(services);
