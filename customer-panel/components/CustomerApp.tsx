@@ -192,11 +192,79 @@ function Conversations({tenantId,businessId}:{tenantId:string;businessId:string}
 }
 
 function BusinessActions({tenantId,businessId}:{tenantId:string;businessId:string}){
- const tabs=["orders","bookings","leads","quotes","support-cases"] as const;const[tab,setTab]=useState<(typeof tabs)[number]>("orders");const[rows,setRows]=useState<any[]>([]);const[error,setError]=useState("");
- useEffect(()=>{if(!tenantId)return;api<any>(`/v1/tenants/${tenantId}/${tab}${qs({businessId})}`).then(d=>setRows(tab==="support-cases"?d.cases||[]:d[tab]||[]));},[tenantId,businessId,tab]);
- async function patch(path:string,body:any){setError("");try{await api(path,{method:"PATCH",body:JSON.stringify(body)});const d=await api<any>(`/v1/tenants/${tenantId}/${tab}${qs({businessId})}`);setRows(tab==="support-cases"?d.cases||[]:d[tab]||[])}catch(reason){setError(reason instanceof Error?reason.message:"Unable to update this record.")}}
- return <><SectionHeader title="Business actions" description="Orders, bookings, leads, quote requests and support cases share business/channel/conversation attribution."/>{error&&<div role="alert" className="alert error">{error}</div>}<div className="tabs inline-tabs">{tabs.map(t=><button className={tab===t?"active":""} onClick={()=>setTab(t)} key={t}>{t==="support-cases"?"Support":t[0].toUpperCase()+t.slice(1)}</button>)}</div><div className="table-wrap"><table><thead><tr>{tab==="orders"?<><th>Order</th><th>Status</th><th>Total</th><th>Source</th><th>Date</th></>:tab==="bookings"?<><th>Service / booking</th><th>Status</th><th>Starts</th><th>Timezone</th><th>Date</th></>:tab==="leads"?<><th>Interest</th><th>Stage</th><th>Assigned</th><th>Source</th><th>Date</th></>:tab==="quotes"?<><th>Quote</th><th>Status</th><th>Request</th><th>Assigned</th><th>Date</th></>:<><th>Case</th><th>Status</th><th>Priority</th><th>Description</th><th>Date</th></>}</tr></thead><tbody>{rows.map(r=>tab==="orders"?<tr key={r.id}><td><strong>{r.order_number}</strong></td><td><select value={r.status} onChange={e=>void patch(`/v1/tenants/${tenantId}/orders/${r.id}`,{status:e.target.value})}>{["pending","confirmed","processing","shipped","completed","cancelled","returned"].map(status=><option key={status} value={status}>{status}</option>)}</select></td><td>{r.currency} {Number(r.total).toFixed(2)}</td><td>{r.platform||r.source}</td><td>{date(r.created_at)}</td></tr>:tab==="bookings"?<tr key={r.id}><td>{r.collection_item_id||"Booking"}</td><td><select value={r.status} onChange={e=>patch(`/v1/tenants/${tenantId}/bookings/${r.id}`,{status:e.target.value})}><option>requested</option><option>confirmed</option><option>completed</option><option>cancelled</option></select></td><td>{date(r.starts_at)}</td><td>{r.timezone}</td><td>{date(r.created_at)}</td></tr>:tab==="leads"?<tr key={r.id}><td>{r.interest||"Lead"}</td><td><select value={r.stage} onChange={e=>void patch(`/v1/tenants/${tenantId}/leads/${r.id}`,{stage:e.target.value})}>{["new","qualified","contacted","proposal","won","lost"].map(stage=><option key={stage} value={stage}>{stage}</option>)}</select></td><td>{r.assigned_user_id||"Unassigned"}</td><td>{r.channel_account_id?"Channel":"Direct"}</td><td>{date(r.created_at)}</td></tr>:tab==="quotes"?<tr key={r.id}><td><strong>{r.id.slice(0,8)}</strong></td><td><select value={r.status} onChange={e=>patch(`/v1/tenants/${tenantId}/quotes/${r.id}`,{status:e.target.value})}><option>requested</option><option>reviewing</option><option>quoted</option><option>accepted</option><option>declined</option><option>closed</option></select></td><td><small>{JSON.stringify(r.request_json)}</small></td><td>{r.assigned_user_id||"Unassigned"}</td><td>{date(r.created_at)}</td></tr>:<tr key={r.id}><td><strong>{r.subject||r.id.slice(0,8)}</strong></td><td><select value={r.status} onChange={e=>patch(`/v1/tenants/${tenantId}/support-cases/${r.id}`,{status:e.target.value})}><option>open</option><option>pending</option><option>resolved</option><option>closed</option></select></td><td><select value={r.priority} onChange={e=>patch(`/v1/tenants/${tenantId}/support-cases/${r.id}`,{priority:e.target.value})}><option>low</option><option>normal</option><option>high</option><option>urgent</option></select></td><td><small>{r.description||"—"}</small></td><td>{date(r.created_at)}</td></tr>)}</tbody></table>{!rows.length&&<Empty>No {tab} in this scope yet.</Empty>}</div></>;
+ type OrderItem={id:string;title_snapshot:string;sku_snapshot?:string|null;quantity:number|string;unit_price:number|string;total:number|string;attributes_snapshot?:Record<string,unknown>};
+ type ActionRow={id:string;status:string;created_at:string;order_number?:string;currency?:string;subtotal?:number|string;total?:number|string;items?:OrderItem[];channel_name?:string|null;platform?:string|null;source?:string;conversation_id?:string|null;customer_snapshot?:Record<string,unknown>;delivery_metadata?:Record<string,unknown>;payment_metadata?:Record<string,unknown>;collection_item_id?:string|null;starts_at?:string;timezone?:string;interest?:string|null;stage?:string;assigned_user_id?:string|null;channel_account_id?:string|null;request_json?:unknown;subject?:string|null;priority?:string;description?:string|null};
+ type ActionList={orders?:ActionRow[];bookings?:ActionRow[];leads?:ActionRow[];quotes?:ActionRow[];"support-cases"?:ActionRow[];cases?:ActionRow[]};
+ const tabs=["orders","bookings","leads","quotes","support-cases"] as const;
+ const [tab,setTab]=useState<(typeof tabs)[number]>("orders");
+ const scopeKey=`${tenantId}:${businessId}:${tab}`;
+ const [data,setData]=useState<{scope:string;rows:ActionRow[];loading:boolean;error:string}>({scope:"",rows:[],loading:false,error:""});
+ const [selected,setSelected]=useState<{scope:string;order:ActionRow}|null>(null);
+ const [updating,setUpdating]=useState<{scope:string;id:string}|null>(null);
+ const requestVersion=useRef(0);const activeScope=useRef(scopeKey);const loadController=useRef<AbortController|null>(null);
+ const rows=data.scope===scopeKey?data.rows:[];
+ const loading=data.scope!==scopeKey||data.loading;
+ const error=data.scope===scopeKey?data.error:"";
+ const selectedOrder=selected?.scope===scopeKey?rows.find(row=>row.id===selected.order.id)||selected.order:null;
+ const busy=updating?.scope===scopeKey?updating.id:"";
+ const transitions:Record<string,string[]>={pending:["confirmed","cancelled"],confirmed:["processing","cancelled"],processing:["shipped","completed","cancelled"],shipped:["completed","returned"],completed:["returned"],cancelled:[],returned:[]};
+ const load=useCallback(async()=>{
+   if(!tenantId)return;
+   loadController.current?.abort();const controller=new AbortController();loadController.current=controller;
+   const version=++requestVersion.current;
+   setData(previous=>({scope:scopeKey,rows:previous.scope===scopeKey?previous.rows:[],loading:true,error:""}));
+   try{
+     const response=await api<ActionList>(`/v1/tenants/${tenantId}/${tab}${qs({businessId})}`,{signal:controller.signal});
+     if(version!==requestVersion.current||controller.signal.aborted)return;
+     setData({scope:scopeKey,rows:tab==="support-cases"?response.cases||[]:response[tab]||[],loading:false,error:""});
+   }catch(reason){
+     if(version!==requestVersion.current||controller.signal.aborted)return;
+     setData(previous=>({...previous,loading:false,error:reason instanceof Error?reason.message:"Unable to load business actions."}));
+   }
+ },[tenantId,businessId,tab,scopeKey]);
+ useEffect(()=>{activeScope.current=scopeKey;void load();return()=>{loadController.current?.abort();requestVersion.current+=1;};},[load,scopeKey]);
+ async function patch(path:string,body:unknown,id:string){
+   setUpdating({scope:scopeKey,id});setData(previous=>({...previous,error:""}));
+   try{await api(path,{method:"PATCH",body:JSON.stringify(body)});if(activeScope.current===scopeKey)await load();}
+   catch(reason){if(activeScope.current===scopeKey)setData(previous=>({...previous,error:reason instanceof Error?reason.message:"Unable to update this record."}));}
+   finally{setUpdating(previous=>previous?.scope===scopeKey&&previous.id===id?null:previous);}
+ }
+ function money(value:unknown,currency?:string){return `${currency||""} ${Number(value||0).toFixed(2)}`.trim();}
+ function label(key:string){return key.replace(/_/g," ").replace(/([a-z])([A-Z])/g,"$1 $2");}
+ function metadataValue(value:unknown):ReactNode{
+   if(value===null||value===undefined||value==="")return "—";
+   if(Array.isArray(value))return <ul>{value.map((entry,index)=><li key={index}>{metadataValue(entry)}</li>)}</ul>;
+   if(typeof value==="object")return <dl className="order-metadata">{Object.entries(value).map(([key,entry])=><div key={key}><dt>{label(key)}</dt><dd>{metadataValue(entry)}</dd></div>)}</dl>;
+   return String(value);
+ }
+ function metadataSection(title:string,value:unknown){
+   const populated=value!==null&&typeof value==="object"&&Object.keys(value).length>0;
+   return <section className="order-detail-card"><h4>{title}</h4>{populated?metadataValue(value):<p className="muted small">No {title.toLowerCase()} details supplied.</p>}</section>;
+ }
+ return <>
+   <SectionHeader title="Business actions" description="Review orders and other outcomes created from customer conversations." action={<button type="button" className="button ghost" disabled={loading||!!busy} onClick={()=>void load()}>{loading?"Refreshing…":"Refresh"}</button>}/>
+   {error&&<div role="alert" className="alert error">{error}</div>}
+   <div className="tabs inline-tabs">{tabs.map(t=><button type="button" className={tab===t?"active":""} onClick={()=>setTab(t)} key={t}>{t==="support-cases"?"Support":t[0].toUpperCase()+t.slice(1)}</button>)}</div>
+   {loading&&<p className="muted small" role="status">Loading {tab==="support-cases"?"support cases":tab}…</p>}
+   <div className="table-wrap" aria-busy={loading}>
+     <table><thead><tr>{tab==="orders"?<><th>Order / items</th><th>Status</th><th>Total</th><th>Channel / source</th><th>Date</th><th>Details</th></>:tab==="bookings"?<><th>Service / booking</th><th>Status</th><th>Starts</th><th>Timezone</th><th>Date</th></>:tab==="leads"?<><th>Interest</th><th>Stage</th><th>Assigned</th><th>Source</th><th>Date</th></>:tab==="quotes"?<><th>Quote</th><th>Status</th><th>Request</th><th>Assigned</th><th>Date</th></>:<><th>Case</th><th>Status</th><th>Priority</th><th>Description</th><th>Date</th></>}</tr></thead><tbody>
+     {rows.map(r=>tab==="orders"?<tr key={r.id}>
+       <td><strong>{r.order_number}</strong><small>{(r.items||[]).map(item=>`${item.title_snapshot} × ${item.quantity}`).join(", ")||"No line items"}</small></td>
+       <td><select aria-label={`Status for ${r.order_number}`} value={r.status} disabled={busy===r.id||!(transitions[r.status]||[]).length} onChange={e=>void patch(`/v1/tenants/${tenantId}/orders/${r.id}`,{status:e.target.value},r.id)}>{[r.status,...(transitions[r.status]||[])].map(status=><option key={status} value={status}>{status}</option>)}</select></td>
+       <td>{money(r.total,r.currency)}</td><td><strong>{r.channel_name||"Direct"}</strong><small>{[r.platform,r.source].filter(Boolean).join(" · ")||"—"}</small></td><td>{date(r.created_at)}</td><td><button type="button" className="button ghost smallbtn" onClick={()=>setSelected({scope:scopeKey,order:r})} aria-label={`View details for ${r.order_number}`}>View details</button></td>
+     </tr>:tab==="bookings"?<tr key={r.id}><td>{r.collection_item_id||"Booking"}</td><td><select value={r.status} disabled={busy===r.id} onChange={e=>void patch(`/v1/tenants/${tenantId}/bookings/${r.id}`,{status:e.target.value},r.id)}><option>requested</option><option>confirmed</option><option>completed</option><option>cancelled</option></select></td><td>{date(r.starts_at)}</td><td>{r.timezone}</td><td>{date(r.created_at)}</td></tr>:tab==="leads"?<tr key={r.id}><td>{r.interest||"Lead"}</td><td><select value={r.stage} disabled={busy===r.id} onChange={e=>void patch(`/v1/tenants/${tenantId}/leads/${r.id}`,{stage:e.target.value},r.id)}>{["new","qualified","contacted","proposal","won","lost"].map(stage=><option key={stage} value={stage}>{stage}</option>)}</select></td><td>{r.assigned_user_id||"Unassigned"}</td><td>{r.channel_account_id?"Channel":"Direct"}</td><td>{date(r.created_at)}</td></tr>:tab==="quotes"?<tr key={r.id}><td><strong>{r.id.slice(0,8)}</strong></td><td><select value={r.status} disabled={busy===r.id} onChange={e=>void patch(`/v1/tenants/${tenantId}/quotes/${r.id}`,{status:e.target.value},r.id)}><option>requested</option><option>reviewing</option><option>quoted</option><option>accepted</option><option>declined</option><option>closed</option></select></td><td><small>{JSON.stringify(r.request_json)}</small></td><td>{r.assigned_user_id||"Unassigned"}</td><td>{date(r.created_at)}</td></tr>:<tr key={r.id}><td><strong>{r.subject||r.id.slice(0,8)}</strong></td><td><select value={r.status} disabled={busy===r.id} onChange={e=>void patch(`/v1/tenants/${tenantId}/support-cases/${r.id}`,{status:e.target.value},r.id)}><option>open</option><option>pending</option><option>resolved</option><option>closed</option></select></td><td><select value={r.priority} disabled={busy===r.id} onChange={e=>void patch(`/v1/tenants/${tenantId}/support-cases/${r.id}`,{priority:e.target.value},r.id)}><option>low</option><option>normal</option><option>high</option><option>urgent</option></select></td><td><small>{r.description||"—"}</small></td><td>{date(r.created_at)}</td></tr>)}
+     </tbody></table>{!loading&&!error&&!rows.length&&<Empty>No {tab} in this scope yet.</Empty>}
+   </div>
+   {!loading&&rows.length>=50&&<p className="muted small">Showing the latest 50 records in this scope.</p>}
+   {selectedOrder&&<Modal title={selectedOrder.order_number||"Order details"} onClose={()=>setSelected(null)}><div className="order-details">
+     <div className="order-detail-summary"><Badge tone={selectedOrder.status==="cancelled"||selectedOrder.status==="returned"?"bad":selectedOrder.status==="pending"?"warn":"good"}>{selectedOrder.status}</Badge><strong>{money(selectedOrder.total,selectedOrder.currency)}</strong><span className="muted small">{date(selectedOrder.created_at)}</span></div>
+     <section className="order-detail-card"><h4>Channel and attribution</h4><dl className="order-metadata"><div><dt>Channel</dt><dd>{selectedOrder.channel_name||"Direct"}{selectedOrder.platform&&` · ${selectedOrder.platform}`}</dd></div><div><dt>Created by</dt><dd className="capitalize">{selectedOrder.source||"—"}</dd></div><div><dt>Conversation</dt><dd>{selectedOrder.conversation_id||"—"}</dd></div></dl></section>
+     <section className="order-detail-card"><h4>Items</h4><div className="table-wrap borderless"><table className="order-items-table"><thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th>Total</th></tr></thead><tbody>{(selectedOrder.items||[]).map(item=><tr key={item.id}><td><strong>{item.title_snapshot}</strong>{item.sku_snapshot&&<small>SKU: {item.sku_snapshot}</small>}{item.attributes_snapshot&&Object.keys(item.attributes_snapshot).length>0&&<div className="order-item-attributes">{metadataValue(item.attributes_snapshot)}</div>}</td><td>{String(item.quantity)}</td><td>{money(item.unit_price,selectedOrder.currency)}</td><td>{money(item.total,selectedOrder.currency)}</td></tr>)}</tbody></table></div><div className="order-detail-totals"><span>Subtotal</span><strong>{money(selectedOrder.subtotal,selectedOrder.currency)}</strong><span>Total</span><strong>{money(selectedOrder.total,selectedOrder.currency)}</strong></div></section>
+     <div className="order-detail-grid">{metadataSection("Customer",selectedOrder.customer_snapshot)}{metadataSection("Delivery",selectedOrder.delivery_metadata)}{metadataSection("Payment",selectedOrder.payment_metadata)}</div>
+   </div></Modal>}
+ </>;
 }
+
 type TrainingAgentSummary={id:string;name:string};
 type TrainingChannel={id:string;name:string;platform:string;default_agent_profile_id:string|null};
 type TrainingSession={id:string;status:string;channel_account_id:string;created_at:string;captured_count:number;example_count:number;job_status?:string|null;job_error?:string|null};

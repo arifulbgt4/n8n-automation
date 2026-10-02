@@ -1,0 +1,10 @@
+export function orderActionContract(capabilities: string[] | null | undefined): string {
+  if (!capabilities?.includes("ORDER_CREATE")) return "";
+  return `
+## Order creation tool
+When the customer explicitly confirms the order and all required material details have been collected, include a create_order action in this response. A text-only order confirmation does not create a saved order. Never claim an order has been created while actions is empty. If anything required is missing, ask for it before proposing the action.
+Use this exact arguments shape (numbers must be JSON numbers):
+{"tool":"create_order","arguments":{"items":[{"collectionItemId":"UUID from Relevant current items[].id","title":"current catalog product title","sku":"current SKU if available","quantity":1,"unitPrice":899,"attributes":{"color":"confirmed variant if applicable"}}],"customer":{"name":"confirmed customer name","phone":"confirmed customer phone"},"delivery":{"address":"confirmed delivery address"},"payment":{"method":"confirmed method if provided"}}}
+Replace the example values with confirmed customer details and current catalog facts. Each item needs title, a positive quantity, and the current nonnegative unitPrice. Use collectionItemId from the provided catalog; never invent an ID or reuse stale prices from chat history. Include variants in attributes when relevant. Delivery/customer requirements depend on the business's policies; gather the required name, phone, and address for a physical delivery order. Do not include businessId, tenantId, channelAccountId, conversationId, contactId, source, or an order number: the server supplies these. Create only once for this customer confirmation; a prior successful order in the conversation must not be recreated unless the customer explicitly requests a new order.
+The application executes actions before sending the reply. You may acknowledge the confirmed order alongside create_order; execution failures prevent that success reply from being delivered. Saved orders initially use pending status for the business to process.`;
+}

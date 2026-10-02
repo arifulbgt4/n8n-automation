@@ -48,6 +48,21 @@ Must prove:
 - invalid signature/verification rejected.
 - duplicate provider event processed once.
 - duplicate order action creates one order.
+- a Facebook `create_order` action appears in the tenant's Business Actions
+  Orders query with the same business/channel/conversation/contact, currency,
+  customer, delivery, item variants, quantity, and price snapshots.
+- eight synchronized concurrent retries with the same order idempotency key
+  create exactly one order and one `ORDER_CREATED` outbox event; the subsequent
+  retry returns that order and the internal action response shape stays stable.
+- a failure while saving the completed order idempotency response rolls back
+  both order and outbox event; a later successful retry creates one record.
+- the n8n-facing turn orchestration endpoint saves the proposed order before
+  enqueuing its success reply and marks the turn processed; a rejected order
+  action marks it failed without enqueuing the success reply. Repeated order
+  actions at different indexes in the same turn return the same order.
+- a short confirmation refreshes the most recent selected item from the current
+  scoped catalog, while a new explicit product request takes precedence over
+  older conversation products.
 - duplicate outbound job sends once semantically.
 - webhook acknowledgment remains fast under slow AI provider.
 

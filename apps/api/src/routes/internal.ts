@@ -12,8 +12,9 @@ import {
 } from "@n8n-automation/core";
 import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } from "../ai-provider.js";
 import { ApiError, requestId, safeSecretEqual } from "../lib.js";
-import { findRelevantItems, isCatalogMediaRequest, isSpecificCatalogMediaRequest } from "../catalog-lookup.js";
+import { findConversationItems, isCatalogMediaRequest, isSpecificCatalogMediaRequest } from "../catalog-lookup.js";
 import { buildGroundedCatalogResponse } from "../catalog-response.js";
+import { orderActionContract } from "../action-contracts.js";
 import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
 import { assertDailyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
 
@@ -201,7 +202,8 @@ export async function internalRoutes(app: FastifyInstance) {
       await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:extra.task,model:extra.model,usage:extra.usage,correlationId:requestId(request),idempotencyKey:`ai-extra:${input.turnId}:${index}:${extra.task}`});
     }
     const turnText = [originalTurnText, multimodal.transcript, multimodal.imageAnalysis].filter(Boolean).join("\n\n");
-    const items = await findRelevantItems(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText);
+    const items = await findConversationItems(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id,
+      turnText, context.recent.map((message: any) => String(message.text_content ?? "")));
     const knowledge = await findKnowledge(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, turnText, input.turnId);
     const modelCandidates = await resolveModels(row.tenant_id, row.business_id, row.agent_profile_id, row.channel_account_id, "DEFAULT_CHAT");
     if (!modelCandidates.length) throw new ApiError(409, "AI_MODEL_MISSING", "No platform DEFAULT_CHAT model is configured.");
@@ -209,6 +211,7 @@ export async function internalRoutes(app: FastifyInstance) {
       row.assembled_prompt || "You are a helpful business assistant.",
       "\n## Runtime rules\nUse only current provided business facts. If facts are missing, say they are unavailable. Never invent prices, stock, booking availability, or policy. Only request/perform capabilities listed below.",
       `\nCapabilities: ${JSON.stringify(row.capabilities || [])}`,
+      orderActionContract(row.capabilities),
       `\nCollection schemas: ${JSON.stringify(context.schemas)}`,
       `\nRelevant current items: ${JSON.stringify(items)}`,
       `\nRelevant knowledge: ${JSON.stringify(knowledge)}`,
@@ -338,15 +341,20 @@ export async function internalRoutes(app: FastifyInstance) {
       return reply.send(response);
     }
     const endpoint = input.tool === "create_order" ? "orders" : input.tool === "create_booking" ? "bookings" : input.tool === "create_lead" ? "leads" : input.tool === "create_quote_request" ? "quotes" : "support-cases";
+    // One confirmation turn represents one order, even if the model repeats the
+    // tool at different action indexes or a retry changes their order.
+    const persistenceKey = input.tool === "create_order" ? `turn:${turnId}:create_order` : input.idempotencyKey;
     const response = await fetch(`${env().API_PUBLIC_ORIGIN}/v1/tenants/${input.tenantId}/${endpoint}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${env().INTERNAL_SERVICE_AUTH_SECRET}`, "content-type": "application/json", "idempotency-key": input.idempotencyKey },
-      body: JSON.stringify({ ...input.arguments, businessId: input.businessId, channelAccountId: input.channelAccountId, conversationId: input.conversationId, contactId: conversation.rows[0].contact_id }),
+      headers: { authorization: `Bearer ${env().INTERNAL_SERVICE_AUTH_SECRET}`, "content-type": "application/json", "idempotency-key": persistenceKey },
+      body: JSON.stringify({ ...input.arguments, businessId: input.businessId, channelAccountId: input.channelAccountId, conversationId: input.conversationId, contactId: conversation.rows[0].contact_id,
+        ...(input.tool === "create_order" ? { source: "ai" } : {}) }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new ApiError(response.status, "ACTION_EXECUTION_FAILED", `Action ${input.tool} failed.`, body);
-    await query(`INSERT INTO idempotency_keys(tenant_id,scope,key,status,response_json) VALUES ($1,'agent_action',$2,'completed',$3::jsonb) ON CONFLICT(tenant_id,scope,key) DO UPDATE SET status='completed',response_json=EXCLUDED.response_json,updated_at=now()`, [input.tenantId, input.idempotencyKey, JSON.stringify(body)]);
-    reply.send({ tool: input.tool, result: body });
+    const result = { tool: input.tool, result: body };
+    await query(`INSERT INTO idempotency_keys(tenant_id,scope,key,status,response_json) VALUES ($1,'agent_action',$2,'completed',$3::jsonb) ON CONFLICT(tenant_id,scope,key) DO UPDATE SET status='completed',response_json=EXCLUDED.response_json,updated_at=now()`, [input.tenantId, input.idempotencyKey, JSON.stringify(result)]);
+    reply.send(result);
   });
 
   app.post("/v1/internal/outbound/enqueue", async (request, reply) => {

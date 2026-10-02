@@ -294,6 +294,27 @@ The application validates:
 
 Only then does it execute the action.
 
+For `ORDER_CREATE`, the runtime supplies the executable `create_order` contract:
+`items[]` requires a catalog `collectionItemId`, `title`, positive numeric
+`quantity`, and nonnegative numeric `unitPrice`; `customer`, `delivery`,
+`payment`, and item `attributes` carry the confirmed details. Tenant, business,
+channel, conversation, contact, and `source: ai` are assigned by the server.
+The agent must include the structured action after the customer's explicit
+confirmation; saying an order is confirmed without that action does not save an
+order. Missing material details are requested before proposing the action.
+
+Short confirmations and delivery-detail turns often omit the item name. When
+the current turn finds no relevant item, the runtime re-queries up to eight
+recent exchanges, newest first, using the same active agent/channel/catalog
+scope. This refreshes item IDs and prices from the catalog rather than treating
+earlier chat text as the source of truth. An explicit current item match takes
+precedence over an older product in the conversation.
+
+Actions execute successfully before the order-success reply is enqueued. Orders
+initially appear as `pending` in Customer Panel **Business Actions → Orders**,
+with Facebook/channel attribution, customer and delivery details, and stable
+item/price snapshots. Staff then process the normal order status transitions.
+
 ## 18. Dynamic schema awareness
 
 For custom collections, runtime context includes collection schema definitions and only relevant item results.

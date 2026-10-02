@@ -130,3 +130,25 @@ export async function findRelevantItems(
   `, [tenantId, businessId, agentId, channelId, browse, words.join(" "), words, productBrowse]);
   return result.rows;
 }
+
+// A short confirmation or delivery address often omits the product name. Read
+// the last relevant exchange again so the action still uses current catalog
+// facts and IDs instead of treating an earlier chat reply as the source of truth.
+export async function findConversationItems(
+  tenantId: string,
+  businessId: string,
+  agentId: string | null,
+  channelId: string,
+  text: string,
+  recentTexts: string[],
+  runQuery?: CatalogQuery,
+): Promise<CatalogItem[]> {
+  const current = await findRelevantItems(tenantId, businessId, agentId, channelId, text, runQuery);
+  if (current.length || !agentId) return current;
+  for (const recentText of recentTexts.slice(-8).reverse()) {
+    if (!recentText.trim() || recentText === text) continue;
+    const items = await findRelevantItems(tenantId, businessId, agentId, channelId, recentText, runQuery);
+    if (items.length) return items;
+  }
+  return [];
+}

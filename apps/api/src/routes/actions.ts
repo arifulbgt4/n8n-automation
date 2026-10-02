@@ -3,6 +3,8 @@ import { z } from "zod";
 import { env, query, transaction } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, safeSecretEqual } from "../lib.js";
 
+type TransactionClient = Parameters<Parameters<typeof transaction>[0]>[0];
+
 async function internalOrTenant(request: FastifyRequest, tenantId: string, roles: Array<"OWNER" | "ADMIN" | "STAFF" | "VIEWER"> = ["OWNER","ADMIN","STAFF"]) {
   const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "");
   if (safeSecretEqual(bearer, env().INTERNAL_SERVICE_AUTH_SECRET)) return { internal: true, userId: null as string | null };
@@ -12,18 +14,29 @@ async function internalOrTenant(request: FastifyRequest, tenantId: string, roles
   return { internal: false, userId: principal.userId };
 }
 
-async function idempotent<T>(tenantId: string, scope: string, key: string | undefined, work: () => Promise<T>): Promise<T> {
-  if (!key) return work();
-  const existing = await query<{ status: string; response_json: T | null }>("SELECT status,response_json FROM idempotency_keys WHERE tenant_id=$1 AND scope=$2 AND key=$3", [tenantId, scope, key]);
-  if (existing.rows[0]?.status === "completed" && existing.rows[0].response_json) return existing.rows[0].response_json;
-  if (existing.rows[0]?.status === "processing") throw new ApiError(409, "IDEMPOTENCY_IN_PROGRESS", "The same operation is already in progress.");
-  await query(`INSERT INTO idempotency_keys(tenant_id,scope,key,status) VALUES ($1,$2,$3,'processing') ON CONFLICT(tenant_id,scope,key) DO UPDATE SET status='processing',updated_at=now()`, [tenantId, scope, key]);
+async function idempotent<T>(tenantId: string, scope: string, key: string | undefined, work: (client: TransactionClient) => Promise<T>): Promise<T> {
+  if (!key) return transaction(work);
+  // Claim at the unique-key boundary. A preliminary SELECT lets concurrent
+  // requests all see a missing key and then overwrite one another's claim.
+  const claimed = await query(`
+    INSERT INTO idempotency_keys(tenant_id,scope,key,status) VALUES ($1,$2,$3,'processing')
+    ON CONFLICT(tenant_id,scope,key) DO UPDATE SET status='processing',response_json=NULL,updated_at=now()
+      WHERE idempotency_keys.status='failed'
+    RETURNING key
+  `, [tenantId, scope, key]);
+  if (!claimed.rows[0]) {
+    const existing = await query<{ status: string; response_json: T | null }>("SELECT status,response_json FROM idempotency_keys WHERE tenant_id=$1 AND scope=$2 AND key=$3", [tenantId, scope, key]);
+    if (existing.rows[0]?.status === "completed" && existing.rows[0].response_json) return existing.rows[0].response_json;
+    throw new ApiError(409, "IDEMPOTENCY_IN_PROGRESS", "The same operation is already in progress.");
+  }
   try {
-    const result = await work();
-    await query("UPDATE idempotency_keys SET status='completed',response_json=$4::jsonb,updated_at=now() WHERE tenant_id=$1 AND scope=$2 AND key=$3", [tenantId, scope, key, JSON.stringify(result)]);
-    return result;
+    return await transaction(async (client) => {
+      const result = await work(client);
+      await client.query("UPDATE idempotency_keys SET status='completed',response_json=$4::jsonb,updated_at=now() WHERE tenant_id=$1 AND scope=$2 AND key=$3", [tenantId, scope, key, JSON.stringify(result)]);
+      return result;
+    });
   } catch (error) {
-    await query("UPDATE idempotency_keys SET status='failed',updated_at=now() WHERE tenant_id=$1 AND scope=$2 AND key=$3", [tenantId, scope, key]).catch(() => undefined);
+    await query("UPDATE idempotency_keys SET status='failed',updated_at=now() WHERE tenant_id=$1 AND scope=$2 AND key=$3 AND status='processing'", [tenantId, scope, key]).catch(() => undefined);
     throw error;
   }
 }
@@ -115,8 +128,7 @@ export async function actionRoutes(app: FastifyInstance) {
     const business = await ensureBusiness(tenantId, input.businessId);
     await ensureScopedReferences(tenantId, input.businessId, input);
     const idem = request.headers["idempotency-key"] as string | undefined;
-    const result = await idempotent(tenantId, "create_order", idem, async () => {
-      return transaction(async (client) => {
+    const result = await idempotent(tenantId, "create_order", idem, async (client) => {
         if (input.channelAccountId) {
           const channel = await client.query("SELECT id FROM channel_accounts WHERE id=$1 AND tenant_id=$2 AND business_id=$3", [input.channelAccountId, tenantId, input.businessId]);
           if (!channel.rows[0]) throw new ApiError(400, "CHANNEL_SCOPE_INVALID", "Channel does not belong to this business.");
@@ -140,7 +152,6 @@ export async function actionRoutes(app: FastifyInstance) {
         await client.query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload)
           VALUES ($1,'ORDER_CREATED',$2,'order',$3,$4::jsonb)`, [tenantId, input.businessId, order.rows[0].id, JSON.stringify({ orderNumber })]);
         return { order: order.rows[0] };
-      });
     });
     await audit({ actorUserId: auth.userId, actorType: auth.internal ? "service" : "user", tenantId, businessId: input.businessId, action: "ORDER_CREATED", resourceType: "order", resourceId: (result as any).order.id, safeDiff: { itemCount: input.items.length, source: input.source }, request });
     reply.code(201).send(result);
@@ -178,9 +189,9 @@ export async function actionRoutes(app: FastifyInstance) {
     await ensureScopedReferences(tenantId, input.businessId, input);
     await assertBookingAvailability({tenantId,businessId:input.businessId,collectionItemId:input.collectionItemId,startsAt:input.startsAt,endsAt:input.endsAt});
     const idem = request.headers["idempotency-key"] as string | undefined;
-    const result = await idempotent(tenantId, "create_booking", idem, async () => {
-      const row = await query<any>(`INSERT INTO bookings(tenant_id,business_id,channel_account_id,conversation_id,contact_id,collection_item_id,starts_at,ends_at,timezone,customer_snapshot,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) RETURNING *`, [tenantId, input.businessId, input.channelAccountId ?? null, input.conversationId ?? null, input.contactId ?? null, input.collectionItemId ?? null, input.startsAt, input.endsAt ?? null, input.timezone, JSON.stringify(input.customer), JSON.stringify(input.metadata)]);
-      await query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload) VALUES ($1,'BOOKING_CREATED',$2,'booking',$3,$4::jsonb)`, [tenantId, input.businessId, row.rows[0].id, JSON.stringify({ startsAt: input.startsAt })]);
+    const result = await idempotent(tenantId, "create_booking", idem, async (client) => {
+      const row = await client.query<any>(`INSERT INTO bookings(tenant_id,business_id,channel_account_id,conversation_id,contact_id,collection_item_id,starts_at,ends_at,timezone,customer_snapshot,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) RETURNING *`, [tenantId, input.businessId, input.channelAccountId ?? null, input.conversationId ?? null, input.contactId ?? null, input.collectionItemId ?? null, input.startsAt, input.endsAt ?? null, input.timezone, JSON.stringify(input.customer), JSON.stringify(input.metadata)]);
+      await client.query(`INSERT INTO outbox_events(tenant_id,event_type,business_id,resource_type,resource_id,payload) VALUES ($1,'BOOKING_CREATED',$2,'booking',$3,$4::jsonb)`, [tenantId, input.businessId, row.rows[0].id, JSON.stringify({ startsAt: input.startsAt })]);
       return { booking: row.rows[0] };
     });
     await audit({ actorUserId: auth.userId, actorType: auth.internal ? "service" : "user", tenantId, businessId: input.businessId, action: "BOOKING_CREATED", resourceType: "booking", resourceId: (result as any).booking.id, request });
@@ -226,8 +237,8 @@ export async function actionRoutes(app: FastifyInstance) {
     await ensureBusiness(tenantId, input.businessId);
     await ensureScopedReferences(tenantId, input.businessId, input);
     const idem = request.headers["idempotency-key"] as string | undefined;
-    const result = await idempotent(tenantId, "create_lead", idem, async () => {
-      const row = await query<any>("INSERT INTO leads(tenant_id,business_id,channel_account_id,conversation_id,contact_id,stage,interest,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *", [tenantId, input.businessId, input.channelAccountId ?? null, input.conversationId ?? null, input.contactId ?? null, input.stage, input.interest ?? null, JSON.stringify(input.metadata)]);
+    const result = await idempotent(tenantId, "create_lead", idem, async (client) => {
+      const row = await client.query<any>("INSERT INTO leads(tenant_id,business_id,channel_account_id,conversation_id,contact_id,stage,interest,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *", [tenantId, input.businessId, input.channelAccountId ?? null, input.conversationId ?? null, input.contactId ?? null, input.stage, input.interest ?? null, JSON.stringify(input.metadata)]);
       return { lead: row.rows[0] };
     });
     await audit({ actorUserId: auth.userId, actorType: auth.internal ? "service" : "user", tenantId, businessId: input.businessId, action: "LEAD_CREATED", resourceType: "lead", resourceId: (result as any).lead.id, request });
@@ -269,8 +280,8 @@ export async function actionRoutes(app: FastifyInstance) {
     await ensureBusiness(tenantId,input.businessId);
     await ensureScopedReferences(tenantId, input.businessId, input);
     const idem=request.headers["idempotency-key"] as string|undefined;
-    const result=await idempotent(tenantId,"create_quote",idem,async()=> {
-      const row=await query<any>("INSERT INTO quote_requests(tenant_id,business_id,channel_account_id,conversation_id,contact_id,request_json) VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,JSON.stringify(input.request)]);
+    const result=await idempotent(tenantId,"create_quote",idem,async(client)=> {
+      const row=await client.query<any>("INSERT INTO quote_requests(tenant_id,business_id,channel_account_id,conversation_id,contact_id,request_json) VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,JSON.stringify(input.request)]);
       return {quote:row.rows[0]};
     });
     reply.code(201).send(result);
@@ -308,8 +319,8 @@ export async function actionRoutes(app: FastifyInstance) {
     await ensureBusiness(tenantId,input.businessId);
     await ensureScopedReferences(tenantId, input.businessId, input);
     const idem=request.headers["idempotency-key"] as string|undefined;
-    const result=await idempotent(tenantId,"create_support_case",idem,async()=> {
-      const row=await query<any>("INSERT INTO support_cases(tenant_id,business_id,channel_account_id,conversation_id,contact_id,subject,description,priority,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,input.subject??null,input.description??null,input.priority,JSON.stringify(input.metadata)]);
+    const result=await idempotent(tenantId,"create_support_case",idem,async(client)=> {
+      const row=await client.query<any>("INSERT INTO support_cases(tenant_id,business_id,channel_account_id,conversation_id,contact_id,subject,description,priority,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING *",[tenantId,input.businessId,input.channelAccountId??null,input.conversationId??null,input.contactId??null,input.subject??null,input.description??null,input.priority,JSON.stringify(input.metadata)]);
       return {case:row.rows[0]};
     });
     reply.code(201).send(result);

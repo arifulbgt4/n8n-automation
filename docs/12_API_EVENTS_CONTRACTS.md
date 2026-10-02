@@ -124,6 +124,21 @@ Examples:
 
 Each action validates tenant scope, enabled capability, current data state, required fields, and idempotency.
 
+Order creation claims `(tenant_id, scope, key)` atomically. Simultaneous calls
+with the same key cannot both execute: a processing claim returns
+`409 IDEMPOTENCY_IN_PROGRESS`, and a completed claim replays the saved order.
+Failed claims can be retried. `/v1/internal/actions/execute` also replays the
+same `{tool, result}` shape as its first successful response. AI order actions
+always persist `source: ai` with the server-resolved conversation/channel/contact
+scope, even if an action argument attempts to supply a different source.
+The order's persistence key is derived from its source turn, so repeated
+`create_order` actions at different array indexes still save one order for that
+confirmation. A genuinely new order requires a new customer confirmation turn.
+The business record, outbox event, and completed idempotency response commit
+together. If saving the completion response fails, the order and its event roll
+back before the key becomes retryable; a retry must not duplicate a committed
+order.
+
 ## 9. Application media API contract
 
 The SaaS exposes logical media operations independent of infrastructure hostnames/admin interfaces:
