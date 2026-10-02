@@ -12,6 +12,8 @@ type Plan={id:string;key:"free"|"pro";name:string;active:boolean;limits?:{dailyA
 type ModelDraft={providerConnectionId:string;taskKey:string;model:string;priority:number;parametersJson:string;active:boolean};
 const tasks=["DEFAULT_CHAT","IMAGE_ANALYSIS","AUDIO_TRANSCRIPTION","PROMPT_SYNTHESIS","EMBEDDINGS","STRUCTURED_EXTRACTION","INTENT_CLASSIFICATION"] as const;
 const presets=[500,1000,2000,5000,10000];
+const MIN_TOKENS_PER_CREDIT=0.000001;
+const MAX_TOKENS_PER_CREDIT=1_000_000_000;
 const inputStyle={padding:10,borderRadius:9,border:"1px solid #d1d5db",width:"100%",background:"white"} as const;
 const primaryStyle={padding:"10px 14px",border:0,borderRadius:9,background:"#4f46e5",color:"white",fontWeight:750,cursor:"pointer"} as const;
 const emptyDraft=(providerConnectionId=""):ModelDraft=>({providerConnectionId,taskKey:"DEFAULT_CHAT",model:"",priority:100,parametersJson:"{}",active:true});
@@ -41,7 +43,7 @@ export default function PlatformAiPage(){
   const[editDraft,setEditDraft]=useState<ModelDraft>(emptyDraft());
   const[planDrafts,setPlanDrafts]=useState<Record<string,number>>({});
   const[tokensPerCredit,setTokensPerCredit]=useState(1000);
-  const[selectedPreset,setSelectedPreset]=useState("1000");
+  const[creditRateDraft,setCreditRateDraft]=useState("1000");
   const[dialogRoot,setDialogRoot]=useState<HTMLElement|null>(null);
   const dialogOpen=Boolean(editing||deleteTarget);
   const closeDialogRef=useRef<()=>void>(()=>{});
@@ -53,7 +55,7 @@ export default function PlatformAiPage(){
     setPlans(data.plans.filter(plan=>plan.key==="free"||plan.key==="pro"));
     setPlanDrafts(Object.fromEntries(data.plans.map(plan=>[plan.id,Number(plan.limits?.dailyAiCredits??0)])));
     setTokensPerCredit(data.tokensPerCredit);
-    setSelectedPreset(presets.includes(data.tokensPerCredit)?String(data.tokensPerCredit):"custom");
+    setCreditRateDraft(String(data.tokensPerCredit));
     setModelForm(current=>({...current,providerConnectionId:current.providerConnectionId||providerRows[0]?.id||""}));
   },[]);
   const load=useCallback(async()=>{applyData(await fetchPlatformAiData());},[applyData]);
@@ -83,6 +85,8 @@ export default function PlatformAiPage(){
   },[dialogOpen,dialogRoot]);
 
   const selectedProvider=useMemo(()=>providers.find(provider=>provider.id===modelForm.providerConnectionId),[providers,modelForm.providerConnectionId]);
+  const creditRateValue=Number(creditRateDraft);
+  const creditRateValid=creditRateDraft.trim()!==""&&Number.isFinite(creditRateValue)&&creditRateValue>=MIN_TOKENS_PER_CREDIT&&creditRateValue<=MAX_TOKENS_PER_CREDIT;
   const catalog=catalogResult.providerId===modelForm.providerConnectionId?catalogResult.models:[];
   useEffect(()=>{
     if(!modelForm.providerConnectionId)return;
@@ -120,7 +124,14 @@ export default function PlatformAiPage(){
   }
   async function saveCreditRate(event:FormEvent){
     event.preventDefault();setError("");setNotice("");setBusy("credit-rate");
-    try{await api("/v1/admin/platform-ai/settings",{method:"PATCH",body:JSON.stringify({tokensPerCredit})});setNotice(`Credit conversion saved: 1 credit = ${tokensPerCredit.toLocaleString()} tokens.`);await load();}
+    if(!creditRateValid){setError(`Enter a number from ${MIN_TOKENS_PER_CREDIT} to ${MAX_TOKENS_PER_CREDIT.toLocaleString()} tokens per credit.`);setBusy("");return;}
+    try{
+      const saved=await api<{tokensPerCredit:number}>("/v1/admin/platform-ai/settings",{method:"PATCH",body:JSON.stringify({tokensPerCredit:creditRateValue})});
+      const persistedRate=Number(saved.tokensPerCredit);
+      setTokensPerCredit(persistedRate);
+      setCreditRateDraft(String(persistedRate));
+      setNotice(`Credit conversion saved: 1 credit = ${persistedRate.toLocaleString()} tokens.`);
+    }
     catch(e){setError(e instanceof Error?e.message:"Unable to save the global credit conversion.");}finally{setBusy("");}
   }
   async function savePlan(plan:Plan){
@@ -151,7 +162,11 @@ export default function PlatformAiPage(){
       </form></section>
     </div>
 
-    <section className="platform-ai-card platform-ai-section"><div className="platform-ai-card-head"><div><h2>Global credit conversion</h2><p>One credit rate applies to every provider, model, and AI task.</p></div><span className="platform-ai-rate-chip">1 credit = {tokensPerCredit.toLocaleString()} tokens</span></div><form className="platform-ai-rate-form" onSubmit={saveCreditRate}><label>Tokens per credit<select style={inputStyle} value={selectedPreset} onChange={event=>{const value=event.target.value;setSelectedPreset(value);if(value!=="custom")setTokensPerCredit(Number(value));}}>{presets.map(rate=><option key={rate} value={rate}>{rate.toLocaleString()} tokens / credit</option>)}<option value="custom">Custom rate</option></select></label>{selectedPreset==="custom"&&<label>Custom tokens per credit<input type="number" min="0.000001" step="any" style={inputStyle} value={tokensPerCredit} onChange={event=>setTokensPerCredit(Number(event.target.value))}/></label>}<button style={primaryStyle} disabled={busy==="credit-rate"}>{busy==="credit-rate"?"Saving…":"Save conversion"}</button></form></section>
+    <section className="platform-ai-card platform-ai-section"><div className="platform-ai-card-head"><div><h2>Global credit conversion</h2><p>One credit rate applies to every provider, model, and AI task.</p></div><span className="platform-ai-rate-chip">Saved rate · 1 credit = {tokensPerCredit.toLocaleString()} tokens</span></div><form className="platform-ai-rate-form" onSubmit={saveCreditRate}>
+      <label htmlFor="tokens-per-credit">Tokens per credit<input id="tokens-per-credit" name="tokensPerCredit" type="number" required min={MIN_TOKENS_PER_CREDIT} max={MAX_TOKENS_PER_CREDIT} step="any" inputMode="decimal" style={inputStyle} value={creditRateDraft} onChange={event=>setCreditRateDraft(event.currentTarget.value)} aria-describedby="tokens-per-credit-help"/><small id="tokens-per-credit-help">Enter any positive rate from {MIN_TOKENS_PER_CREDIT} to {MAX_TOKENS_PER_CREDIT.toLocaleString()}.</small></label>
+      <div className="platform-ai-rate-presets" role="group" aria-label="Quick select tokens per credit"><span>Quick select</span>{presets.map(rate=><button key={rate} type="button" className={creditRateValue===rate?"selected":""} aria-pressed={creditRateValue===rate} onClick={()=>setCreditRateDraft(String(rate))}>{rate.toLocaleString()}</button>)}</div>
+      <button style={primaryStyle} disabled={busy==="credit-rate"||!creditRateValid}>{busy==="credit-rate"?"Saving…":"Save conversion"}</button>
+    </form></section>
 
     <section className="platform-ai-card platform-ai-section"><div className="platform-ai-card-head"><div><h2>Platform routes</h2><p>Enable or disable traffic, edit route configuration, or remove a route.</p></div><span className="platform-ai-rate-chip">Global rate · {tokensPerCredit.toLocaleString()} tokens / credit</span></div><div className="platform-ai-table-wrap"><table className="platform-ai-table"><thead><tr><th>Task</th><th>Provider</th><th>Model</th><th>Priority</th><th>Status</th><th>Actions</th></tr></thead><tbody>{models.map(route=><tr key={route.id}><td><strong>{route.task_key}</strong></td><td>{route.provider_name}<small>{route.provider}</small></td><td><code>{route.model}</code></td><td>{route.priority}</td><td><span className={`badge ${route.active?"good":"neutral"}`}>{route.active?"Active":"Disabled"}</span></td><td><div className="platform-ai-actions"><button type="button" className="button ghost smallbtn" disabled={busy===route.id} onClick={()=>startEdit(route)}>Edit</button><button type="button" className="button" disabled={busy===route.id} onClick={()=>void toggleModel(route)}>{route.active?"Disable":"Enable"}</button><button type="button" className="button danger smallbtn" disabled={busy===route.id} onClick={()=>{setError("");setDeleteTarget(route)}}>{busy===route.id?"Working…":"Delete"}</button></div></td></tr>)}</tbody></table>{!models.length&&<p className="platform-ai-empty">No routes configured. Add a task route above.</p>}</div></section>
 

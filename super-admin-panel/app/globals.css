@@ -14,3 +14,4 @@ select{appearance:none;padding-right:36px;background-image:url("data:image/svg+x
 .platform-ai-confirm-modal{width:min(500px,100%)}
 .platform-ai-confirm-copy{margin:0;color:#4b5565;font-size:14px;line-height:1.6;overflow-wrap:anywhere}
 .platform-ai-confirm-copy code{padding:2px 5px;border:1px solid #e6e8ee;border-radius:5px;background:#f7f8fb;color:#273145;font-size:12px}
+.platform-ai-rate-form label small{font-size:11px;font-weight:400;color:#737d8e}.platform-ai-rate-presets{display:flex;align-items:center;flex-wrap:wrap;gap:6px}.platform-ai-rate-presets>span{margin-right:2px;color:#737d8e;font-size:11px;font-weight:700}.platform-ai-rate-presets button{padding:8px 10px;border:1px solid #dfe3ec;border-radius:8px;background:#fff;color:#465064;font-size:11px;font-weight:700;cursor:pointer}.platform-ai-rate-presets button:hover{border-color:#a9afff;background:#f7f7ff}.platform-ai-rate-presets button.selected{border-color:#7771ed;background:#f0efff;color:#4338ca}
