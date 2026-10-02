@@ -6,6 +6,7 @@ import {
   decryptSecret,
   enqueue,
   env,
+  linkReadyMediaToMessage,
   mediaApiKeyForAsset,
   query,
   queue,
@@ -18,6 +19,7 @@ import {
   type JobEnvelope,
 } from "@n8n-automation/core";
 import { capturePanelTrainingReply, humanReplyOutcomeUnknown, ProviderOutcomeUnknownError } from "./panel-training-capture.js";
+import { deleteRetainedMediaAsset } from "./media-retention.js";
 
 const config = env();
 const workers: Worker[] = [];
@@ -383,10 +385,7 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
     }
 
     await transaction(async (client) => {
-      await client.query(
-        "INSERT INTO message_media(message_id,media_asset_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-        [messageId,assetId,row.tenant_id],
-      );
+      await linkReadyMediaToMessage(client, { messageId, assetId, tenantId: row.tenant_id, businessId: row.business_id });
       await client.query(
         "UPDATE messages SET metadata=metadata||$2::jsonb,updated_at=now() WHERE id=$1",
         [messageId,JSON.stringify({ mediaIngestStatus: "ready", mediaAssetId: assetId })],
@@ -654,7 +653,7 @@ async function outboundMessage(job: Job<JobEnvelope<any>>) {
   await query(`UPDATE messages SET delivery_status='sending',metadata=metadata-'error'-'providerStatus'-'permanent',updated_at=now()
     WHERE id=$1 AND delivery_status NOT IN ('sent','unknown','cancelled','dead_letter')`,[messageId]);
   if (message.type === "media") {
-    await query("INSERT INTO message_media(message_id,media_asset_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [messageId,message.assetId,tenantId]);
+    await transaction(client => linkReadyMediaToMessage(client, { messageId, assetId: message.assetId, tenantId, businessId }));
   }
   let acceptedProviderMessageId: string | null = null;
   try {
@@ -1156,14 +1155,7 @@ async function applyRetentionPolicies(){
       let deleted=0;
       if(stale.rows.length){
         for(const asset of stale.rows){
-          let removed=true;
-          if(config.MEDIA_BASE_URL){
-            const credential=await mediaApiKeyForAsset(tenantId,asset.storage_user_id).catch(()=>null);
-            if(!credential) continue;
-            const response=await fetch(`${config.MEDIA_BASE_URL.replace(/\/$/,"")}/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`,{method:"DELETE",headers:{authorization:`Bearer ${credential}`}}).catch(()=>null);
-            removed=Boolean(response&&(response.ok||response.status===404));
-          }
-          if(removed){await query("UPDATE media_assets SET processing_status='deleted',updated_at=now() WHERE id=$1",[asset.id]);deleted++;}
+          if(await deleteRetainedMediaAsset({tenantId,assetId:asset.id,mediaDays:policy.media_days,mediaBaseUrl:config.MEDIA_BASE_URL})) deleted++;
         }
       }
       counts.media=deleted;

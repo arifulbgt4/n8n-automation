@@ -153,6 +153,17 @@ The SaaS exposes logical media operations independent of infrastructure hostname
 
 Collection/message APIs refer to `media_asset_id`, never filesystem paths or infrastructure URLs.
 
+Deleting a catalog item or archiving its collection detaches that catalog's media
+relationships in the same transaction. The asset and storage bytes remain until
+the owner explicitly deletes the unused asset. Another live catalog item or any
+conversation message reference still blocks deletion; hidden/archived items in an
+active collection also retain their references. Media-list reference counts omit
+links stranded by older deleted items/archived collections, and explicit asset
+DELETE safely prunes those obsolete links before checking remaining usage.
+Catalog gallery writers and deletion operations serialize their state checks so
+a concurrent gallery update cannot attach an image to a deleted item, archived
+collection, or asset deleted from storage.
+
 The backend storage adapter maps these operations to the existing Media Storage user API:
 
 ```text

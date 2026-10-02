@@ -5,29 +5,30 @@ import { chat } from "../ai-provider.js";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant, requestId } from "../lib.js";
 import { assertDailyAiAllowance, recordPlatformAiUsage, resolvePlatformModel } from "../platform-ai.js";
 
-const customerProviderModelPattern=/^\/v1\/tenants\/([0-9a-f-]+)\/ai\/(providers|models)(?:\/|$)/i;
-const agentTestPattern=/^\/v1\/tenants\/([0-9a-f-]+)\/agents\/([0-9a-f-]+)\/test(?:\?|$)/i;
+const customerProviderModelPattern=/^\/v1\/tenants\/:tenantId\/ai\/(providers|models)(?:\/|$)/;
+const agentTestRoute="/v1/tenants/:tenantId/agents/:agentId/test";
 
 export async function platformAiCustomerGuard(app:FastifyInstance){
   app.addHook("preHandler",async(request,reply)=>{
-    const path=request.url.split("?")[0];
-    const managed=path.match(customerProviderModelPattern);
+    // Match Fastify's canonical route and validated decoded parameters. A raw
+    // URL check can miss percent-encoded UUIDs that the router still accepts.
+    const route=request.routeOptions.url;
+    if(!route) return;
+    const managed=route.match(customerProviderModelPattern);
     if(managed){
-      await requireTenant(request,managed[1],["OWNER","ADMIN","STAFF"]);
+      const {tenantId}=z.object({tenantId:z.string().uuid()}).parse(request.params);
+      await requireTenant(request,tenantId,["OWNER","ADMIN","STAFF"]);
       // Transitional compatibility for the existing Customer AI Agents screen: it may still
       // read these collections while the provider/model controls are being removed from the UI.
       // Never expose platform credentials or routes through tenant APIs.
-      if(request.method==="GET" && path===`/v1/tenants/${managed[1]}/ai/${managed[2].toLowerCase()}`){
-        return reply.send(managed[2].toLowerCase()==="providers"?{providers:[]}:{models:[]});
+      if(request.method==="GET" && route===`/v1/tenants/:tenantId/ai/${managed[1]}`){
+        return reply.send(managed[1]==="providers"?{providers:[]}:{models:[]});
       }
       throw new ApiError(403,"PLATFORM_AI_MANAGED","AI providers and model routes are managed by the platform administrator. Your workspace uses the models included with its plan.");
     }
 
-    if(request.method!=="POST") return;
-    const match=path.match(agentTestPattern);
-    if(!match) return;
-    const tenantId=match[1];
-    const agentId=match[2];
+    if(request.method!=="POST" || route!==agentTestRoute) return;
+    const {tenantId,agentId}=z.object({tenantId:z.string().uuid(),agentId:z.string().uuid()}).parse(request.params);
     const principal=await requireAuth(request);
     await requireTenant(request,tenantId,["OWNER","ADMIN","STAFF"]);
     requireCsrf(request);
@@ -53,6 +54,6 @@ export async function platformAiCustomerGuard(app:FastifyInstance){
       correlationId:requestId(request),idempotencyKey:`agent-test:${agentId}:${promptId}:${requestId(request)}`,metadata:{operation:"agent_test",promptVersionId:promptId}
     });
     await audit({actorUserId:principal.userId,tenantId,businessId:row.business_id,action:"AGENT_TESTED",resourceType:"agent_profile",resourceId:agentId,safeDiff:{promptVersionId:promptId,platformManagedAi:true},request});
-    return reply.send({response:result.text,usage:result.usage,promptVersionId:promptId,platformManagedAi:true});
+    return reply.send({response:result.text,promptVersionId:promptId,platformManagedAi:true});
   });
 }

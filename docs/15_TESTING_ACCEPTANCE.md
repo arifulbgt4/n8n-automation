@@ -128,6 +128,10 @@ Against an isolated/test media user:
 - max images per response enforced.
 - continuation sends remaining images safely.
 - deleting one relationship does not delete an asset still referenced elsewhere.
+- inbound/outbound message attachment revalidates ready-state and tenant/business
+  scope before linking; a concurrent deletion blocks the link, then the newly
+  deleted asset is rejected. A link committed before deletion is visible to its
+  reference check. Repeated linking preserves one relationship.
 - local Media Storage deletion does not falsely claim provider copies were deleted.
 
 ## 10. AI provider tests

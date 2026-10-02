@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { query, transaction } from "@n8n-automation/core";
+import { transaction } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant } from "../lib.js";
 
 export async function collectionMediaRoutes(app: FastifyInstance) {
@@ -15,46 +15,44 @@ export async function collectionMediaRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const input = z.object({ mediaAssetIds: z.array(z.string().uuid()).max(50) }).parse(request.body);
 
-    const collection = await query<any>(
-      "SELECT id,business_id FROM collections WHERE id=$1 AND tenant_id=$2 AND status<>'archived'",
-      [params.collectionId, params.tenantId],
-    );
-    if (!collection.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
-    await requireBusinessAccess(request, params.tenantId, collection.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
-
-    const item = await query<any>(
-      "SELECT id,business_id FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted'",
-      [params.itemId, params.collectionId, params.tenantId],
-    );
-    if (!item.rows[0] || item.rows[0].business_id !== collection.rows[0].business_id) throw new ApiError(404, "ITEM_NOT_FOUND", "Collection item not found.");
-
     const ids = [...new Set(input.mediaAssetIds)];
-    if (ids.length) {
-      const assets = await query<any>(`
-        SELECT id FROM media_assets
-        WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND processing_status='ready'
-          AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export')
-          AND (business_id IS NULL OR business_id=$3)
-      `, [params.tenantId, ids, collection.rows[0].business_id]);
-      if (assets.rows.length !== ids.length) {
-        throw new ApiError(400, "MEDIA_SCOPE_INVALID", "One or more media assets are missing, unavailable, or belong to another business.");
+    const businessId = await transaction(async (client) => {
+      // Serialize gallery edits with item deletion and collection archiving.
+      const collection = await client.query<{ business_id: string }>(
+        "SELECT business_id FROM collections WHERE id=$1 AND tenant_id=$2 AND status<>'archived' FOR UPDATE",
+        [params.collectionId, params.tenantId],
+      );
+      if (!collection.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
+      await requireBusinessAccess(request, params.tenantId, collection.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
+      const item = await client.query<{ business_id: string }>(
+        "SELECT business_id FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted' FOR UPDATE",
+        [params.itemId, params.collectionId, params.tenantId],
+      );
+      if (!item.rows[0] || item.rows[0].business_id !== collection.rows[0].business_id) throw new ApiError(404, "ITEM_NOT_FOUND", "Collection item not found.");
+      if (ids.length) {
+        const assets = await client.query(`
+          SELECT id FROM media_assets
+          WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND processing_status='ready'
+            AND COALESCE(metadata->>'source','') NOT IN ('tenant_export','collection_export')
+            AND (business_id IS NULL OR business_id=$3)
+          ORDER BY id FOR UPDATE
+        `, [params.tenantId, ids, collection.rows[0].business_id]);
+        if (assets.rows.length !== ids.length) throw new ApiError(400, "MEDIA_SCOPE_INVALID", "One or more media assets are missing, unavailable, or belong to another business.");
       }
-    }
-
-    await transaction(async (client) => {
-      await client.query("DELETE FROM collection_item_media WHERE collection_item_id=$1", [params.itemId]);
+      await client.query("DELETE FROM collection_item_media WHERE collection_item_id=$1 AND tenant_id=$2", [params.itemId, params.tenantId]);
       for (let index = 0; index < ids.length; index += 1) {
         await client.query(`
           INSERT INTO collection_item_media(collection_item_id,media_asset_id,tenant_id,role,display_order)
           VALUES ($1,$2,$3,$4,$5)
         `, [params.itemId, ids[index], params.tenantId, index === 0 ? "primary" : "gallery", index]);
       }
+      return collection.rows[0].business_id;
     });
 
     await audit({
       actorUserId: principal.userId,
       tenantId: params.tenantId,
-      businessId: collection.rows[0].business_id,
+      businessId,
       action: "COLLECTION_ITEM_MEDIA_UPDATED",
       resourceType: "collection_item",
       resourceId: params.itemId,

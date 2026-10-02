@@ -17,7 +17,7 @@ Customers own businesses, connected channels, business data, agents, prompts, tr
 
 Super Admin configures global routes for `DEFAULT_CHAT`, `INTENT_CLASSIFICATION`, `IMAGE_ANALYSIS`, `AUDIO_TRANSCRIPTION`, `STRUCTURED_EXTRACTION`, `PROMPT_SYNTHESIS`, and `EMBEDDINGS`. Each route stores its provider/model, priority, provider parameters, and active state. Admins can enable, disable, edit, and delete routes from `/platform-ai`.
 
-All routes share the global `tokens_per_credit` setting stored in `platform_ai_settings`. The initial migration default is 1,000 tokens per credit. Super Admin can select a preset or enter a custom positive value. Per-route credit weights are retained in the legacy schema for compatibility, but are not used for new metering.
+All routes share the global `tokens_per_credit` setting stored in `platform_ai_settings`. The initial migration default is 1,000 tokens per credit. Super Admin can select a preset or enter a custom value from 0.000001 to 1,000,000,000; the saved rate has six decimal places and the API returns that persisted value. Per-route credit weights are retained in the legacy schema for compatibility, but are not used for new metering.
 
 ## Daily AI credits
 
@@ -57,7 +57,7 @@ Customer usage at `/usage` shows only the current plan, credits used today, dail
 
 ## API boundary
 
-Customer provider/model mutation endpoints remain blocked with `403 PLATFORM_AI_MANAGED`. Customer workspaces do not receive platform secrets or token totals.
+Customer provider/model mutation endpoints remain blocked with `403 PLATFORM_AI_MANAGED`. The guard uses matched route templates and decoded parameters, so percent-encoded tenant or agent IDs cannot bypass platform management or the daily allowance. Customer workspaces do not receive platform secrets or token totals, including in agent test responses.
 
 Admin endpoints:
 

@@ -76,3 +76,25 @@ export async function mediaApiKeyForAsset(
     ? { userId: legacy.external_media_user_id, key: legacyKey }
     : null);
 }
+
+// The caller must keep this client in a transaction until its message/media
+// writes commit. The row lock serializes attachment with media deletion, then
+// PostgreSQL rechecks ready-state after any concurrent deletion finishes.
+export async function linkReadyMediaToMessage(
+  client: Pick<pg.PoolClient, "query">,
+  input: { tenantId: string; businessId: string; messageId: string; assetId: string },
+): Promise<void> {
+  const asset = await client.query<{ id: string }>(`
+    SELECT ma.id FROM media_assets ma
+    JOIN messages m ON m.id=$1 AND m.tenant_id=$3 AND m.business_id=$4
+    WHERE ma.id=$2 AND ma.tenant_id=$3 AND ma.processing_status='ready'
+      AND (ma.business_id IS NULL OR ma.business_id=$4)
+      AND COALESCE(ma.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+    FOR KEY SHARE OF ma
+  `, [input.messageId, input.assetId, input.tenantId, input.businessId]);
+  if (!asset.rows[0]) throw new Error(`Media asset ${input.assetId} is unavailable for this message`);
+  await client.query(
+    "INSERT INTO message_media(message_id,media_asset_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+    [input.messageId, input.assetId, input.tenantId],
+  );
+}

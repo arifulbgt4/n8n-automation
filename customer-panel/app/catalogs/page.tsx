@@ -317,7 +317,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
   }
 
   async function removeCollection(collection: Collection) {
-    if (!await confirmAction({ title: `Delete ${collection.name}?`, description: "Its items will be hidden and its channel and AI agent links removed. Historical data is retained." })) return;
+    if (!await confirmAction({ title: `Delete ${collection.name}?`, description: "Its items will be hidden and disconnected from channels and AI agents. Images stay in Media, where unused files can be deleted. Historical records are retained." })) return;
     setBusy(true);
     setError("");
     try {
@@ -396,7 +396,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
   }
 
   async function removeItem(item: Item) {
-    if (!selected || !await confirmAction({ title: `Delete ${item.title || "this item"}?`, description: "This catalog item will be removed from the collection." })) return;
+    if (!selected || !await confirmAction({ title: `Delete ${item.title || "this item"}?`, description: "This catalog item will be removed from the collection. Its images stay in Media and can be deleted once no other records use them." })) return;
     setBusy(true);
     setError("");
     try {

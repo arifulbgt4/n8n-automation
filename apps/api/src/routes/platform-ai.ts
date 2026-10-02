@@ -54,7 +54,7 @@ export async function platformAiRoutes(app:FastifyInstance){
 
   app.patch("/v1/admin/platform-ai/settings",async(request,reply)=>{
     const principal=await requireRecentPlatformAdmin(request);requireCsrf(request);
-    const input=z.object({tokensPerCredit:z.number().positive().max(1_000_000_000)}).parse(request.body);
+    const input=z.object({tokensPerCredit:z.number().min(0.000001).max(1_000_000_000)}).parse(request.body);
     const result=await query<any>("UPDATE platform_ai_settings SET tokens_per_credit=$1,updated_by=$2,updated_at=now() WHERE singleton=true RETURNING tokens_per_credit,updated_at",[input.tokensPerCredit,principal.userId]);
     await audit({actorUserId:principal.userId,actorType:"platform_admin",action:"PLATFORM_AI_CREDIT_RATE_UPDATED",resourceType:"platform_ai_settings",resourceId:"global",safeDiff:input,request});
     reply.send({tokensPerCredit:Number(result.rows[0]?.tokens_per_credit??input.tokensPerCredit),updatedAt:result.rows[0]?.updated_at??null});

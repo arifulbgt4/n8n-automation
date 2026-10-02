@@ -359,6 +359,15 @@ Use bounded exponential backoff/jitter. Terminal failures enter dead-letter/reco
 
 Application media deletion is reference-aware:
 
+Message attachments recheck the asset's `ready` state, tenant, and business in
+the same transaction that inserts `message_media`. They take a `FOR KEY SHARE`
+row lock on the asset, while deletion takes `FOR UPDATE` before checking its
+references. If deletion finishes first, the waiting attachment rejects the
+deleted asset; if attachment finishes first, deletion's reference check sees
+the committed message use. Shared tenant assets with no business scope remain
+eligible, while export files and assets from another tenant/business are never
+message attachments.
+
 ```text
 mark/delete request
  -> verify ownership/references

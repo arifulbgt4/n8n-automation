@@ -6,6 +6,7 @@ import {
   query,
   sha256,
   sharedMediaApiKey,
+  transaction,
 } from "@n8n-automation/core";
 import { ApiError, audit, requireAuth, requireBusinessAccess, requireCsrf, requireTenant } from "../lib.js";
 import { assertMediaStorageLimit, customerMediaStorageLimit } from "../limits.js";
@@ -49,7 +50,10 @@ export async function mediaRoutes(app: FastifyInstance) {
     const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).default(0), businessId: z.string().uuid().optional() }).parse(request.query);
     const result = await query(`
       SELECT m.*,
-        (SELECT count(*)::int FROM collection_item_media cim WHERE cim.media_asset_id=m.id) +
+        (SELECT count(*)::int FROM collection_item_media cim
+          JOIN collection_items i ON i.id=cim.collection_item_id AND i.tenant_id=cim.tenant_id
+          JOIN collections c ON c.id=i.collection_id AND c.tenant_id=i.tenant_id
+          WHERE cim.media_asset_id=m.id AND i.status<>'deleted' AND c.status<>'archived') +
         (SELECT count(*)::int FROM message_media mm WHERE mm.media_asset_id=m.id) AS reference_count
       FROM media_assets m
       WHERE m.tenant_id=$1 AND m.processing_status<>'deleted'
@@ -184,28 +188,36 @@ export async function mediaRoutes(app: FastifyInstance) {
     const principal = await requireAuth(request);
     requireCsrf(request);
     const context = await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
-    const asset = await query<{ storage_file_id: string; storage_user_id: string | null; business_id: string | null; metadata: Record<string, unknown> | null }>(`
-      SELECT m.storage_file_id,m.storage_user_id,m.business_id,m.metadata
-      FROM media_assets m
-      WHERE m.id=$1 AND m.tenant_id=$2 AND m.processing_status<>'deleted'
-        AND NOT EXISTS(SELECT 1 FROM collection_item_media x WHERE x.media_asset_id=m.id)
-        AND NOT EXISTS(SELECT 1 FROM message_media x WHERE x.media_asset_id=m.id)
-    `, [params.assetId, params.tenantId]);
-    if (!asset.rows[0]) throw new ApiError(409, "MEDIA_IN_USE_OR_MISSING", "Media is referenced by another record or does not exist.");
-    if (String(asset.rows[0].metadata?.source ?? "") === "tenant_export" && context.membershipRole !== "OWNER") {
-      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
-    }
-    if (!asset.rows[0].business_id && context.membershipRole === "STAFF") {
-      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
-    }
-    if (!asset.rows[0].business_id && context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)) {
-      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
-    }
-    if (asset.rows[0].business_id) await requireBusinessAccess(request, params.tenantId, asset.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
-    const response = await mediaFetch(`/api/v1/files/${encodeURIComponent(asset.rows[0].storage_file_id)}`, await mediaApiKeyForAsset(params.tenantId, asset.rows[0].storage_user_id), { method: "DELETE" });
-    if (!response.ok && response.status !== 404) throw new ApiError(502, "MEDIA_DELETE_FAILED", "Media storage deletion failed.");
-    await query("UPDATE media_assets SET processing_status='deleted',updated_at=now() WHERE id=$1", [params.assetId]);
-    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: asset.rows[0].business_id, action: "MEDIA_DELETED", resourceType: "media_asset", resourceId: params.assetId, request });
+    const businessId = await transaction(async (client) => {
+      // Hold this lock through the provider operation so catalog writers cannot
+      // attach a ready asset between the reference check and storage deletion.
+      const result = await client.query<{ storage_file_id: string; storage_user_id: string | null; business_id: string | null; metadata: Record<string, unknown> | null }>(`
+        SELECT storage_file_id,storage_user_id,business_id,metadata FROM media_assets
+        WHERE id=$1 AND tenant_id=$2 AND processing_status<>'deleted' FOR UPDATE
+      `, [params.assetId, params.tenantId]);
+      const asset = result.rows[0];
+      if (!asset) throw new ApiError(409, "MEDIA_IN_USE_OR_MISSING", "Media is referenced by another record or does not exist.");
+      if (String(asset.metadata?.source ?? "") === "tenant_export" && context.membershipRole !== "OWNER") throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+      if (!asset.business_id && (context.membershipRole === "STAFF" || (context.membershipRole !== "OWNER" && Array.isArray(context.businessScope)))) throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+      if (asset.business_id) await requireBusinessAccess(request, params.tenantId, asset.business_id, ["OWNER", "ADMIN", "STAFF"]);
+      // Older soft deletions may have left links that the panel can no longer
+      // edit. Only provably obsolete catalog links can be removed here.
+      await client.query(`DELETE FROM collection_item_media cim USING collection_items i,collections c
+        WHERE cim.media_asset_id=$1 AND cim.tenant_id=$2
+          AND i.id=cim.collection_item_id AND i.tenant_id=cim.tenant_id
+          AND c.id=i.collection_id AND c.tenant_id=i.tenant_id
+          AND (i.status='deleted' OR c.status='archived')`, [params.assetId, params.tenantId]);
+      const references = await client.query(`SELECT 1 WHERE
+        EXISTS(SELECT 1 FROM collection_item_media WHERE media_asset_id=$1)
+        OR EXISTS(SELECT 1 FROM message_media WHERE media_asset_id=$1)`, [params.assetId]);
+      if (references.rows[0]) throw new ApiError(409, "MEDIA_IN_USE_OR_MISSING", "Media is referenced by another record or does not exist.");
+      const response = await mediaFetch(`/api/v1/files/${encodeURIComponent(asset.storage_file_id)}`, await mediaApiKeyForAsset(params.tenantId, asset.storage_user_id, client), { method: "DELETE" });
+      if (!response.ok && response.status !== 404) throw new ApiError(502, "MEDIA_DELETE_FAILED", "Media storage deletion failed.");
+      await client.query("UPDATE media_assets SET processing_status='deleted',updated_at=now() WHERE id=$1 AND tenant_id=$2", [params.assetId, params.tenantId]);
+      return asset.business_id;
+    });
+
+    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId, action: "MEDIA_DELETED", resourceType: "media_asset", resourceId: params.assetId, request });
     reply.send({ ok: true });
   });
 
@@ -239,29 +251,32 @@ export async function mediaRoutes(app: FastifyInstance) {
     await requireTenant(request, params.tenantId, ["OWNER", "ADMIN", "STAFF"]);
     requireCsrf(request);
     const input = z.object({ assetId: z.string().uuid(), role: z.string().max(40).default("gallery"), displayOrder: z.number().int().min(0).default(0) }).parse(request.body);
-    const scope = await query<{ business_id: string; collection_business_id: string }>(`
-      SELECT i.business_id,c.business_id AS collection_business_id FROM collection_items i JOIN collections c ON c.id=i.collection_id
-      WHERE i.id=$1 AND i.collection_id=$2 AND i.tenant_id=$3
-    `, [params.itemId, params.collectionId, params.tenantId]);
-    if (!scope.rows[0] || scope.rows[0].business_id !== scope.rows[0].collection_business_id) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
-    await requireBusinessAccess(request, params.tenantId, scope.rows[0].business_id, ["OWNER","ADMIN","STAFF"]);
-    const asset = await query<{ id: string; business_id: string | null; metadata: Record<string, unknown> | null }>(
-      "SELECT id,business_id,metadata FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'",
-      [input.assetId, params.tenantId],
-    );
-    if (!asset.rows[0]) throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
-    if (["tenant_export", "collection_export"].includes(String(asset.rows[0].metadata?.source ?? ""))) {
-      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
-    }
-    if (asset.rows[0].business_id && asset.rows[0].business_id !== scope.rows[0].business_id) {
-      throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
-    }
-    await query(`
-      INSERT INTO collection_item_media(collection_item_id,media_asset_id,tenant_id,role,display_order)
-      VALUES ($1,$2,$3,$4,$5)
-      ON CONFLICT(collection_item_id,media_asset_id) DO UPDATE SET role=EXCLUDED.role,display_order=EXCLUDED.display_order
-    `, [params.itemId, input.assetId, params.tenantId, input.role, input.displayOrder]);
-    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: scope.rows[0].business_id, action: "ITEM_MEDIA_LINKED", resourceType: "collection_item", resourceId: params.itemId, safeDiff: input, request });
+    const businessId = await transaction(async (client) => {
+      const collection = await client.query<{ business_id: string }>(
+        "SELECT business_id FROM collections WHERE id=$1 AND tenant_id=$2 AND status<>'archived' FOR UPDATE",
+        [params.collectionId, params.tenantId],
+      );
+      if (!collection.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
+      await requireBusinessAccess(request, params.tenantId, collection.rows[0].business_id, ["OWNER", "ADMIN", "STAFF"]);
+      const item = await client.query<{ business_id: string }>(
+        "SELECT business_id FROM collection_items WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 AND status<>'deleted' FOR UPDATE",
+        [params.itemId, params.collectionId, params.tenantId],
+      );
+      if (!item.rows[0] || item.rows[0].business_id !== collection.rows[0].business_id) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
+      const asset = await client.query<{ business_id: string | null; metadata: Record<string, unknown> | null }>(
+        "SELECT business_id,metadata FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready' FOR UPDATE",
+        [input.assetId, params.tenantId],
+      );
+      if (!asset.rows[0] || ["tenant_export", "collection_export"].includes(String(asset.rows[0].metadata?.source ?? "")) || (asset.rows[0].business_id && asset.rows[0].business_id !== item.rows[0].business_id)) throw new ApiError(404, "MEDIA_NOT_FOUND", "Media asset not found.");
+      await client.query(`
+        INSERT INTO collection_item_media(collection_item_id,media_asset_id,tenant_id,role,display_order)
+        VALUES ($1,$2,$3,$4,$5)
+        ON CONFLICT(collection_item_id,media_asset_id) DO UPDATE SET role=EXCLUDED.role,display_order=EXCLUDED.display_order
+      `, [params.itemId, input.assetId, params.tenantId, input.role, input.displayOrder]);
+      return item.rows[0].business_id;
+    });
+
+    await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId, action: "ITEM_MEDIA_LINKED", resourceType: "collection_item", resourceId: params.itemId, safeDiff: input, request });
     reply.send({ ok: true });
   });
 }

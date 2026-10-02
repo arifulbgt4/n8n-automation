@@ -299,6 +299,9 @@ export async function collectionRoutes(app: FastifyInstance) {
       if (!archived.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
       await client.query("UPDATE collection_channel_links SET active=false WHERE collection_id=$1 AND tenant_id=$2", [params.collectionId, params.tenantId]);
       await client.query("DELETE FROM agent_collection_links WHERE collection_id=$1 AND tenant_id=$2", [params.collectionId, params.tenantId]);
+      await client.query(`DELETE FROM collection_item_media cim USING collection_items i
+        WHERE cim.collection_item_id=i.id AND cim.tenant_id=$2
+          AND i.collection_id=$1 AND i.tenant_id=$2`, [params.collectionId, params.tenantId]);
     });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: collection.business_id, action: "COLLECTION_DELETED", resourceType: "collection", resourceId: params.collectionId, safeDiff: { mode: "archive" }, request });
     reply.send({ ok: true, deleted: true, mode: "archive" });
@@ -476,8 +479,14 @@ export async function collectionRoutes(app: FastifyInstance) {
     requireCsrf(request);
     const collection = await loadCollection(params.tenantId, params.collectionId);
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
-    const result = await query("UPDATE collection_items SET status='deleted',updated_at=now() WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 RETURNING id", [params.itemId, params.collectionId, params.tenantId]);
-    if (!result.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
+    await transaction(async (client) => {
+      // Catalog media writers lock the collection before the item as well.
+      const currentCollection = await client.query("SELECT id FROM collections WHERE id=$1 AND tenant_id=$2 AND status<>'archived' FOR UPDATE", [params.collectionId, params.tenantId]);
+      if (!currentCollection.rows[0]) throw new ApiError(404, "COLLECTION_NOT_FOUND", "Collection not found.");
+      const result = await client.query("UPDATE collection_items SET status='deleted',updated_at=now() WHERE id=$1 AND collection_id=$2 AND tenant_id=$3 RETURNING id", [params.itemId, params.collectionId, params.tenantId]);
+      if (!result.rows[0]) throw new ApiError(404, "ITEM_NOT_FOUND", "Item not found.");
+      await client.query("DELETE FROM collection_item_media WHERE collection_item_id=$1 AND tenant_id=$2", [params.itemId, params.tenantId]);
+    });
     await audit({ actorUserId: principal.userId, tenantId: params.tenantId, businessId: collection.business_id, action: "COLLECTION_ITEM_DELETED", resourceType: "collection_item", resourceId: params.itemId, request });
     reply.send({ ok: true });
   });
