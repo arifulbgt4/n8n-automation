@@ -100,8 +100,28 @@ export async function actionRoutes(app: FastifyInstance) {
     const q = z.object({ businessId: z.string().uuid().optional(), channelId: z.string().uuid().optional(), status: z.string().max(60).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).default(0) }).parse(request.query);
     const result = await query(`
       SELECT o.*,ca.platform,ca.name AS channel_name,
-        COALESCE((SELECT jsonb_agg(oi ORDER BY oi.created_at) FROM order_items oi WHERE oi.order_id=o.id),'[]'::jsonb) AS items
-      FROM orders o LEFT JOIN channel_accounts ca ON ca.id=o.channel_account_id
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'id',oi.id,'collection_item_id',oi.collection_item_id,'title_snapshot',oi.title_snapshot,
+            'sku_snapshot',oi.sku_snapshot,'quantity',oi.quantity,'unit_price',oi.unit_price,'total',oi.total,
+            'attributes_snapshot',oi.attributes_snapshot,'collection_id',c.id,'collection_name',c.name,
+            'collection_purpose',c.purpose,
+            'media',COALESCE((
+              SELECT jsonb_agg(jsonb_build_object('id',m.id,'url',m.public_url,'mimeType',m.mime_type,'role',cim.role,'order',cim.display_order,'originalName',m.original_name)
+                ORDER BY (cim.role='primary') DESC,cim.display_order,cim.created_at)
+              FROM collection_item_media cim JOIN media_assets m ON m.id=cim.media_asset_id
+              WHERE cim.collection_item_id=oi.collection_item_id AND cim.tenant_id=o.tenant_id AND m.tenant_id=o.tenant_id
+                AND m.processing_status='ready' AND m.mime_type LIKE 'image/%'
+                AND COALESCE(m.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+                AND (m.business_id IS NULL OR m.business_id=o.business_id)
+            ),'[]'::jsonb)
+          ) ORDER BY oi.created_at)
+          FROM order_items oi
+          LEFT JOIN collection_items ci ON ci.id=oi.collection_item_id AND ci.tenant_id=o.tenant_id AND ci.business_id=o.business_id
+          LEFT JOIN collections c ON c.id=ci.collection_id AND c.tenant_id=o.tenant_id AND c.business_id=o.business_id
+          WHERE oi.order_id=o.id
+        ),'[]'::jsonb) AS items
+      FROM orders o LEFT JOIN channel_accounts ca ON ca.id=o.channel_account_id AND ca.tenant_id=o.tenant_id AND ca.business_id=o.business_id
       WHERE o.tenant_id=$1 AND ($2::uuid IS NULL OR o.business_id=$2) AND ($3::uuid IS NULL OR o.channel_account_id=$3) AND ($4::text IS NULL OR o.status=$4)
         AND ($5::uuid[] IS NULL OR o.business_id=ANY($5::uuid[]))
       ORDER BY o.created_at DESC LIMIT $6 OFFSET $7
@@ -176,7 +196,26 @@ export async function actionRoutes(app: FastifyInstance) {
     const context = await requireTenant(request, tenantId);
     const scope = context.membershipRole === "OWNER" ? null : context.businessScope ?? null;
     const q = z.object({ businessId: z.string().uuid().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(request.query);
-    const result = await query(`SELECT bk.*,ca.platform,ca.name AS channel_name FROM bookings bk LEFT JOIN channel_accounts ca ON ca.id=bk.channel_account_id WHERE bk.tenant_id=$1 AND ($2::uuid IS NULL OR bk.business_id=$2) AND ($3::timestamptz IS NULL OR bk.starts_at >= $3) AND ($4::timestamptz IS NULL OR bk.starts_at <= $4) AND ($5::uuid[] IS NULL OR bk.business_id=ANY($5::uuid[])) ORDER BY bk.starts_at DESC LIMIT $6`, [tenantId, q.businessId ?? null, q.from ?? null, q.to ?? null, scope, q.limit]);
+    const result = await query(`
+      SELECT bk.*,ca.platform,ca.name AS channel_name,ci.title AS service_title,ci.data_jsonb AS service_data,
+        c.id AS service_collection_id,c.name AS service_collection_name,c.purpose AS service_collection_purpose,
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object('id',m.id,'url',m.public_url,'mimeType',m.mime_type,'role',cim.role,'order',cim.display_order,'originalName',m.original_name)
+            ORDER BY (cim.role='primary') DESC,cim.display_order,cim.created_at)
+          FROM collection_item_media cim JOIN media_assets m ON m.id=cim.media_asset_id
+          WHERE cim.collection_item_id=bk.collection_item_id AND cim.tenant_id=bk.tenant_id AND m.tenant_id=bk.tenant_id
+            AND m.processing_status='ready' AND m.mime_type LIKE 'image/%'
+            AND COALESCE(m.metadata->>'source','') NOT IN ('tenant_export','collection_export')
+            AND (m.business_id IS NULL OR m.business_id=bk.business_id)
+        ),'[]'::jsonb) AS service_media
+      FROM bookings bk
+      LEFT JOIN channel_accounts ca ON ca.id=bk.channel_account_id AND ca.tenant_id=bk.tenant_id AND ca.business_id=bk.business_id
+      LEFT JOIN collection_items ci ON ci.id=bk.collection_item_id AND ci.tenant_id=bk.tenant_id AND ci.business_id=bk.business_id
+      LEFT JOIN collections c ON c.id=ci.collection_id AND c.tenant_id=bk.tenant_id AND c.business_id=bk.business_id
+      WHERE bk.tenant_id=$1 AND ($2::uuid IS NULL OR bk.business_id=$2) AND ($3::timestamptz IS NULL OR bk.starts_at >= $3)
+        AND ($4::timestamptz IS NULL OR bk.starts_at <= $4) AND ($5::uuid[] IS NULL OR bk.business_id=ANY($5::uuid[]))
+      ORDER BY bk.starts_at DESC LIMIT $6
+    `, [tenantId, q.businessId ?? null, q.from ?? null, q.to ?? null, scope, q.limit]);
     reply.send({ bookings: result.rows });
   });
 

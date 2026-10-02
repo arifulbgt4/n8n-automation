@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { ChangeEvent, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_URL, api, qs } from "../../lib/api";
 import { useConfirmAction } from "../../components/ConfirmProvider";
 
@@ -43,6 +43,8 @@ type CatalogsPageProps = {
   embedded?: boolean;
   tenantId?: string;
   businessId?: string;
+  focusCollectionId?: string;
+  focusItemId?: string | null;
   onChanged?: () => void;
 };
 
@@ -140,7 +142,7 @@ function CollectionPreview({ collection, tenantId }: { collection: Collection; t
   </div>;
 }
 
-export default function CatalogsPage({ embedded = false, tenantId: suppliedTenantId, businessId: suppliedBusinessId, onChanged }: CatalogsPageProps) {
+export default function CatalogsPage({ embedded = false, tenantId: suppliedTenantId, businessId: suppliedBusinessId, focusCollectionId, focusItemId, onChanged }: CatalogsPageProps) {
   const confirmAction = useConfirmAction();
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState("");
@@ -172,6 +174,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const deepLinkHandled = useRef("");
 
   useEffect(() => {
     if (suppliedTenantId !== undefined) return;
@@ -230,12 +233,12 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
     void refreshScope();
   }, [loadCollections]);
 
-  const loadItems = useCallback(async (collection: Collection, query = queryText) => {
-    const data = await api<{ items?: Item[] }>(`/v1/tenants/${tenantId}/collections/${collection.id}/items${qs({ q: query || undefined })}`);
+  const loadItems = useCallback(async (collection: Collection, query = queryText, itemId?: string) => {
+    const data = await api<{ items?: Item[] }>(`/v1/tenants/${tenantId}/collections/${collection.id}/items${qs({ q: query || undefined, itemId })}`);
     setItems(data.items ?? []);
   }, [tenantId, queryText]);
 
-  async function openCollection(collection: Collection) {
+  const openCollection = useCallback(async (collection: Collection, itemId?: string) => {
     setBusy(true);
     setError("");
     try {
@@ -258,13 +261,41 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
       setLinkedChannelIds((detail.channels ?? []).map((channel) => channel.id));
       setChannels(channelData.channels ?? []);
       setAssets(media.assets ?? []);
-      await loadItems(full, "");
+      if(itemId)setQueryText("");
+      await loadItems(full, "", itemId);
     } catch (reason) {
       setError(errorMessage(reason, "Unable to open this collection."));
     } finally {
       setBusy(false);
     }
-  }
+  }, [tenantId, loadItems]);
+
+  useEffect(() => {
+    if (!focusCollectionId || !tenantId || !businessId) return;
+    const focusKey = `${tenantId}:${businessId}:${focusCollectionId}:${focusItemId ?? ""}`;
+    if (deepLinkHandled.current === focusKey) return;
+    const collection = collections.find((row) => row.id === focusCollectionId);
+    if (!collection) return;
+    deepLinkHandled.current = focusKey;
+    const focusFrame = window.requestAnimationFrame(() => {
+      void openCollection(collection, focusItemId ?? undefined);
+    });
+    return () => window.cancelAnimationFrame(focusFrame);
+  }, [businessId, collections, focusCollectionId, focusItemId, openCollection, tenantId]);
+
+  useEffect(() => {
+    if (!focusItemId || selected?.id !== focusCollectionId || !items.some((item) => item.id === focusItemId)) return;
+    const focusFrame = window.requestAnimationFrame(() => {
+      const targetId = window.matchMedia("(max-width: 700px)").matches
+        ? `catalog-item-card-${focusItemId}`
+        : `catalog-item-${focusItemId}`;
+      document.getElementById(targetId)?.scrollIntoView({
+        block: "center",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+    return () => window.cancelAnimationFrame(focusFrame);
+  }, [focusCollectionId, focusItemId, items, selected?.id]);
 
   async function createCollection(event: FormEvent) {
     event.preventDefault();
@@ -630,11 +661,12 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
       {!collections.length && <div style={{ padding: 30, textAlign: "center", color: "#667085" }}>No collections yet. Create one to add products, services or custom business data.</div>}
     </section>}
     {selected && <>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 12 }}><div><button onClick={() => setSelected(null)} style={{ ...button, background: "transparent", color: "#4f46e5", paddingLeft: 0 }}>← All collections</button><h2 style={{ margin: "2px 0 0" }}>{selected.name}</h2><div style={{ fontSize: 13, color: "#667085", marginTop: 4 }}>{selected.purpose} · schema v{selected.schema_version} · {fields.length} fields</div></div><div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}><button disabled={busy} onClick={() => setFieldOpen(true)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>+ Field</button><button disabled={busy} onClick={() => setImportOpen(true)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Import</button><button disabled={busy} onClick={() => void exportItems()} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Export</button><button disabled={busy} onClick={startAdd} style={{ ...button, background: "#4f46e5", color: "#fff" }}>+ Add item</button></div></div>
+      <div className="catalog-detail-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 12 }}><div><button onClick={() => setSelected(null)} style={{ ...button, background: "transparent", color: "#4f46e5", paddingLeft: 0 }}>← All collections</button><h2 style={{ margin: "2px 0 0" }}>{selected.name}</h2><div style={{ fontSize: 13, color: "#667085", marginTop: 4 }}>{selected.purpose} · schema v{selected.schema_version} · {fields.length} fields</div></div><div className="catalog-detail-actions" style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}><button disabled={busy} onClick={() => setFieldOpen(true)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>+ Field</button><button disabled={busy} onClick={() => setImportOpen(true)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Import</button><button disabled={busy} onClick={() => void exportItems()} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Export</button><button disabled={busy} onClick={startAdd} style={{ ...button, background: "#4f46e5", color: "#fff" }}>+ Add item</button></div></div>
+      {focusItemId&&selected.id===focusCollectionId&&<div className="catalog-source-notice" role="status">{busy?"Opening the linked catalog item…":items.some((item)=>item.id===focusItemId)?"Showing the exact catalog item linked to this order or booking.":"This source item is no longer available in the catalog; the order or booking snapshot is preserved."}</div>}
       <section style={{ ...card, marginBottom: 14 }}><h3 style={{ marginTop: 0 }}>Schema</h3><div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>{fields.map((field) => <span key={field.id} style={{ display: "inline-flex", gap: 8, alignItems: "center", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 999, padding: "7px 10px", fontSize: 12 }}><span><b>{field.label}</b> · {field.type}{field.required ? " · required" : ""}</span><button disabled={busy} onClick={() => startEditField(field)} style={{ border: 0, background: "transparent", color: "#4338ca", fontWeight: 700, cursor: "pointer" }}>Edit</button></span>)}</div></section>
       <section style={{ ...card, marginBottom: 14 }}><h3 style={{ marginTop: 0 }}>Channel data links</h3><p style={{ marginTop: 0, color: "#667085", fontSize: 13 }}>Only selected business channels can use this collection in automation.</p><div className="catalog-channel-links">{channels.map((channel) => <label key={channel.id} className="catalog-channel-link"><input type="checkbox" disabled={busy} checked={linkedChannelIds.includes(channel.id)} onChange={(event) => void updateChannelLinks(channel.id, event.target.checked)} /><span>{channel.name} · {channel.platform}</span></label>)}{!channels.length && <span style={{ color: "#667085", fontSize: 13 }}>No channels connected to this business.</span>}</div></section>
       <section style={card}>
-        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <div className="catalog-item-search" style={{ display: "flex", gap: 10, marginBottom: 14 }}>
           <input
             style={{ ...control, maxWidth: 440 }}
             placeholder="Search items…"
@@ -644,8 +676,8 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
           />
           <button onClick={() => void loadItems(selected)} style={{ ...button, background: "#eef2ff", color: "#4338ca" }}>Search</button>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="catalog-items-table-wrap" style={{ overflowX: "auto" }}>
+          <table className="catalog-items-table" style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid #e5e7eb" }}>
                 <th style={{ textAlign: "left", padding: 10, width: 112 }}>Image</th>
@@ -656,7 +688,7 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => <tr key={item.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
+              {items.map((item) => <tr id={`catalog-item-${item.id}`} className={item.id===focusItemId?"catalog-item-highlight":undefined} key={item.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
                 <td style={{ padding: "8px 10px", width: 112 }}>
                   <CatalogItemMedia item={item} tenantId={tenantId} />
                 </td>
@@ -675,6 +707,12 @@ export default function CatalogsPage({ embedded = false, tenantId: suppliedTenan
               </tr>)}
             </tbody>
           </table>
+        </div>
+        <div className="catalog-item-card-list">
+          {items.map((item) => <article id={`catalog-item-card-${item.id}`} className={`catalog-item-card${item.id===focusItemId?" highlighted":""}`} key={item.id}>
+            <CatalogItemMedia item={item} tenantId={tenantId} />
+            <div className="catalog-item-card-main"><div className="catalog-item-card-title"><strong>{item.title||"Untitled"}</strong><span className="badge">{item.status}</span></div><small>Updated {new Date(item.updated_at).toLocaleString()}</small><dl>{summaryFields.map((field)=><div key={field.id}><dt>{field.label}</dt><dd>{formatItemValue(item.data_jsonb[field.key])}</dd></div>)}</dl><div className="catalog-item-card-actions"><button onClick={() => startEdit(item)} style={{ ...button, padding: "7px 10px", background: "#eef2ff", color: "#4338ca" }}>Edit</button><button onClick={() => void removeItem(item)} style={{ ...button, padding: "7px 10px", background: "#fff1f2", color: "#be123c" }}>Delete</button></div></div>
+          </article>)}
         </div>
         {!items.length && <div style={{ padding: 40, textAlign: "center", color: "#667085" }}>No items yet. Click <b>+ Add item</b> and fill the normal form fields.</div>}
       </section>

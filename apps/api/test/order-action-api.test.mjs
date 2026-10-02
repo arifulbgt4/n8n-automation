@@ -57,6 +57,8 @@ test("Facebook order action is saved in Business Actions with scoped snapshots a
     const turnId = (await query("INSERT INTO conversation_turns(tenant_id,conversation_id,speaker) VALUES($1,$2,'CONTACT') RETURNING id", [tenantId, conversationId])).rows[0].id;
     const collectionId = (await query("INSERT INTO collections(tenant_id,business_id,name,key,purpose) VALUES($1,$2,'Sarees','sarees','products') RETURNING id", [tenantId, businessId])).rows[0].id;
     const itemId = (await query("INSERT INTO collection_items(tenant_id,business_id,collection_id,title,data_jsonb) VALUES($1,$2,$3,'Tangail suti saree',$4::jsonb) RETURNING id", [tenantId, businessId, collectionId, JSON.stringify({ price: 899, stock_qty: 10 })])).rows[0].id;
+    const imageId = (await query("INSERT INTO media_assets(tenant_id,business_id,storage_file_id,original_name,mime_type,kind,size_bytes,public_url) VALUES($1,$2,$3,'tangail-saree.png','image/png','image',1024,'https://media.example.test/tangail-saree.png') RETURNING id", [tenantId,businessId,`order-image-${suffix}`])).rows[0].id;
+    await query("INSERT INTO collection_item_media(collection_item_id,media_asset_id,tenant_id,role,display_order) VALUES($1,$2,$3,'primary',0)", [itemId,imageId,tenantId]);
     await query("INSERT INTO tenant_memberships(tenant_id,user_id,role) VALUES($1,$2,'OWNER')", [tenantId, userId]);
     const sessionToken = randomUUID();
     const csrf = randomUUID();
@@ -114,8 +116,26 @@ test("Facebook order action is saved in Business Actions with scoped snapshots a
     assert.equal(Number(saved.items[0].quantity), 2);
     assert.equal(Number(saved.items[0].unit_price), 899);
     assert.deepEqual(saved.items[0].attributes_snapshot, { color: "Blue" });
+    assert.equal(saved.items[0].collection_id, collectionId);
+    assert.equal(saved.items[0].collection_name, "Sarees");
+    assert.equal(saved.items[0].media[0].id, imageId);
+    assert.equal(saved.items[0].media[0].mimeType, "image/png");
     const wrongBusiness = await app.inject({ method: "GET", url: `/v1/tenants/${tenantId}/orders?businessId=${otherBusinessId}`, headers: panelHeaders });
     assert.equal(wrongBusiness.json().orders.length, 0);
+    await query("INSERT INTO collection_items(tenant_id,business_id,collection_id,title,data_jsonb) VALUES($1,$2,$3,'Second catalog item','{}'::jsonb)", [tenantId,businessId,collectionId]);
+    const sourceItem = await app.inject({ method: "GET", url: `/v1/tenants/${tenantId}/collections/${collectionId}/items?itemId=${itemId}`, headers: panelHeaders });
+    assert.equal(sourceItem.statusCode, 200, sourceItem.body);
+    assert.equal(sourceItem.json().total, 1);
+    assert.deepEqual(sourceItem.json().items.map(row => row.id), [itemId]);
+    const bookingId = (await query(`INSERT INTO bookings(tenant_id,business_id,channel_account_id,conversation_id,contact_id,collection_item_id,status,starts_at,timezone,customer_snapshot)
+      VALUES($1,$2,$3,$4,$5,$6,'requested',now()+interval '1 day','Asia/Dhaka',$7::jsonb) RETURNING id`, [tenantId,businessId,channelId,conversationId,contactId,itemId,JSON.stringify({name:"Test buyer"})])).rows[0].id;
+    const bookingList = await app.inject({ method: "GET", url: `/v1/tenants/${tenantId}/bookings?businessId=${businessId}`, headers: panelHeaders });
+    assert.equal(bookingList.statusCode, 200, bookingList.body);
+    const savedBooking = bookingList.json().bookings.find(row => row.id === bookingId);
+    assert.equal(savedBooking.service_title, "Tangail suti saree");
+    assert.equal(savedBooking.service_collection_id, collectionId);
+    assert.equal(savedBooking.service_collection_name, "Sarees");
+    assert.equal(savedBooking.service_media[0].id, imageId);
     const events = await query("SELECT id FROM outbox_events WHERE tenant_id=$1 AND event_type='ORDER_CREATED' AND resource_id=$2", [tenantId, order.id]);
     assert.equal(events.rows.length, 1);
 

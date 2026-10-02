@@ -396,6 +396,7 @@ export async function collectionRoutes(app: FastifyInstance) {
     await requireBusinessAccess(request, params.tenantId, collection.business_id);
     const q = z.object({
       q:z.string().max(200).optional(),
+      itemId:z.string().uuid().optional(),
       filterKey:z.string().regex(/^[a-z][a-z0-9_]{0,62}$/).optional(),
       filterValue:z.string().max(500).optional(),
       sortKey:z.string().regex(/^[a-z][a-z0-9_]{0,62}$/).optional(),
@@ -423,13 +424,14 @@ export async function collectionRoutes(app: FastifyInstance) {
       WHERE i.tenant_id=$1 AND i.collection_id=$2 AND i.status<>'deleted'
         AND ($3::text IS NULL OR i.title ILIKE '%'||$3||'%' OR i.data_jsonb::text ILIKE '%'||$3||'%')
         AND ($4::text IS NULL OR i.data_jsonb->>$4=$5)
+        AND ($10::uuid IS NULL OR i.id=$10)
       ORDER BY
         CASE WHEN $6::text IS NOT NULL AND $7='asc' THEN i.data_jsonb->>$6 END ASC NULLS LAST,
         CASE WHEN $6::text IS NOT NULL AND $7='desc' THEN i.data_jsonb->>$6 END DESC NULLS LAST,
         i.updated_at DESC
       LIMIT $8 OFFSET $9
-    `, [params.tenantId,params.collectionId,q.q??null,q.filterKey??null,q.filterValue??null,q.sortKey??null,q.sortDir,q.limit,q.offset]);
-    const count = await query<{ count: string }>("SELECT count(*) FROM collection_items WHERE tenant_id=$1 AND collection_id=$2 AND status<>'deleted'", [params.tenantId, params.collectionId]);
+    `, [params.tenantId,params.collectionId,q.q??null,q.filterKey??null,q.filterValue??null,q.sortKey??null,q.sortDir,q.limit,q.offset,q.itemId??null]);
+    const count = await query<{ count: string }>("SELECT count(*) FROM collection_items WHERE tenant_id=$1 AND collection_id=$2 AND status<>'deleted' AND ($3::uuid IS NULL OR id=$3)", [params.tenantId, params.collectionId, q.itemId ?? null]);
     reply.send({ items: result.rows, total: Number(count.rows[0]?.count ?? 0), limit: q.limit, offset: q.offset });
   });
 
