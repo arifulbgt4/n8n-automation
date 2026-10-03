@@ -29,6 +29,8 @@ credits = totalTokens / tokensPerCredit
 
 Usage is accumulated per tenant from 00:00 UTC to the next 00:00 UTC. The API enforces the daily credit allowance before AI work and returns `AI_DAILY_CREDIT_LIMIT_REACHED` when it is exhausted. The daily allowance covers chat, image/audio work, embeddings, prompt synthesis/training, and other platform routes that record AI usage.
 
+Training synthesis jobs that reach this limit stay queued and are delayed until shortly after the next UTC reset. They do not consume retry attempts while waiting, and the allowance is never bypassed.
+
 The public customer allowance response includes the plan, period start, UTC reset time, credit limit, credits used, and remaining credits. It does not return token counts or token ceilings.
 
 ## Plans and defaults

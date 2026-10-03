@@ -441,6 +441,9 @@ Append-oriented units:
 ### `usage_rollups`
 
 Daily/hourly aggregates for dashboards and plan enforcement.
+Business- and channel-level dimensions are nullable so platform-wide events can
+be represented. The unique scope index treats matching `NULL` dimensions as the
+same scope, keeping repeated rollups idempotent.
 
 ### `audit_logs`
 

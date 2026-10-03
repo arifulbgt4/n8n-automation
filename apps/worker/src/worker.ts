@@ -1,4 +1,4 @@
-import { UnrecoverableError, Worker, type Job } from "bullmq";
+import { DelayedError, UnrecoverableError, Worker, type Job } from "bullmq";
 import {
   assertCustomerMediaCapacity,
   bullmqJobId,
@@ -20,6 +20,7 @@ import {
 } from "@n8n-automation/core";
 import { capturePanelTrainingReply, humanReplyOutcomeUnknown, ProviderOutcomeUnknownError } from "./panel-training-capture.js";
 import { deleteRetainedMediaAsset } from "./media-retention.js";
+import { aiAllowanceRetryAt } from "./ai-credit-deferral.js";
 
 const config = env();
 const workers: Worker[] = [];
@@ -761,6 +762,13 @@ async function trainingJob(job: Job<JobEnvelope<any>>) {
     }
   } catch (error) {
     const message=(error instanceof Error ? error.message : "training failed").slice(0,500);
+    const retryAt=aiAllowanceRetryAt(error);
+    if(retryAt!==null){
+      await query("UPDATE training_jobs SET status='queued',error=$2,started_at=NULL WHERE id=$1",[trainingJobId,`${message} Retry scheduled after the UTC allowance reset.`]);
+      await job.moveToDelayed(retryAt,job.token!);
+      log("training_job_deferred_daily_ai_allowance",{trainingJobId,tenantId:job.data.tenantId,retryAt:new Date(retryAt).toISOString()});
+      throw new DelayedError();
+    }
     if (autoSession) {
       const status=Number((error as any)?.status??0);
       const permanent=[400,403,404,409,422].includes(status) || message==="The generated training prompt did not pass validation";
