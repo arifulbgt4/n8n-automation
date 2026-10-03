@@ -14,6 +14,7 @@ import { analyzeImages, chat, embedding, transcribeAudio, type BinaryAiInput } f
 import { ApiError, requestId, safeSecretEqual } from "../lib.js";
 import { findConversationItems, isCatalogMediaRequest, isSpecificCatalogMediaRequest } from "../catalog-lookup.js";
 import { buildGroundedCatalogResponse } from "../catalog-response.js";
+import { parseAssistantTurn, protectAiOutboundMessages } from "../assistant-turn-output.js";
 import { orderActionContract } from "../action-contracts.js";
 import { assertMonthlyUsageLimit, maxImagesPerResponse } from "../limits.js";
 import { assertDailyAiAllowance, recordPlatformAiUsage, resolvePlatformModels, type PlatformAiModel } from "../platform-ai.js";
@@ -218,6 +219,7 @@ export async function internalRoutes(app: FastifyInstance) {
       multimodal.transcript ? `\nAudio transcript: ${multimodal.transcript}` : "",
       multimodal.imageAnalysis ? `\nImage observations: ${multimodal.imageAnalysis}` : "",
       "\nOnly Relevant current items[].media[].assetId values are approved for catalog media replies. When the customer explicitly asks for a product photo or image, include appropriate approved media messages; never invent, copy from hidden fields, or guess an asset ID. The server may add other approved catalog images up to the configured limit.",
+      "\nThe outer response JSON is an internal protocol. Keep messages[].text customer-facing; never put or repeat the outer object, action names, or action arguments inside message text.",
       "\nRespond as strict JSON with keys: messages (array of {type:'text',text:string} or {type:'media',assetId:string,caption?:string}), actions (array of {tool:string,arguments:object}), handoff (boolean), handoffReason (string|null). Keep responses concise and grounded.",
     ].join("\n");
     const history = context.recent.filter((message: any) => message.text_content).map((message: any) => ({
@@ -237,22 +239,16 @@ export async function internalRoutes(app: FastifyInstance) {
       }
     }
     if(!result||!model) throw lastModelError instanceof Error ? lastModelError : new ApiError(502,"AI_PROVIDER_UNAVAILABLE","No configured platform AI fallback model could produce a response.");
-    let parsed: any;
-    try {
-      const clean = result.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-      parsed = JSON.parse(clean);
-    } catch {
-      parsed = { messages: [{ type: "text", text: result.text.trim() || "I’m unable to answer that right now." }], actions: [], handoff: false, handoffReason: null };
-    }
-    const messages = buildGroundedCatalogResponse({
-      rawMessages:Array.isArray(parsed.messages) ? parsed.messages : [],
+    const parsed = parseAssistantTurn(result.text, originalTurnText);
+    const messages = protectAiOutboundMessages(buildGroundedCatalogResponse({
+      rawMessages:parsed.messages,
       items,
       explicitMediaRequest:isCatalogMediaRequest(originalTurnText),
       specificMediaRequest:isSpecificCatalogMediaRequest(originalTurnText),
       imageLimit,
       totalMessageLimit:20,
-    });
-    const actions = Array.isArray(parsed.actions) ? parsed.actions.slice(0, 5) : [];
+    }), "AI", originalTurnText);
+    const actions = parsed.actions;
     if (!messages.length && !parsed.handoff) messages.push({ type: "text", text: "I’m unable to answer that right now. A team member can help if needed." });
     await recordPlatformAiUsage({tenantId:row.tenant_id,businessId:row.business_id,channelAccountId:row.channel_account_id,conversationId:row.conversation_id,eventType:"ai_call",unit:"call",taskKey:"DEFAULT_CHAT",model,usage:result.usage,correlationId:requestId(request),idempotencyKey:`ai:${input.turnId}:${row.active_prompt_version_id}`});
     const stillEligible = await query<{mode:string;status:string;state_version:string}>(
@@ -276,7 +272,7 @@ export async function internalRoutes(app: FastifyInstance) {
       promptVersionId: row.active_prompt_version_id,
       messages,
       actions,
-      handoff: Boolean(parsed.handoff),
+      handoff: parsed.handoff,
       handoffReason: parsed.handoffReason ?? null,
       usage: result.usage,
     });
@@ -370,6 +366,7 @@ export async function internalRoutes(app: FastifyInstance) {
       senderType: z.enum(["AI", "HUMAN", "SYSTEM"]).default("AI"),
       logicalResponseId: z.string().min(1).max(200).optional(),
     }).parse(request.body);
+    const outboundMessages = protectAiOutboundMessages(input.messages, input.senderType);
     const cv = await query<any>("SELECT mode,state_version,business_id FROM conversations WHERE id=$1 AND tenant_id=$2 AND channel_account_id=$3", [input.conversationId, input.tenantId, input.channelAccountId]);
     if (!cv.rows[0]) throw new ApiError(404, "CONVERSATION_NOT_FOUND", "Conversation not found.");
     if (cv.rows[0].business_id !== input.businessId) throw new ApiError(400, "BUSINESS_SCOPE_INVALID", "Conversation does not belong to the selected business.");
@@ -381,7 +378,7 @@ export async function internalRoutes(app: FastifyInstance) {
     if (input.stateVersion && Number(cv.rows[0].state_version) !== input.stateVersion) throw new ApiError(409, "CONVERSATION_VERSION_CHANGED", "Conversation state changed while the response was being generated.");
     const logicalResponseId = input.logicalResponseId ?? randomToken(18);
     let i = 0;
-    for (const message of input.messages) {
+    for (const message of outboundMessages) {
       if (message.type === "media") {
         const asset = await query<{ business_id: string | null; metadata: Record<string, unknown> | null }>("SELECT business_id,metadata FROM media_assets WHERE id=$1 AND tenant_id=$2 AND processing_status='ready'", [message.assetId, input.tenantId]);
         if (!asset.rows[0] || ["tenant_export", "collection_export"].includes(String(asset.rows[0].metadata?.source ?? "")) || (asset.rows[0].business_id && asset.rows[0].business_id !== input.businessId)) {
@@ -401,10 +398,10 @@ export async function internalRoutes(app: FastifyInstance) {
         correlationId: requestId(request),
         idempotencyKey: jobId,
         createdAt: new Date().toISOString(),
-        payload: { logicalResponseId, sequenceIndex, sequenceLength:input.messages.length, priority: input.priority, senderType: input.senderType, message },
+        payload: { logicalResponseId, sequenceIndex, sequenceLength:outboundMessages.length, priority: input.priority, senderType: input.senderType, message },
       }, { priority: priorityMap[input.priority] });
     }
-    reply.code(202).send({ ok: true, logicalResponseId, queued: input.messages.length });
+    reply.code(202).send({ ok: true, logicalResponseId, queued: outboundMessages.length });
   });
 
   app.post("/v1/internal/turns/:turnId/complete", async (request, reply) => {
