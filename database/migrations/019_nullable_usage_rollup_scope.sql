@@ -1,6 +1,6 @@
 -- Usage events may be platform-wide or business-wide and therefore have no
--- channel_account_id. Keep those dimensions nullable in rollups and treat
--- NULL scope values as equal for idempotent upserts.
+-- channel_account_id. Replace the composite primary key with null-safe unique
+-- scope semantics; migration 020 removes the PK-generated NOT NULL flags.
 ALTER TABLE usage_rollups DROP CONSTRAINT IF EXISTS usage_rollups_pkey;
 
 CREATE UNIQUE INDEX IF NOT EXISTS usage_rollups_scope_bucket_unique
