@@ -152,6 +152,7 @@ Unified inbox features:
 - conversation list with last message/unread state.
 - message timeline with text/media.
 - distinguish customer, AI, human staff, system messages.
+- show customer names instead of provider IDs; Facebook names are fetched asynchronously, and the name opens a Facebook profile link in a new tab.
 - delivery/read/failure status where available.
 - Switch to HUMAN / Resume AI.
 - assign staff.
@@ -161,6 +162,7 @@ Unified inbox features:
 - safe retry of eligible failed outbound messages.
 
 Human takeover prevents concurrent AI reply races through locking/mode checks.
+If Meta does not return a Messenger profile name or cannot resolve the page-scoped ID to a public profile, the inbox uses a channel-specific customer label and the Facebook profile link may not resolve.
 
 ## 9. Business actions
 

@@ -233,6 +233,7 @@ Use dedicated tables when the feature becomes first-class. Avoid forcing every b
 ### `contacts`
 
 A platform/customer identity resolved within a tenant/business/channel context. Do not assume the same human can always be merged across Facebook, Instagram, and WhatsApp.
+`display_name` may be populated from the WhatsApp webhook contact profile or from an asynchronous Facebook Messenger user-profile lookup. Keep provider IDs as internal identifiers rather than conversation labels.
 
 ### `conversations`
 

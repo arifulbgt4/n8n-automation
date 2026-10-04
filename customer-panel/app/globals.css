@@ -193,10 +193,19 @@ td,th{overflow-wrap:anywhere}
 .inbox-filter-summary{display:flex;align-items:baseline;gap:6px;margin-left:auto;padding:0 2px 9px;color:var(--muted);font-size:12px}
 .inbox-filter-summary strong{color:var(--text);font-size:17px}
 .inbox-list{min-height:100px}
-.inbox-list>button{min-width:0}
-.inbox-list>button:focus-visible,.inbox-pagination button:focus-visible,.inbox-filter select:focus-visible{outline:3px solid rgba(103,87,229,.35);outline-offset:2px}
+.inbox-list>.inbox-row{display:flex;gap:12px;align-items:flex-start;min-width:0;padding:13px 15px;border-bottom:1px solid var(--line);background:#fff;color:inherit}
+.inbox-list>.inbox-row:last-of-type{border-bottom:0}
+.inbox-list>.inbox-row:hover{background:#fafbff}
+.inbox-row-content{min-width:0}
+.inbox-row-open{display:block;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left}
+.inbox-row-preview{display:block;margin:4px 0;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inbox-row-open:hover .inbox-row-preview{color:var(--text)}
+.inbox-row-open:focus-visible,.inbox-contact-name:focus-visible,.inbox-pagination button:focus-visible,.inbox-filter select:focus-visible{outline:3px solid rgba(103,87,229,.35);outline-offset:2px;border-radius:4px}
 .inbox-list .row-title{min-width:0}
-.inbox-list .row-title strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.inbox-list .row-title .inbox-contact-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.inbox-contact-name{display:inline-block;max-width:100%;font-size:14px;font-weight:700;color:var(--text);text-decoration:none}
+.facebook-profile-link{color:#5142c9}
+.facebook-profile-link:hover{text-decoration:underline}
 .inbox-list .row-title>span{flex:none}
 .inbox-error{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 12px}
 .inbox-loading{display:flex;align-items:center;justify-content:center;gap:10px;min-height:130px;color:var(--muted);font-size:13px}

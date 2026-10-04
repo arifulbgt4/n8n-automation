@@ -29,7 +29,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     const values = [tenantId, q.status, q.businessId ?? null, q.channelId ?? null, q.mode ?? null, scope, periodHours];
     const [result, count] = await Promise.all([
       query(`
-      SELECT cv.*,ct.external_contact_id,ct.display_name,ca.platform,ca.name AS channel_name,b.name AS business_name,
+      SELECT cv.*,ct.external_contact_id,ct.display_name,ct.phone,ct.metadata AS contact_metadata,ca.platform,ca.name AS channel_name,b.name AS business_name,
         EXISTS(SELECT 1 FROM training_sessions ts WHERE ts.channel_account_id=cv.channel_account_id AND ts.status='open') AS training_active,
         (SELECT m.text_content FROM messages m WHERE m.conversation_id=cv.id AND m.tenant_id=cv.tenant_id ORDER BY m.created_at DESC LIMIT 1) AS last_message_text,
         (SELECT m.sender_type FROM messages m WHERE m.conversation_id=cv.id AND m.tenant_id=cv.tenant_id ORDER BY m.created_at DESC LIMIT 1) AS last_sender_type
@@ -46,7 +46,26 @@ export async function conversationRoutes(app: FastifyInstance) {
         WHERE ${filterSql}
       `, values),
     ]);
-    reply.send({ conversations: result.rows, total: count.rows[0]?.total ?? 0, limit: q.limit, offset: q.offset });
+    const missingFacebookProfiles = result.rows.filter((row: any) => {
+      const lastLookup = Date.parse(String(row.contact_metadata?.facebookProfileLookupAttemptedAt ?? ""));
+      return row.platform === "facebook" && !String(row.display_name ?? "").trim() && /^\d+$/.test(String(row.external_contact_id ?? ""))
+        && (!Number.isFinite(lastLookup) || Date.now() - lastLookup >= 7 * 24 * 60 * 60 * 1000);
+    });
+    await Promise.allSettled(missingFacebookProfiles.map((row: any) => {
+      const jobId = `contact-profile:${row.contact_id}`;
+      return enqueue(QUEUES.contactProfiles, {
+        jobId,
+        jobType: "FETCH_FACEBOOK_CONTACT_PROFILE",
+        tenantId,
+        businessId: row.business_id,
+        channelAccountId: row.channel_account_id,
+        correlationId: requestId(request),
+        idempotencyKey: jobId,
+        createdAt: new Date().toISOString(),
+        payload: { contactId: row.contact_id },
+      }, { attempts: 3, removeOnComplete: true, removeOnFail: true });
+    }));
+    reply.send({ conversations: result.rows, total: count.rows[0]?.total ?? 0, limit: q.limit, offset: q.offset, profileLookupPending: missingFacebookProfiles.length > 0 });
   });
 
   app.get("/v1/tenants/:tenantId/conversations/:conversationId", async (request, reply) => {

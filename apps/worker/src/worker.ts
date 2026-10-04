@@ -416,6 +416,52 @@ async function uploadInboundMedia(job: Job<JobEnvelope<any>>) {
   }
 }
 
+async function fetchFacebookContactProfile(job: Job<JobEnvelope<any>>) {
+  const contactId = String(job.data.payload.contactId ?? "");
+  if (!contactId) throw new Error("Facebook profile job is missing contactId");
+  const result = await query<any>(`
+    SELECT ct.id,ct.external_contact_id,ct.display_name,ct.metadata,ca.graph_api_version,cc.encrypted_value AS access_token
+    FROM contacts ct
+    JOIN channel_accounts ca ON ca.id=ct.channel_account_id AND ca.tenant_id=ct.tenant_id
+    LEFT JOIN channel_credentials cc ON cc.channel_account_id=ca.id AND cc.credential_type='access_token'
+    WHERE ct.id=$1 AND ct.tenant_id=$2 AND ca.platform='facebook' AND ca.active=true
+  `, [contactId, job.data.tenantId]);
+  const contact = result.rows[0];
+  if (!contact || String(contact.display_name ?? "").trim()) return;
+  const previousLookup = Date.parse(String(contact.metadata?.facebookProfileLookupAttemptedAt ?? ""));
+  if (Number.isFinite(previousLookup) && Date.now() - previousLookup < 7 * 24 * 60 * 60 * 1000) return;
+  const markLookupAttempted = () => query(`UPDATE contacts SET metadata=metadata||jsonb_build_object('facebookProfileLookupAttemptedAt',now()),updated_at=now()
+    WHERE id=$1 AND tenant_id=$2`, [contactId, job.data.tenantId]);
+  if (!contact.access_token) {
+    await markLookupAttempted();
+    return;
+  }
+
+  const token = decryptSecret(contact.access_token);
+  const version = contact.graph_api_version || config.META_GRAPH_API_VERSION;
+  const url = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(contact.external_contact_id)}`);
+  url.searchParams.set("fields", "first_name,last_name");
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(8_000),
+  });
+  const body = await response.json().catch(() => ({})) as any;
+  if (!response.ok) {
+    if (response.status === 429 || response.status >= 500) throw new Error(`Facebook profile lookup failed with ${response.status}`);
+    await markLookupAttempted();
+    log("facebook_profile_unavailable", { tenantId: job.data.tenantId, contactId, status: response.status });
+    return;
+  }
+  const name = typeof body.name === "string" ? body.name.trim()
+    : [body.first_name, body.last_name].filter((part) => typeof part === "string" && part.trim()).join(" ").trim();
+  if (!name) {
+    await markLookupAttempted();
+    return;
+  }
+  await query(`UPDATE contacts SET display_name=$3,metadata=metadata||jsonb_build_object('facebookProfileLookupAttemptedAt',now()),updated_at=now()
+    WHERE id=$1 AND tenant_id=$2 AND NULLIF(BTRIM(display_name),'') IS NULL`, [contactId, job.data.tenantId, name]);
+}
+
 async function loadChannelRuntime(channelId: string, conversationId: string, tenantId: string, businessId: string) {
     const channel = await query<any>(`
     SELECT ca.*,cv.mode,cv.status AS conversation_status,cv.state_version,ct.external_contact_id
@@ -1200,6 +1246,7 @@ function makeWorker(name: string, handler: (job: Job<any>) => Promise<any>, conc
 makeWorker(QUEUES.inbound, aggregateConversation);
 makeWorker(QUEUES.outbound, outboundMessage, Math.max(2, config.WORKER_CONCURRENCY));
 makeWorker(QUEUES.media, uploadInboundMedia, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/2)));
+makeWorker(QUEUES.contactProfiles, fetchFacebookContactProfile, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/4)));
 makeWorker(QUEUES.training, trainingJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/4)));
 makeWorker(QUEUES.embeddings, embeddingJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/3)));
 makeWorker(QUEUES.followups, followupJob, Math.max(1, Math.ceil(config.WORKER_CONCURRENCY/2)));

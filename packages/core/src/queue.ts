@@ -6,6 +6,7 @@ export const QUEUES = {
   inbound: "inbound-processing",
   outbound: "outbound-messaging",
   media: "media-processing",
+  contactProfiles: "contact-profile",
   ai: "ai-jobs",
   training: "training-jobs",
   embeddings: "embedding-jobs",

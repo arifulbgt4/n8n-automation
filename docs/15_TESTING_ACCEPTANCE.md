@@ -80,6 +80,9 @@ Must prove:
 - inbox channel and activity-window filters apply on the server and return the
   matching tenant-scoped total; page navigation preserves both filters and uses
   stable ordering when conversations share a last-message timestamp.
+- WhatsApp webhook contact names are preserved; Messenger profile lookup jobs
+  populate missing names without blocking webhook responses, and conversation
+  labels never fall back to displaying a provider ID.
 - AI mode replies normally.
 - staff takeover prevents new AI delivery.
 - pending AI output suppressed after takeover.

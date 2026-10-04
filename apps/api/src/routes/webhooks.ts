@@ -90,12 +90,14 @@ export function normalizeMetaPayload(payload: any): NormalizedInboundMessage[] {
         for (const message of value.messages ?? []) {
           const type = String(message.type ?? "unknown") as NormalizedInboundMessage["type"];
           const mediaNode = message.image ?? message.audio ?? message.video ?? message.document ?? null;
+          const contactProfile = (value.contacts ?? []).find((contact: any) => String(contact.wa_id ?? "") === String(message.from ?? ""))?.profile;
           messages.push({
             platform: "whatsapp",
             channelExternalId,
             eventId: String(message.id ?? `${entry.id}:${message.timestamp}:${message.from}`),
             messageId: String(message.id ?? randomToken(12)),
             senderExternalId: String(message.from ?? ""),
+            senderDisplayName: typeof contactProfile?.name === "string" ? contactProfile.name.trim() || null : null,
             type: ["text","image","audio","video","document","reaction"].includes(type) ? type : "unknown",
             text: message.text?.body ?? message.image?.caption ?? message.video?.caption ?? message.document?.caption ?? null,
             providerMediaId: mediaNode?.id ?? null,
@@ -258,10 +260,10 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
     await client.query("SELECT id FROM channel_accounts WHERE id=$1 FOR UPDATE",[channel.id]);
     const heldTraining = await client.query<{id:string}>(
         "SELECT id FROM training_sessions WHERE channel_account_id=$1 AND status='open' LIMIT 1",[channel.id]);
-    const contact = await client.query<{ id: string }>(`INSERT INTO contacts(tenant_id,business_id,channel_account_id,external_contact_id)
-      VALUES ($1,$2,$3,$4) ON CONFLICT(channel_account_id,external_contact_id)
-      DO UPDATE SET updated_at=contacts.updated_at RETURNING id`,
-      [channel.tenant_id, channel.business_id, channel.id, message.senderExternalId]);
+    const contact = await client.query<{ id: string; display_name: string | null }>(`INSERT INTO contacts(tenant_id,business_id,channel_account_id,external_contact_id,display_name)
+      VALUES ($1,$2,$3,$4,$5) ON CONFLICT(channel_account_id,external_contact_id)
+      DO UPDATE SET display_name=COALESCE(NULLIF(EXCLUDED.display_name,''),contacts.display_name) RETURNING id,display_name`,
+      [channel.tenant_id, channel.business_id, channel.id, message.senderExternalId, message.senderDisplayName ?? null]);
     const duplicate = await client.query("SELECT id,conversation_id FROM messages WHERE channel_account_id=$1 AND platform_message_id=$2", [channel.id, message.messageId]);
     if (duplicate.rows[0]) return { duplicate: true, messageId: duplicate.rows[0].id, conversationId: duplicate.rows[0].conversation_id };
     let conversation = await client.query<any>(`SELECT id,mode,agent_profile_id FROM conversations WHERE channel_account_id=$1 AND contact_id=$2 AND status='open' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [channel.id, contact.rows[0].id]);
@@ -310,8 +312,23 @@ async function ingestOne(message: NormalizedInboundMessage, correlationId: strin
     }
     await client.query(`INSERT INTO usage_events(tenant_id,business_id,channel_account_id,conversation_id,event_type,quantity,unit,correlation_id,idempotency_key)
       VALUES ($1,$2,$3,$4,'inbound_message',1,'message',$5,$6) ON CONFLICT DO NOTHING`, [channel.tenant_id, channel.business_id, channel.id, conversation.rows[0].id, correlationId, `inbound:${message.messageId}`]);
-    return { duplicate: false, messageId: inserted.rows[0].id, conversationId: conversation.rows[0].id, mode: conversation.rows[0].mode, senderType, trainingCaptured, trainingSuppressed };
+    return { duplicate: false, messageId: inserted.rows[0].id, conversationId: conversation.rows[0].id, contactId: contact.rows[0].id, displayName: contact.rows[0].display_name, mode: conversation.rows[0].mode, senderType, trainingCaptured, trainingSuppressed };
   });
+
+  if (!created.duplicate && channel.platform === "facebook" && created.contactId && !created.displayName) {
+    const jobId = `contact-profile:${created.contactId}`;
+    await enqueue(QUEUES.contactProfiles, {
+      jobId,
+      jobType: "FETCH_FACEBOOK_CONTACT_PROFILE",
+      tenantId: channel.tenant_id,
+      businessId: channel.business_id,
+      channelAccountId: channel.id,
+      correlationId,
+      idempotencyKey: jobId,
+      createdAt: new Date().toISOString(),
+      payload: { contactId: created.contactId },
+    }, { attempts: 3, removeOnComplete: true, removeOnFail: true });
+  }
 
   if (!created.duplicate && ["image","audio","video","document"].includes(message.type) && (message.providerMediaId || message.providerMediaUrl)) {
     const mediaJobId = `media:inbound:${created.messageId}`;

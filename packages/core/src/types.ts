@@ -37,6 +37,7 @@ export type NormalizedInboundMessage = {
   eventId: string;
   messageId: string;
   senderExternalId: string;
+  senderDisplayName?: string | null;
   type: "text" | "image" | "audio" | "video" | "document" | "reaction" | "unknown";
   text?: string | null;
   providerMediaId?: string | null;

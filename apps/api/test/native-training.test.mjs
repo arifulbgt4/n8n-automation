@@ -59,6 +59,18 @@ test("Facebook and Instagram normalize each attachment without duplicating messa
   }
 });
 
+test("WhatsApp inbound messages preserve the provider-supplied contact profile name", () => {
+  const [message] = normalizeMetaPayload({object:"whatsapp_business_account",entry:[{id:"waba-1",changes:[{
+    field:"messages",value:{metadata:{phone_number_id:"phone-1"},contacts:[
+      {wa_id:"8801700000000",profile:{name:"Rupni Customer"}},
+    ],messages:[{
+      id:"wamid-profile-1",from:"8801700000000",timestamp:"1700000000",type:"text",text:{body:"Hello"},
+    }]},
+  }]}]});
+  assert.equal(message.senderExternalId,"8801700000000");
+  assert.equal(message.senderDisplayName,"Rupni Customer");
+});
+
 test("Facebook keeps the provider IDs for a single attachment", () => {
   const [message] = normalizeMetaPayload({object:"page",entry:[{id:"page-1",messaging:[{
     sender:{id:"contact-1"},recipient:{id:"page-1"},timestamp:1_700_000_000_000,
