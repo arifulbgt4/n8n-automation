@@ -244,6 +244,10 @@ A platform/customer identity resolved within a tenant/business/channel context. 
 - last message/turn timestamps
 - escalation metadata
 
+Inbox queries are tenant-scoped, order by `last_message_at DESC NULLS LAST, id DESC`,
+and use separate indexes for tenant-wide and channel-filtered pagination. Time
+presets are applied to `last_message_at` in PostgreSQL.
+
 ### `messages`
 
 Each transport message/event:

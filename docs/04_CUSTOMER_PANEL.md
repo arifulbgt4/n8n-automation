@@ -146,7 +146,9 @@ Where enabled, a channel may override selected fields such as visibility/price w
 
 Unified inbox features:
 
-- filter by business/channel/status/mode/assignee.
+- filter by business, channel, status, mode, and assignee.
+- filter conversation activity by any time, the last 24 hours, or the last 7 days.
+- use server-side pagination with a total count while retaining the active filters.
 - conversation list with last message/unread state.
 - message timeline with text/media.
 - distinguish customer, AI, human staff, system messages.

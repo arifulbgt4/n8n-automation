@@ -187,6 +187,31 @@ td,th{overflow-wrap:anywhere}
 .catalog-item-card-list{display:none}
 .catalog-item-search{align-items:center}
 .catalog-detail-header>div:first-child,.catalog-detail-actions{min-width:0}
+.inbox-toolbar{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:0 0 14px;padding:14px 16px;background:#fff;border:1px solid var(--line);border-radius:14px}
+.inbox-filter{display:grid;gap:5px;min-width:min(220px,100%);font-size:11px;font-weight:700;color:#596276}
+.inbox-filter select{width:100%;min-height:40px;padding:8px 34px 8px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--text);font-size:13px}
+.inbox-filter-summary{display:flex;align-items:baseline;gap:6px;margin-left:auto;padding:0 2px 9px;color:var(--muted);font-size:12px}
+.inbox-filter-summary strong{color:var(--text);font-size:17px}
+.inbox-list{min-height:100px}
+.inbox-list>button{min-width:0}
+.inbox-list>button:focus-visible,.inbox-pagination button:focus-visible,.inbox-filter select:focus-visible{outline:3px solid rgba(103,87,229,.35);outline-offset:2px}
+.inbox-list .row-title{min-width:0}
+.inbox-list .row-title strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.inbox-list .row-title>span{flex:none}
+.inbox-error{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 12px}
+.inbox-loading{display:flex;align-items:center;justify-content:center;gap:10px;min-height:130px;color:var(--muted);font-size:13px}
+.inbox-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding:10px 2px;color:var(--muted);font-size:12px}
+.inbox-pagination>div{display:flex;align-items:center;gap:10px}
+.inbox-pagination button{min-width:86px}
+@media(max-width:600px){
+  .inbox-toolbar{align-items:stretch;gap:10px;padding:12px}
+  .inbox-filter{flex:1 1 calc(50% - 6px);min-width:0}
+  .inbox-filter-summary{width:100%;margin:0;padding:2px 0 0}
+  .inbox-pagination{align-items:flex-start;flex-direction:column}
+  .inbox-pagination>div{width:100%;justify-content:space-between;gap:7px}
+  .inbox-pagination button{min-width:0;padding:8px 10px}
+  .inbox-error{align-items:flex-start}
+}
 @media(max-width:1100px){
   .app-shell{grid-template-columns:220px minmax(0,1fr)}
   .topbar{padding-inline:20px}

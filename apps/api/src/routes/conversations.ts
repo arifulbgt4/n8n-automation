@@ -11,12 +11,24 @@ export async function conversationRoutes(app: FastifyInstance) {
     const q = z.object({
       businessId: z.string().uuid().optional(),
       channelId: z.string().uuid().optional(),
+      period: z.enum(["24h", "7d"]).optional(),
       mode: z.enum(["AI", "HUMAN", "PAUSED"]).optional(),
       status: z.enum(["open", "closed", "archived"]).default("open"),
       limit: z.coerce.number().int().min(1).max(100).default(50),
-      offset: z.coerce.number().int().min(0).default(0),
+      offset: z.coerce.number().int().min(0).max(100_000).default(0),
     }).parse(request.query);
-    const result = await query(`
+    const periodHours = q.period === "24h" ? 24 : q.period === "7d" ? 24 * 7 : null;
+    const filterSql = `
+      cv.tenant_id=$1 AND cv.status=$2
+      AND ($3::uuid IS NULL OR cv.business_id=$3)
+      AND ($4::uuid IS NULL OR cv.channel_account_id=$4)
+      AND ($5::text IS NULL OR cv.mode=$5)
+      AND ($6::uuid[] IS NULL OR cv.business_id=ANY($6::uuid[]))
+      AND ($7::int IS NULL OR cv.last_message_at >= now() - ($7::int * interval '1 hour'))
+    `;
+    const values = [tenantId, q.status, q.businessId ?? null, q.channelId ?? null, q.mode ?? null, scope, periodHours];
+    const [result, count] = await Promise.all([
+      query(`
       SELECT cv.*,ct.external_contact_id,ct.display_name,ca.platform,ca.name AS channel_name,b.name AS business_name,
         EXISTS(SELECT 1 FROM training_sessions ts WHERE ts.channel_account_id=cv.channel_account_id AND ts.status='open') AS training_active,
         (SELECT m.text_content FROM messages m WHERE m.conversation_id=cv.id AND m.tenant_id=cv.tenant_id ORDER BY m.created_at DESC LIMIT 1) AS last_message_text,
@@ -25,14 +37,16 @@ export async function conversationRoutes(app: FastifyInstance) {
       JOIN contacts ct ON ct.id=cv.contact_id
       JOIN channel_accounts ca ON ca.id=cv.channel_account_id
       JOIN businesses b ON b.id=cv.business_id
-      WHERE cv.tenant_id=$1 AND cv.status=$2
-        AND ($3::uuid IS NULL OR cv.business_id=$3)
-        AND ($4::uuid IS NULL OR cv.channel_account_id=$4)
-        AND ($5::text IS NULL OR cv.mode=$5)
-        AND ($6::uuid[] IS NULL OR cv.business_id=ANY($6::uuid[]))
-      ORDER BY cv.last_message_at DESC NULLS LAST LIMIT $7 OFFSET $8
-    `, [tenantId, q.status, q.businessId ?? null, q.channelId ?? null, q.mode ?? null, scope, q.limit, q.offset]);
-    reply.send({ conversations: result.rows, limit: q.limit, offset: q.offset });
+      WHERE ${filterSql}
+      ORDER BY cv.last_message_at DESC NULLS LAST,cv.id DESC LIMIT $8 OFFSET $9
+      `, [...values, q.limit, q.offset]),
+      query<{ total: number }>(`
+        SELECT count(*)::int AS total
+        FROM conversations cv
+        WHERE ${filterSql}
+      `, values),
+    ]);
+    reply.send({ conversations: result.rows, total: count.rows[0]?.total ?? 0, limit: q.limit, offset: q.offset });
   });
 
   app.get("/v1/tenants/:tenantId/conversations/:conversationId", async (request, reply) => {

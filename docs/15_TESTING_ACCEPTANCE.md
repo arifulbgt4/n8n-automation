@@ -77,6 +77,9 @@ Must prove:
 
 ## 6. Conversation/HUMAN tests
 
+- inbox channel and activity-window filters apply on the server and return the
+  matching tenant-scoped total; page navigation preserves both filters and uses
+  stable ordering when conversations share a last-message timestamp.
 - AI mode replies normally.
 - staff takeover prevents new AI delivery.
 - pending AI output suppressed after takeover.
